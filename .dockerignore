@@ -1,0 +1,47 @@
+# ─── Entornos virtuales ───────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# ─── Secretos y configuración local ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+
+# ─── Uploads / archivos generados en runtime ─────────────────────────────────
+# Los uploads se montan como volumen Docker, no van en la imagen
+app/static/uploads/*
+!app/static/uploads/.gitkeep
+
+# ─── Spark — JARs descargados en runtime (Ivy cache) ─────────────────────────
+.ivy2/
+.m2/
+derby.log
+metastore_db/
+
+# ─── Git y editor ─────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# ─── Archivos de testing y CI ─────────────────────────────────────────────────
+tests/
+*.test.py
+htmlcov/
+.coverage
+
+# ─── Documentación y scripts de desarrollo ───────────────────────────────────
+reactivar_gym.py
+spark/DB/
+
+# ─── README y docs (no necesarios en la imagen) ──────────────────────────────
+README.md
+*.md
