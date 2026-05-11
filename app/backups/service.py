@@ -235,12 +235,11 @@ def run_backup(job_id: str, backup_type: str, app):
             path = ensure_dirs(backup_type)
             db = get_db()
 
-            # Construir URI base para MongoDump
-            db_user = os.getenv("MONGO_USER")
-            db_pass = os.getenv("MONGO_PASSWORD")
-            db_cluster = os.getenv("MONGO_CLUSTER")
-            db_name = os.getenv("MONGO_DB")
-            mongo_uri = f"mongodb+srv://{db_user}:{db_pass}@{db_cluster}/"
+            # URI de MongoDB leída de MONGO_URI (misma fuente que mongo.py y spark_config.py)
+            # NOTA: mongodump debe estar disponible en el contenedor.
+            # Para instalar: apt-get install -y mongodb-database-tools (ver Dockerfile)
+            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongo:27017/gymdb")
+            db_name = os.getenv("MONGO_DB", "gymdb")
 
             archive = None
             json_file = None

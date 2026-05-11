@@ -1,8 +1,10 @@
 from flask import Blueprint, jsonify, request, current_app, send_file
+from flask_jwt_extended import jwt_required
 from datetime import datetime, timedelta
 import uuid
 import threading
 import os
+
 from app.backups.service import (
     backup_state,
     run_backup,
@@ -10,17 +12,18 @@ from app.backups.service import (
     load_history,
     save_history
 )
-
-# Cambiamos el nombre de la función a uno más genérico
-from app.backups.restore_service import restore_backup_file 
+from app.backups.restore_service import restore_backup_file
+from app.utils.security import require_role
 
 backups_bp = Blueprint("backups", __name__, url_prefix="/api/backups")
 
 
 @backups_bp.route("/dashboard-summary", methods=["GET"])
+@jwt_required()
+@require_role("Administrador")
 def dashboard_summary():
     history = load_history()
-    
+
     response = {
         "system_status": "OK" if not backup_state["is_running"] else "PENDIENTE",
         "last_backup": (
@@ -46,12 +49,16 @@ def dashboard_summary():
 
 
 @backups_bp.route("/history", methods=["GET"])
+@jwt_required()
+@require_role("Administrador")
 def backup_history():
     history = load_history()
     return jsonify(history), 200
 
 
 @backups_bp.route("/trigger", methods=["POST"])
+@jwt_required()
+@require_role("Administrador")
 def trigger_backup():
     if backup_state["is_running"]:
         return jsonify({
@@ -62,13 +69,13 @@ def trigger_backup():
 
     data = request.get_json() or {}
     backup_type = data.get("type", "incremental")
-    
+
     valid_types = ["full", "differential", "incremental"]
     if backup_type not in valid_types:
         return jsonify({
             "error": f"Tipo de backup inválido. Use: {', '.join(valid_types)}"
         }), 400
-    
+
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     app_instance = current_app._get_current_object()
 
@@ -87,14 +94,16 @@ def trigger_backup():
 
 
 @backups_bp.route("/status", methods=["GET"])
+@jwt_required()
+@require_role("Administrador")
 def backup_status():
     response = {
         "is_running": backup_state["is_running"],
         "progress_percentage": backup_state["progress_percentage"],
         "current_step": backup_state["current_step"],
         "last_backup": (
-            backup_state["last_backup"].isoformat() 
-            if backup_state["last_backup"] 
+            backup_state["last_backup"].isoformat()
+            if backup_state["last_backup"]
             else None
         ),
         "files": {}
@@ -110,7 +119,12 @@ def backup_status():
 
 
 @backups_bp.route("/download/<filename>", methods=["GET"])
+@jwt_required()
+@require_role("Administrador")
 def download_backup(filename):
+    # Sanitizar el nombre de archivo para evitar path traversal
+    filename = os.path.basename(filename)
+
     for root, dirs, files in os.walk(BACKUP_DIR):
         if filename in files:
             file_path = os.path.join(root, filename)
@@ -120,6 +134,8 @@ def download_backup(filename):
 
 
 @backups_bp.route("/restore", methods=["POST"])
+@jwt_required()
+@require_role("Administrador")
 def restore_backup():
     data = request.get_json()
 
@@ -129,7 +145,6 @@ def restore_backup():
     raw_filename = data["filename"]
     filename = os.path.basename(raw_filename)
 
-    # Buscar el archivo (Ahora aceptamos .archive para Full y .json para Incrementales)
     file_path = None
     for root, _, files in os.walk(BACKUP_DIR):
         if filename in files and (filename.endswith(".archive") or filename.endswith(".json")):
@@ -137,14 +152,11 @@ def restore_backup():
             break
 
     if not file_path:
-        print(f"DEBUG: Buscaba '{filename}' en '{BACKUP_DIR}' y no lo encontré.")
         return jsonify({"error": "Backup no encontrado o formato inválido"}), 404
 
     try:
-        # 1. Ejecutar la restauración usando nuestra nueva función
         restore_backup_file(file_path)
 
-        # 2. Guardar en el historial que se hizo una restauración
         save_history({
             "date": datetime.utcnow().isoformat(),
             "type": "restore",
@@ -158,7 +170,7 @@ def restore_backup():
         }), 200
 
     except Exception as e:
-        print(f"Error crítico restaurando backup: {e}")
+        current_app.logger.error(f"Error crítico restaurando backup: {e}")
         return jsonify({
             "error": "Error al restaurar",
             "detail": str(e)
@@ -166,16 +178,18 @@ def restore_backup():
 
 
 @backups_bp.route("/test-email", methods=["GET"])
+@jwt_required()
+@require_role("Administrador")
 def test_email():
     from flask_mail import Message
     from app.extensions import mail
-    
+
     try:
         msg = Message(
             subject="Prueba de Configuración - Sistema de Backups",
             sender=current_app.config.get("MAIL_USERNAME"),
             recipients=[current_app.config.get("MAIL_RECIPIENT") or current_app.config.get("MAIL_USERNAME")],
-            body="Si recibes este correo, la configuración de email está funcionando correctamente con MongoDB."
+            body="Si recibes este correo, la configuración de email está funcionando correctamente."
         )
         mail.send(msg)
         return jsonify({"message": "Correo enviado con éxito"}), 200
