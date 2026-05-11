@@ -30,9 +30,19 @@ RUN pip install --upgrade pip && \
 FROM python:3.12-slim AS runtime
 
 # Java 17 JRE — requerido por PySpark (Spark corre en la JVM)
-# Se usa -headless para excluir componentes de GUI (~200 MB menos)
+# mongodb-database-tools — provee mongodump/mongorestore para backups tipo "full"
+# Se instala desde el repositorio oficial de MongoDB (no está en repos Debian base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        gnupg \
+        curl \
         openjdk-17-jre-headless \
+    && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
+       | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg \
+    && echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
+       https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" \
+       > /etc/apt/sources.list.d/mongodb-org-7.0.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        mongodb-database-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Variables de entorno para Java y Python

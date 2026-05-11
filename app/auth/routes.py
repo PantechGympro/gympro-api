@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token
 from bson.objectid import ObjectId
 from app.mongo import get_db
+from app.extensions import limiter
 
 # Importamos los nuevos modelos DAO
 from app.models.user import User
@@ -12,6 +13,7 @@ from app.models.miembro_membresia import MiembroMembresia
 auth_bp = Blueprint("auth", __name__)
 
 @auth_bp.route("/login", methods=["POST"])
+@limiter.limit("5 per minute; 30 per hour")
 def login():
     data = request.get_json()
 
@@ -114,6 +116,7 @@ def login():
     }), 200
 
 @auth_bp.route("/register", methods=["POST"])
+@limiter.limit("3 per minute; 10 per hour")
 def register():
     data = request.get_json()
     db = get_db()
