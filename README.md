@@ -240,14 +240,40 @@ api/
 **`docker: command not found` en WSL**
 → Seguir la guía de instalación de Docker de arriba.
 
+**`error getting credentials - exec: "docker-credential-desktop.exe": executable file not found`**
+
+Ocurre cuando Docker Desktop estuvo instalado en Windows anteriormente y dejó su credential helper configurado. El archivo `~/.docker/config.json` apunta a un ejecutable `.exe` que WSL no puede encontrar.
+
+```bash
+# Ver qué credential store tiene configurado
+cat ~/.docker/config.json
+# Salida típica del problema: { "credsStore": "desktop.exe" }
+
+# Solución: reemplazar con el credential store nativo de Linux
+cat > ~/.docker/config.json << 'EOF'
+{
+  "credStore": ""
+}
+EOF
+
+# Verificar que Docker funciona correctamente
+docker run hello-world
+# Debe imprimir: "Hello from Docker!"
+```
+
 **`permission denied` al correr docker sin sudo**
 → `sudo usermod -aG docker $USER && newgrp docker`
 
 **`Cannot connect to the Docker daemon`**
 → `sudo service docker start`
 
+> Tip: para que Docker arranque automáticamente al abrir WSL, agrega `sudo service docker start` a tu `~/.bashrc`:
+> ```bash
+> echo 'sudo service docker start 2>/dev/null' >> ~/.bashrc
+> ```
+
 **La API responde con error de MongoDB**
-→ Verificar que `MONGO_USER`, `MONGO_PASSWORD` y `MONGO_CLUSTER` en `.env` son correctos. Confirmar que tu IP está en la whitelist de MongoDB Atlas.
+→ Verificar que `MONGO_USER`, `MONGO_PASSWORD` y `MONGO_CLUSTER` en `.env` son correctos. Confirmar que tu IP está en la whitelist de MongoDB Atlas (Network Access → Add IP Address).
 
 **`ModuleNotFoundError` al iniciar**
 → El `requirements.txt` cambió. Reconstruir: `docker compose up --build api -d`
