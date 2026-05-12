@@ -8,7 +8,6 @@ Flask==3.1.0
 flask-jwt-extended==4.7.1
 flask-mail==0.10.0
 flask-cors==5.0.0
-# NOTE: flask-sqlalchemy se eliminará en Sprint 2 al completar migración a MongoDB
 flask-sqlalchemy==3.1.1
 
 # ── WSGI server (producción) ──────────────────────────────────────────────────
@@ -21,6 +20,10 @@ redis==5.2.1
 # ── Base de datos ─────────────────────────────────────────────────────────────
 pymongo==4.10.1
 dnspython==2.7.0
+
+# ── PostgreSQL (Sprint 2) ─────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
 
 # ── Analytics / Big Data ──────────────────────────────────────────────────────
 pyspark>=3.5.1

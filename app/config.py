@@ -10,17 +10,21 @@ class Config:
     # Gunicorn ignora esta variable, pero la dejamos explícita como salvaguarda.
     DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
 
-    # ── LEGACY — SQLAlchemy / MySQL (se elimina en Sprint 2) ─────────────────
-    # El sistema ya usa MongoDB vía PyMongo; SQLAlchemy quedó de la versión original.
-    # La URI se construye aquí para evitar que extensions.py explote al importar,
-    # pero nunca se ejecuta ninguna query real contra esta base de datos.
-    SQLALCHEMY_DATABASE_URI = (
-        f"mysql+pymysql://{os.getenv('DB_USER', 'legacy')}:"
-        f"{os.getenv('DB_PASSWORD', 'legacy')}@"
-        f"{os.getenv('DB_HOST', 'localhost')}/"
-        f"{os.getenv('DB_NAME', 'gymdb')}"
+    # ── PostgreSQL (Sprint 2 — plataforma y finanzas) ────────────────────────
+    # Roles, Gimnasios, Usuarios y entidades financieras viven aquí.
+    # En docker-compose este valor se sobreescribe automáticamente desde la
+    # variable POSTGRES_URI inyectada por el servicio postgres.
+    SQLALCHEMY_DATABASE_URI = os.getenv(
+        "POSTGRES_URI",
+        "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,       # verifica la conexión antes de usarla
+        "pool_recycle": 300,         # recicla conexiones cada 5 minutos
+        "pool_size": 5,
+        "max_overflow": 10,
+    }
 
     # ── Email ─────────────────────────────────────────────────────────────────
     MAIL_SERVER        = os.getenv("MAIL_SERVER", "smtp.gmail.com")
