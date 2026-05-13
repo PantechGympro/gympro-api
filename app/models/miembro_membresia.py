@@ -4,7 +4,7 @@ from app.mongo import get_db
 class MiembroMembresia:
     collection = "miembro_membresia"
 
-    def __init__(self, id_miembro, id_membresia, fecha_inicio=None, fecha_fin=None, estado=None, _id=None):
+    def __init__(self, id_miembro, id_membresia, fecha_inicio=None, fecha_fin=None, estado=None, _id=None, **kwargs):
         self._id = _id
         self.id_miembro = ObjectId(id_miembro) if isinstance(id_miembro, str) else id_miembro
         self.id_membresia = ObjectId(id_membresia) if isinstance(id_membresia, str) else id_membresia

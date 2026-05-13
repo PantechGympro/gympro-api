@@ -33,7 +33,9 @@ auth_bp = Blueprint("auth", __name__)
 def _build_token_pg(usuario: UsuarioPG) -> dict:
     """Construye el payload JWT para un usuario de PostgreSQL."""
     rol_nombre = usuario.rol.nombre if usuario.rol else "Desconocido"
-    plan       = usuario.gimnasio.plan.value if usuario.gimnasio else "basico"
+    # plan es str con PGEnum(create_type=False); con db.Enum(PlanEnum) sería .value
+    _plan = usuario.gimnasio.plan if usuario.gimnasio else "basico"
+    plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
 
     return {
         "identity": str(usuario.id),

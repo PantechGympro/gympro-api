@@ -12,6 +12,7 @@ Planes:
 """
 import enum
 from datetime import datetime, timezone
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from app.extensions import db
 
 
@@ -21,14 +22,19 @@ class PlanEnum(enum.Enum):
     enterprise = "enterprise"
 
 
+# create_type=False: SQLAlchemy no intenta CREATE TYPE en db.create_all().
+# El tipo lo gestiona Alembic en la migración 001. Esto hace create_all idempotente.
+_plan_enum_type = PGEnum("basico", "pro", "enterprise", name="plan_enum", create_type=False)
+
+
 class Gimnasio(db.Model):
     __tablename__ = "gimnasios"
 
     id                 = db.Column(db.Integer, primary_key=True)
     nombre             = db.Column(db.String(150), nullable=False)
     plan               = db.Column(
-        db.Enum(PlanEnum, name="plan_enum"),
-        default=PlanEnum.basico,
+        _plan_enum_type,
+        default="basico",
         nullable=False,
     )
     activo             = db.Column(db.Boolean, default=True, nullable=False)

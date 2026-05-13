@@ -5,28 +5,37 @@ from app.mongo import get_db
 class Pago:
     collection = "pagos"
 
-    def __init__(self, id_miembro, monto, metodo_pago, concepto, id_entrenador=None, fecha_pago=None, _id=None):
+    def __init__(self, id_miembro, monto, metodo_pago, concepto,
+                 id_entrenador=None, fecha_pago=None, _id=None, **kwargs):
+        # **kwargs absorbe campos extra del documento Mongo (id_gimnasio, estado, referencia, etc.)
         self._id = _id
-        self.id_miembro = ObjectId(id_miembro) if isinstance(id_miembro, str) else id_miembro
+        self.id_miembro    = ObjectId(id_miembro) if isinstance(id_miembro, str) else id_miembro
         self.id_entrenador = ObjectId(id_entrenador) if isinstance(id_entrenador, str) and id_entrenador else id_entrenador
-        self.monto = float(monto)
-        self.metodo_pago = metodo_pago
-        self.concepto = concepto
-        self.fecha_pago = fecha_pago or datetime.now(timezone.utc)
+        self.monto         = float(monto)
+        self.metodo_pago   = metodo_pago
+        self.concepto      = concepto
+        self.fecha_pago    = fecha_pago or datetime.now(timezone.utc)
+        # Campos opcionales del Sprint 2 (multi-tenant + seed)
+        self.id_gimnasio   = kwargs.get("id_gimnasio")
+        self.estado        = kwargs.get("estado", "Pagado")
+        self.referencia    = kwargs.get("referencia")
 
     def to_dict(self):
         db = get_db()
         nombre_mostrar = "Desconocido"
 
-        # Buscar el nombre del miembro simulando la relación SQLAlchemy
+        # Buscar el nombre del miembro — soporta estructura legacy (id_usuario Mongo)
+        # y estructura Sprint 2 (nombre directo en el doc del miembro)
         if self.id_miembro:
             miembro_doc = db.miembros.find_one({"_id": self.id_miembro})
-            if miembro_doc and "id_usuario" in miembro_doc:
-                usuario_doc = db.usuarios.find_one({"_id": miembro_doc["id_usuario"]})
-                if usuario_doc and "nombre" in usuario_doc:
-                    nombre_mostrar = usuario_doc["nombre"]
-                else:
-                    nombre_mostrar = "Miembro sin usuario"
+            if miembro_doc:
+                if "nombre" in miembro_doc:
+                    # Sprint 2: nombre desnormalizado en el doc del miembro
+                    nombre_mostrar = miembro_doc["nombre"]
+                elif "id_usuario" in miembro_doc:
+                    # Legacy: lookup a colección usuarios de Mongo
+                    usuario_doc = db.usuarios.find_one({"_id": miembro_doc["id_usuario"]})
+                    nombre_mostrar = usuario_doc.get("nombre", "Miembro sin usuario") if usuario_doc else "Miembro sin usuario"
 
         return {
             "id_miembro": str(self.id_miembro) if self.id_miembro else None,

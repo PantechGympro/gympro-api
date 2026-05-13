@@ -5,7 +5,7 @@ from app.mongo import get_db
 class Sesion:
     collection = "sesiones"
 
-    def __init__(self, id_entrenador, id_miembro=None, fecha=None, hora_inicio=None,
+    def __init__(self, id_entrenador=None, id_miembro=None, fecha=None, hora_inicio=None,
                  duracion_minutos=60, tipo="Personal", ubicacion=None, estado="scheduled",
                  nombre_sesion=None, notas=None, num_ejercicios=0, asistencia=False,
                  fecha_creacion=None, fecha_actualizacion=None, _id=None, **kwargs):

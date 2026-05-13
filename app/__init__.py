@@ -1,7 +1,7 @@
 from flask import Flask
 import os
 from .config import Config
-from .extensions import db, jwt, mail, limiter
+from .extensions import db, migrate, jwt, mail, limiter
 from .utils.tenant import init_tenant_middleware
 
 # ── Blueprints ────────────────────────────────────────────────────────────────
@@ -30,7 +30,13 @@ def create_app():
     app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 
     # ── Extensiones ───────────────────────────────────────────────────────────
+    # Importar modelos PG antes de migrate.init_app para que detecte el metadata
+    from app.models.pg.rol      import Rol       # noqa: F401
+    from app.models.pg.gimnasio import Gimnasio  # noqa: F401
+    from app.models.pg.usuario  import Usuario   # noqa: F401
+
     db.init_app(app)
+    migrate.init_app(app, db, directory="migrations")
     jwt.init_app(app)
     mail.init_app(app)
     limiter.init_app(app)
@@ -63,14 +69,5 @@ def create_app():
     app.register_blueprint(spark_regresion_bp)
     app.register_blueprint(user_routines_bp,       url_prefix="/api/user")
     app.register_blueprint(miembro_membresias_bp,  url_prefix="/api")
-
-    # ── Crear tablas PG en dev si no existen ─────────────────────────────────
-    # En producción, usar Alembic: `alembic upgrade head`
-    # Este bloque es solo para desarrollo local sin correr alembic manualmente.
-    if os.getenv("FLASK_DEBUG", "0") == "1":
-        # Importar modelos para que SQLAlchemy los registre en metadata
-        from app.models.pg import Rol, Gimnasio, Usuario  # noqa: F401
-        with app.app_context():
-            db.create_all()
 
     return app

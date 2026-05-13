@@ -223,6 +223,8 @@ def mapreduce_analytics():
         _save_cached_result(payload)
         return jsonify(payload), 200
 
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
         import traceback
         traceback.print_exc()

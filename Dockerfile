@@ -64,22 +64,13 @@ COPY --from=builder /venv /venv
 # Copiar código fuente (el .dockerignore excluye lo que no debe ir)
 COPY --chown=gymuser:gymuser . .
 
+# Dar permisos de ejecución al entrypoint
+RUN chmod +x /app/entrypoint.sh
+
 USER gymuser
 
 EXPOSE 5000
 
-# Gunicorn en modo producción:
-#   --workers 4     → 4 procesos síncronos (regla: 2*CPU+1, ajustar en EC2)
-#   --timeout 120   → margen para endpoints Spark (pueden tardar)
-#   --access-logfile - → logs a stdout (capturados por Docker)
-#   wsgi:app        → entry point en wsgi.py
-CMD ["/venv/bin/gunicorn", \
-     "--bind", "0.0.0.0:5000", \
-     "--workers", "4", \
-     "--worker-class", "sync", \
-     "--timeout", "120", \
-     "--keep-alive", "5", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
-     "--log-level", "info", \
-     "wsgi:app"]
+# entrypoint.sh: corre `flask db upgrade` (migraciones Alembic) y luego gunicorn.
+# Esto garantiza que tablas y tipos PG existan antes de aceptar tráfico.
+CMD ["/app/entrypoint.sh"]

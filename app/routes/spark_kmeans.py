@@ -262,6 +262,28 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20, seed: int = 42):
     )
 
 
+def _build_payload(k: int, max_iter: int, resumen: list, asignaciones: list,
+                   centroides: list, silhouette: float) -> dict:
+    """Construye el objeto de respuesta estándar para los endpoints de K-Means."""
+    from datetime import datetime
+    return {
+        "algoritmo":   "K-Means",
+        "descripcion": f"Clustering de miembros en {k} grupos por composición corporal",
+        "parametros":  {"k": k, "max_iter": max_iter},
+        "silhouette":  silhouette,
+        "centroides":  centroides,
+        "resumen_clusters": [
+            {
+                **row,
+                "etiqueta": CLUSTER_LABELS.get(row["cluster"], f"Grupo {row['cluster']}")
+            }
+            for row in resumen
+        ],
+        "asignaciones":  asignaciones,
+        "ejecutado_en":  datetime.now().isoformat(),
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ENDPOINTS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -302,6 +324,8 @@ def kmeans_analytics():
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
         import traceback
         traceback.print_exc()

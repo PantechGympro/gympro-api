@@ -432,6 +432,8 @@ def debug_cadena_ids(id_entrada: str):
         resultado["diagnostico"]               = diagnostico
         return jsonify(resultado), 200
 
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
         import traceback
         traceback.print_exc()

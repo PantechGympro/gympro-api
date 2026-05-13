@@ -8,7 +8,7 @@ class ProgresoFisico:
     def __init__(self, id_miembro, peso=None, bmi=None, grasa_corporal=None, masa_muscular=None,
                  agua_corporal=None, masa_osea=None, cintura=None, cadera=None, pecho=None,
                  brazo_derecho=None, brazo_izquierdo=None, muslo_derecho=None, muslo_izquierdo=None,
-                 pantorrilla=None, notas=None, fecha_registro=None, _id=None):
+                 pantorrilla=None, notas=None, fecha_registro=None, _id=None, **kwargs):
         
         self._id = _id
         self.id_miembro = ObjectId(id_miembro) if isinstance(id_miembro, str) else id_miembro

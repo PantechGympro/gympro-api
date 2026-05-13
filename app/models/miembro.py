@@ -4,13 +4,19 @@ from app.mongo import get_db
 class Miembro:
     collection = "miembros"
 
-    def __init__(self, id_usuario, telefono=None, fecha_nacimiento=None, sexo=None,
+    def __init__(self, id_usuario=None, telefono=None, fecha_nacimiento=None, sexo=None,
                  peso_inicial=None, estatura=None, fecha_registro=None, estado="Activo",
                  foto_perfil=None, id_entrenador=None, objetivo=None, peso_objetivo=None,
                  grasa_objetivo=None, masa_muscular_objetivo=None, fecha_asignacion=None,
-                 ultima_sesion=None, _id=None):
+                 ultima_sesion=None, _id=None, **kwargs):
+        # **kwargs absorbe campos Sprint 2: id_usuario_pg, id_gimnasio_pg, nombre, email, etc.
         self._id = _id
         self.id_usuario = ObjectId(id_usuario) if isinstance(id_usuario, str) else id_usuario
+        # Sprint 2: referencia al usuario PG (int) y datos desnormalizados
+        self.id_usuario_pg  = kwargs.get("id_usuario_pg")
+        self.id_gimnasio_pg = kwargs.get("id_gimnasio_pg")
+        self.nombre         = kwargs.get("nombre")
+        self.email          = kwargs.get("email")
         self.telefono = telefono
         self.fecha_nacimiento = fecha_nacimiento
         self.sexo = sexo
