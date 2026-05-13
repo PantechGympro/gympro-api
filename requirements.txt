@@ -27,8 +27,10 @@ psycopg2-binary>=2.9.9
 alembic>=1.13.0
 
 # ── Analytics / Big Data ──────────────────────────────────────────────────────
-pyspark>=3.5.1
+pyspark==3.5.3
 pandas==2.2.3
+# setuptools provee distutils (removido en Python 3.12 pero requerido por pyspark.ml.image)
+setuptools>=70.0
 
 # ── Utilidades ────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1

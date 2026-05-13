@@ -137,8 +137,8 @@ def _regresion_global(spark):
         .select(
             F.col("id_miembro").cast("string").alias("id_miembro"),
             F.col("peso").cast("double"),
-            F.col("bmi").cast("double"),
-            F.col("cintura").cast("double"),
+            F.col("imc").cast("double").alias("bmi"),        # seed usa "imc", no "bmi"
+            F.lit(None).cast("double").alias("cintura"),     # campo no generado en seed → se imputa con media=80.0
             F.col("grasa_corporal").cast("double"),
             F.col("fecha_registro")
         )

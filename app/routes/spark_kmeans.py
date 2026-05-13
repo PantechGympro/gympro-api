@@ -117,7 +117,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20, seed: int = 42):
         .select(
             F.col("id_miembro").alias("id_miembro_prog"),
             F.col("peso").cast("double"),
-            F.col("bmi").cast("double"),
+            F.col("imc").cast("double").alias("bmi"),   # seed usa "imc", no "bmi"
             F.col("grasa_corporal").cast("double"),
             F.col("masa_muscular").cast("double"),
             F.col("fecha_registro")

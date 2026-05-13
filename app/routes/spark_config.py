@@ -66,6 +66,28 @@ def crear_spark_session():
 
     from pyspark.sql import SparkSession  # import lazy — no falla al arrancar Flask
 
+    # Java 17 requiere --add-opens para que MLlib (y la serialización interna
+    # de Spark) pueda acceder a módulos del JVM que están encapsulados por defecto.
+    # Sin estos flags, operaciones de MLlib (KMeans, LinearRegression, etc.)
+    # fallan con IllegalAccessException o similares incluso cuando el DataFrame
+    # básico funciona correctamente.
+    _java17_opens = " ".join([
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
+        "--add-opens=java.base/java.net=ALL-UNNAMED",
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        "--add-opens=java.base/sun.nio.cs=ALL-UNNAMED",
+        "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+        "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+        "--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED",
+    ])
+
     spark = (
         SparkSession.builder
         .appName("GymPro-Analytics")
@@ -77,6 +99,8 @@ def crear_spark_session():
             # PostgreSQL JDBC driver (entidades financieras y de plataforma)
             "org.postgresql:postgresql:42.7.3",
         )
+        .config("spark.driver.extraJavaOptions",   _java17_opens)
+        .config("spark.executor.extraJavaOptions", _java17_opens)
         .config("spark.mongodb.read.connection.uri",  MONGO_URI)
         .config("spark.mongodb.write.connection.uri", MONGO_URI)
         .config("spark.mongodb.read.database",  MONGO_DB)
@@ -118,6 +142,16 @@ def leer_tabla_pg(spark, tabla: str, query: str = None):
         reader = reader.option("dbtable", tabla)
 
     return reader.load()
+
+
+def get_mongo_db():
+    """
+    Retorna la base de datos MongoDB usando pymongo (conexión directa, sin Spark).
+    Se usa exclusivamente para leer/escribir la caché en la colección analytics_cache.
+    """
+    from pymongo import MongoClient
+    client = MongoClient(MONGO_URI)
+    return client[MONGO_DB]
 
 
 def leer_coleccion(spark, collection: str):
