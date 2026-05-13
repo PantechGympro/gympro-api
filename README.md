@@ -111,12 +111,32 @@ SPARK_ENABLED=false
 
 ---
 
+## Arranque diario (después de reiniciar la laptop)
+
+Desde la **raíz del proyecto** (`SistemaGYM/`):
+
+```bash
+# 1. Asegurarse de que el servicio Docker está corriendo (solo WSL)
+sudo service docker start
+
+# 2. Levantar todos los contenedores (sin reconstruir — usa las imágenes ya cacheadas)
+cd /mnt/c/Proyectos/SistemaGYM
+docker compose up -d
+
+# 3. Verificar que los 5 servicios están healthy
+docker compose ps
+```
+
+Los contenedores arrancan en ~15-20 segundos. La app estará disponible en http://localhost:3000.
+
+---
+
 ## Levantar con Docker Compose (recomendado)
 
 Desde la **raíz del proyecto** (`SistemaGYM/`):
 
 ```bash
-# Primera vez: construir imágenes y levantar
+# Primera vez o después de cambios en código/dependencias: construir y levantar
 docker compose up --build -d
 
 # Ver logs de la API en tiempo real
@@ -125,20 +145,24 @@ docker compose logs -f api
 # Ver logs de todos los servicios
 docker compose logs -f
 
-# Detener todos los servicios
+# Detener todos los servicios (datos persistidos en volúmenes)
 docker compose down
 
-# Detener y eliminar volúmenes (limpieza total)
+# Detener y eliminar volúmenes (limpieza total — borra todos los datos)
 docker compose down -v
 ```
 
 Servicios disponibles después de `docker compose up`:
 
-| Servicio | URL | Descripción |
+| Servicio | URL / Puerto | Descripción |
 |---|---|---|
-| API (Flask) | http://localhost:5000 | API REST |
 | Web (React) | http://localhost:3000 | Frontend |
-| Redis | localhost:6379 | Cache interno |
+| API (Flask) | interno — proxeado por nginx | API REST |
+| PostgreSQL | localhost:5432 | Roles, gimnasios, usuarios |
+| MongoDB | localhost:27018 | Miembros, pagos, analíticas |
+| Redis | interno | Cache y rate limiting |
+
+> **Nota:** MongoDB expone el puerto `27018` (no 27017) para evitar conflicto con instalaciones locales. En MongoDB Compass usa `mongodb://localhost:27018`.
 
 ---
 
