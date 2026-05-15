@@ -1,19 +1,15 @@
 """
-spark_config.py — Configuración y factory de SparkSession.
+spark_config.py — Configuración, factory y utilidades compartidas de Spark.
 
 IMPORTANTE: Este módulo NO ejecuta código al importarse.
-La SparkSession se crea bajo demanda llamando a crear_spark_session().
+La SparkSession se crea bajo demanda con get_spark().
 
-Para habilitar Spark, definir la variable de entorno:
-    SPARK_ENABLED=true
-
-Si SPARK_ENABLED no está definida o es "false", los endpoints de Spark
-retornarán 503 en lugar de matar el proceso Flask.
-
-La URI de MongoDB se lee de MONGO_URI (igual que mongo.py) para mantener
-una sola fuente de verdad de la conexión.
+Variables de entorno relevantes:
+    SPARK_ENABLED=true/false         — habilita los endpoints de análisis
+    ANALYTICS_CACHE_TTL_HOURS=24     — tiempo de vida del caché de analíticas (horas)
 """
 import os
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +18,9 @@ MONGO_URI     = os.getenv("MONGO_URI", "mongodb://mongo:27017/gymdb")
 MONGO_DB      = os.getenv("MONGO_DB", "gymdb")
 POSTGRES_URI  = os.getenv("POSTGRES_URI", "postgresql+psycopg2://gymuser:gympassword@postgres:5432/gymprodb")
 SPARK_ENABLED = os.getenv("SPARK_ENABLED", "false").lower() == "true"
+
+# TTL del caché de analíticas: por defecto 24 h, configurable por env
+CACHE_TTL_HOURS = int(os.getenv("ANALYTICS_CACHE_TTL_HOURS", "24"))
 
 # URL JDBC para Spark (psycopg2 URI → JDBC URI)
 # Spark usa jdbc:postgresql://host:port/db, no el prefijo SQLAlchemy
@@ -144,14 +143,81 @@ def leer_tabla_pg(spark, tabla: str, query: str = None):
     return reader.load()
 
 
+# ── Singleton SparkSession ────────────────────────────────────────────────────
+
+_spark_instance = None
+
+
+def get_spark():
+    """
+    Retorna la SparkSession singleton. La crea en el primer llamado.
+    Todos los módulos de analíticas deben usar ESTA función en lugar de
+    tener su propio _spark_instance global, para garantizar una sola JVM.
+    """
+    global _spark_instance
+    if _spark_instance is None:
+        _spark_instance = crear_spark_session()
+    return _spark_instance
+
+
+# ── Cache de analíticas con TTL ───────────────────────────────────────────────
+
+_CACHE_COLLECTION = "analytics_cache"
+
+
 def get_mongo_db():
     """
     Retorna la base de datos MongoDB usando pymongo (conexión directa, sin Spark).
-    Se usa exclusivamente para leer/escribir la caché en la colección analytics_cache.
+    Usado para caché de analíticas y consultas ligeras sin necesidad de Spark.
     """
     from pymongo import MongoClient
     client = MongoClient(MONGO_URI)
     return client[MONGO_DB]
+
+
+def cache_get(key: str, ttl_hours: int = None) -> dict | None:
+    """
+    Lee un resultado de analíticas desde MongoDB.
+    Retorna None si no existe o si superó el TTL.
+
+    Args:
+        key:       identificador único del resultado (incluye gym_id para aislamiento)
+        ttl_hours: horas de vigencia; usa ANALYTICS_CACHE_TTL_HOURS si se omite
+    """
+    ttl = ttl_hours if ttl_hours is not None else CACHE_TTL_HOURS
+    try:
+        db  = get_mongo_db()
+        doc = db[_CACHE_COLLECTION].find_one({"_id": key})
+        if not doc:
+            return None
+        cached_at = doc.get("cached_at")
+        if cached_at and (datetime.now() - cached_at) > timedelta(hours=ttl):
+            return None   # caché expirado
+        doc.pop("_id", None)
+        doc.pop("cached_at", None)
+        return doc
+    except Exception as e:
+        print(f"[cache] Error leyendo '{key}': {e}")
+        return None
+
+
+def cache_set(key: str, payload: dict) -> None:
+    """
+    Guarda (upsert) un resultado de analíticas con timestamp de escritura.
+
+    Args:
+        key:     identificador único del resultado
+        payload: diccionario con los datos a persistir
+    """
+    try:
+        db = get_mongo_db()
+        db[_CACHE_COLLECTION].replace_one(
+            {"_id": key},
+            {"_id": key, "cached_at": datetime.now(), **payload},
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"[cache] Error guardando '{key}': {e}")
 
 
 def leer_coleccion(spark, collection: str):
