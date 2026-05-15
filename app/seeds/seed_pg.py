@@ -373,7 +373,7 @@ def seed_mongo(pg_users, gimnasios):
                 "monto":         tipo_doc2["precio"],
                 "metodo_pago":   RNG.choice(METODOS_PAGO),
                 "concepto":      f"Membresía {tipo_doc2['nombre']}",
-                "fecha_pago":    str(f.date()) if hasattr(f, 'date') else str(f),
+                "fecha_pago":    f if isinstance(f, datetime) else datetime.fromisoformat(str(f)),
                 "estado":        "Pagado",
                 "referencia":    f"REF{RNG.randint(100000,999999)}",
             })
@@ -409,4 +409,4 @@ def seed():
 
 
 if __name__ == "__main__":
-    seed()
+    seed() 

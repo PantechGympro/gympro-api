@@ -10,6 +10,7 @@ from app.models.membresia import Membresia
 from app.models.miembro_membresia import MiembroMembresia
 from app.models.miembro import Miembro
 from app.utils.luhn import validar_luhn
+from app.utils.tenant import get_tenant_filter
 
 pagos_bp = Blueprint("pagos", __name__)
 
@@ -78,20 +79,23 @@ def registrar_pago():
 @jwt_required()
 def listar_pagos():
     try:
-        db = get_db()
-        page = request.args.get("page", 1, type=int)
-        per_page = 6
-        skip = (page - 1) * per_page
+        db            = get_db()
+        tenant_filter = get_tenant_filter()
+        page          = request.args.get("page", 1, type=int)
+        per_page      = 6
+        skip          = (page - 1) * per_page
 
-        total_pagos = db.pagos.count_documents({})
-        pagos_cursor = db.pagos.find({}).sort("fecha_pago", -1).skip(skip).limit(per_page)
-        
-        pages = math.ceil(total_pagos / per_page) if total_pagos > 0 else 0
-        
+        filtro = {}
+        if tenant_filter:
+            filtro["id_gimnasio"] = tenant_filter["id_gimnasio"]
+
+        total_pagos  = db.pagos.count_documents(filtro)
+        pagos_cursor = db.pagos.find(filtro).sort("fecha_pago", -1).skip(skip).limit(per_page)
+        pages        = math.ceil(total_pagos / per_page) if total_pagos > 0 else 0
+
         pagos_lista = []
         for p_data in pagos_cursor:
-            p = Pago(**p_data)
-            # Reemplazamos _id con id_pago para la salida del dict
+            p        = Pago(**p_data)
             dict_data = p.to_dict()
             dict_data["id_pago"] = str(p_data["_id"])
             pagos_lista.append(dict_data)
@@ -100,7 +104,7 @@ def listar_pagos():
             "pagos": pagos_lista,
             "total": total_pagos,
             "pages": pages,
-            "page": page
+            "page":  page,
         }), 200
     except Exception as e:
         print(f"Error listando pagos: {e}")

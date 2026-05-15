@@ -9,6 +9,7 @@ import re
 from app.mongo import get_db
 from app.models.user import User
 from app.models.miembro import Miembro
+from app.utils.tenant import get_tenant_filter
 
 miembros_bp = Blueprint("miembros", __name__)
 
@@ -23,60 +24,42 @@ def allowed_file(filename):
 @miembros_bp.route("/api/miembros", methods=["GET"])
 @jwt_required()
 def listar_miembros():
+    import math
     db = get_db()
-    page = request.args.get('page', 1, type=int)
-    per_page = 6
+    page             = request.args.get('page', 1, type=int)
+    per_page         = 6
     mostrar_inactivos = request.args.get('inactivos', 'false') == 'true'
-    search = request.args.get('search', '', type=str)
+    search           = request.args.get('search', '', type=str)
+    tenant_filter    = get_tenant_filter()
 
     estado_filtro = "Inactivo" if mostrar_inactivos else "Activo"
 
-    # En Mongo, como los datos de búsqueda (nombre, email) están en la colección "usuarios",
-    # primero buscamos los usuarios que coincidan, extraemos sus IDs, y luego filtramos miembros.
-    usuario_ids_match = []
-    
-    if search:
-        # Regex case-insensitive equivalente a ILIKE en SQL
-        regex = re.compile(f".*{search}.*", re.IGNORECASE)
-        usuarios_match = db.usuarios.find({
-            "$or": [
-                {"nombre": regex},
-                {"email": regex}
-            ]
-        }, {"_id": 1})
-        usuario_ids_match = [u["_id"] for u in usuarios_match]
-
-    # Construimos el filtro para miembros
+    # Filtro base con aislamiento de tenant.
+    # Sprint 2: el seed desnormaliza nombre, email e id_gimnasio_pg directamente
+    # en el documento de miembro, por lo que la búsqueda no requiere join con usuarios.
     filtro_miembros = {"estado": estado_filtro}
-    
-    if search:
-        # Si hubo búsqueda, solo traemos los miembros cuyos id_usuario estén en la lista de coincidencias
-        if not usuario_ids_match:
-            # Si buscaron algo y no hay usuarios, devolvemos vacío rápido
-            return jsonify({"miembros": [], "total": 0, "pages": 0, "current_page": page}), 200
-        filtro_miembros["id_usuario"] = {"$in": usuario_ids_match}
+    if tenant_filter:
+        filtro_miembros["id_gimnasio_pg"] = tenant_filter["id_gimnasio"]
 
-    # Paginación manual en Mongo
-    skip = (page - 1) * per_page
-    
+    if search:
+        regex = re.compile(re.escape(search), re.IGNORECASE)
+        filtro_miembros["$or"] = [
+            {"nombre": regex},
+            {"email":  regex},
+        ]
+
+    skip           = (page - 1) * per_page
     total_miembros = db.miembros.count_documents(filtro_miembros)
     miembros_cursor = db.miembros.find(filtro_miembros).sort("fecha_registro", -1).skip(skip).limit(per_page)
-    
-    # Calcular páginas totales
-    import math
-    pages = math.ceil(total_miembros / per_page) if total_miembros > 0 else 0
+    pages          = math.ceil(total_miembros / per_page) if total_miembros > 0 else 0
 
-    miembros_lista = []
-    for m_data in miembros_cursor:
-        m = Miembro(**m_data)
-        # Usamos el nuevo to_dict_full
-        miembros_lista.append(m.to_dict_full(include_stats=False))
+    miembros_lista = [Miembro(**m).to_dict_full(include_stats=False) for m in miembros_cursor]
 
     return jsonify({
-        "miembros": miembros_lista,
-        "total": total_miembros,
-        "pages": pages,
-        "current_page": page
+        "miembros":    miembros_lista,
+        "total":       total_miembros,
+        "pages":       pages,
+        "current_page": page,
     }), 200
 
 # ==============================================================================
