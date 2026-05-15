@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Importar modelos para que Alembic los detecte con autogenerate.
-# Agregar cada nuevo modelo aqui al crearlo.
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -26,29 +25,28 @@ from app.models.pg.usuario             import Usuario            # noqa: F401
 from app.models.pg.plan_suscripcion    import PlanSuscripcion    # noqa: F401
 from app.models.pg.suscripcion         import Suscripcion        # noqa: F401
 from app.models.pg.factura_suscripcion import FacturaSuscripcion # noqa: F401
+from app.models.pg.tipo_membresia      import TipoMembresia      # noqa: F401
+from app.models.pg.ejercicio           import Ejercicio          # noqa: F401
+from app.models.pg.tipo_clase          import TipoClase          # noqa: F401
 
 config = context.config
 
-# Sobreescribir la URL con la variable de entorno
 postgres_uri = os.getenv(
     "POSTGRES_URI",
     "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
 )
 config.set_main_option("sqlalchemy.url", postgres_uri)
 
-# Configurar logging solo si el archivo ini existe
-# (Flask-Migrate puede no proveer config_file_name en todos los casos)
 if config.config_file_name is not None:
     try:
         fileConfig(config.config_file_name)
     except FileNotFoundError:
-        pass  # Flask-Migrate gestiona la config directamente; sin logging extra
+        pass
 
 target_metadata = db.metadata
 
 
 def run_migrations_offline() -> None:
-    """Modo offline: genera SQL sin conectarse a la base de datos."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -62,7 +60,6 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Modo online: aplica las migraciones conectandose a la base de datos."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

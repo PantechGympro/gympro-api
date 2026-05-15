@@ -7,9 +7,10 @@ Genera:
     - 3 gimnasios (basico / pro / enterprise)
     - 3 planes de suscripcion + 1 suscripcion trialing por gimnasio
     - 120 usuarios: 3 admins + 9 entrenadores + 6 recepcionistas + 102 miembros
+    - TipoMembresia, Ejercicio y TipoClase por gimnasio (US14)
 
   MongoDB:
-    - 5 tipos de membresia
+    - 5 tipos de membresia (legacy, para miembro_membresia existente)
     - miembros con perfil + membresia + asistencias + progreso + sesiones + rutinas + pagos
 
 Uso:
@@ -31,6 +32,9 @@ from app.models.pg.usuario             import Usuario
 from app.models.pg.plan_suscripcion    import PlanSuscripcion
 from app.models.pg.suscripcion         import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
+from app.models.pg.tipo_membresia      import TipoMembresia
+from app.models.pg.ejercicio           import Ejercicio
+from app.models.pg.tipo_clase          import TipoClase
 from app.mongo import get_db
 
 # helpers
@@ -51,7 +55,7 @@ OBJETIVOS   = ["Perdida de peso", "Ganancia muscular", "Definicion", "Resistenci
                "Rehabilitacion", "Acondicionamiento general", "Fuerza maxima"]
 GRUPOS_MUS  = ["Pecho", "Espalda", "Piernas", "Hombros", "Biceps", "Triceps",
                "Abdomen", "Gluteos", "Pantorrillas", "Trapecio"]
-EJERCICIOS  = {
+EJERCICIOS_MAP = {
     "Pecho":       ["Press banca plano", "Press inclinado", "Aperturas", "Fondos"],
     "Espalda":     ["Jalon al pecho", "Remo con barra", "Dominadas", "Remo en maquina"],
     "Piernas":     ["Sentadilla", "Prensa", "Extension", "Curl femoral", "Peso muerto"],
@@ -63,7 +67,7 @@ EJERCICIOS  = {
     "Pantorrillas":["Elevacion de talones de pie", "Elevacion sentado"],
     "Trapecio":    ["Encogimiento", "Remo al menton"],
 }
-TIPOS_MEMBRESIA = [
+TIPOS_MEMBRESIA_MONGO = [
     {"nombre": "Basica",                "precio": 299.00,  "duracion_dias": 30,  "descripcion": "Acceso general"},
     {"nombre": "Premium",               "precio": 499.00,  "duracion_dias": 30,  "descripcion": "Acceso + clases grupales"},
     {"nombre": "Anual",                 "precio": 2999.00, "duracion_dias": 365, "descripcion": "Acceso total 12 meses"},
@@ -71,6 +75,25 @@ TIPOS_MEMBRESIA = [
     {"nombre": "Entrenamiento Personal","precio": 899.00,  "duracion_dias": 30,  "descripcion": "Acceso + 8 sesiones con entrenador"},
 ]
 METODOS_PAGO = ["Efectivo", "Tarjeta debito", "Tarjeta credito", "Transferencia", "QR"]
+
+# Catalogos PG para US14
+TIPOS_MEMBRESIA_PG = [
+    {"nombre": "Basica",                 "precio": 299.00,  "duracion_meses": 1,  "descripcion": "Acceso general al gimnasio"},
+    {"nombre": "Premium",                "precio": 499.00,  "duracion_meses": 1,  "descripcion": "Acceso + clases grupales ilimitadas"},
+    {"nombre": "Anual",                  "precio": 2999.00, "duracion_meses": 12, "descripcion": "Acceso total 12 meses con descuento"},
+    {"nombre": "Estudiante",             "precio": 199.00,  "duracion_meses": 1,  "descripcion": "Descuento 33% con credencial vigente"},
+    {"nombre": "Entrenamiento Personal", "precio": 899.00,  "duracion_meses": 1,  "descripcion": "Acceso + 8 sesiones con entrenador"},
+]
+TIPOS_CLASE_PG = [
+    {"nombre": "Spinning",    "descripcion": "Ciclismo indoor de alta intensidad",    "duracion_minutos": 45, "capacidad_max": 20},
+    {"nombre": "Yoga",        "descripcion": "Practica de posturas y respiracion",    "duracion_minutos": 60, "capacidad_max": 15},
+    {"nombre": "Crossfit",    "descripcion": "Entrenamiento funcional de alta intensidad","duracion_minutos": 60, "capacidad_max": 12},
+    {"nombre": "Zumba",       "descripcion": "Aerobics con ritmos latinos",           "duracion_minutos": 50, "capacidad_max": 25},
+    {"nombre": "Pilates",     "descripcion": "Fortalecimiento del core y flexibilidad","duracion_minutos": 55, "capacidad_max": 12},
+    {"nombre": "Boxeo",       "descripcion": "Tecnicas de boxeo y cardio",            "duracion_minutos": 60, "capacidad_max": 15},
+    {"nombre": "HIIT",        "descripcion": "Intervalos de alta intensidad",         "duracion_minutos": 40, "capacidad_max": 20},
+    {"nombre": "Funcional",   "descripcion": "Movimientos multiarticulares basicos",  "duracion_minutos": 50, "capacidad_max": 18},
+]
 
 
 def nombre_aleatorio():
@@ -89,7 +112,7 @@ def slug(nombre: str, idx: int) -> str:
     return f"{partes[0]}{idx}@gymprodev.com"
 
 
-# PostgreSQL
+# PostgreSQL base
 
 def seed_pg():
     print("PostgreSQL ===")
@@ -175,9 +198,9 @@ def seed_billing(gimnasios):
     print("\nBilling / Suscripciones ===")
 
     PLANES = [
-        {"nombre": "basico",     "precio_mensual_mxn":  49900, "max_miembros":  50,   "descripcion": "Hasta 50 miembros activos."},
-        {"nombre": "pro",        "precio_mensual_mxn": 149900, "max_miembros": 200,   "descripcion": "Hasta 200 miembros + Analytics (Spark)."},
-        {"nombre": "enterprise", "precio_mensual_mxn": 399900, "max_miembros": None,  "descripcion": "Miembros ilimitados + SLA + soporte dedicado."},
+        {"nombre": "basico",     "precio_mensual_mxn":  49900, "max_miembros":  50,  "descripcion": "Hasta 50 miembros activos."},
+        {"nombre": "pro",        "precio_mensual_mxn": 149900, "max_miembros": 200,  "descripcion": "Hasta 200 miembros + Analytics (Spark)."},
+        {"nombre": "enterprise", "precio_mensual_mxn": 399900, "max_miembros": None, "descripcion": "Miembros ilimitados + SLA + soporte dedicado."},
     ]
 
     planes_map = {}
@@ -225,6 +248,56 @@ def seed_billing(gimnasios):
     db.session.commit()
 
 
+# Catalogos PG (US14)
+
+def seed_catalogos(gimnasios):
+    print("\nCatalogos PG (US14) ===")
+
+    for gym in gimnasios:
+        print(f"\n  Gym: {gym.nombre}")
+
+        # TipoMembresia
+        for tm in TIPOS_MEMBRESIA_PG:
+            existing = TipoMembresia.query.filter_by(id_gimnasio=gym.id, nombre=tm["nombre"]).first()
+            if not existing:
+                db.session.add(TipoMembresia(id_gimnasio=gym.id, **tm))
+                print(f"    + TipoMembresia: {tm['nombre']}")
+            else:
+                print(f"    ok TipoMembresia: {tm['nombre']}")
+        db.session.flush()
+
+        # Ejercicios: 3-4 por grupo muscular
+        for grupo, nombres in EJERCICIOS_MAP.items():
+            tipo = "cardio" if grupo == "Pantorrillas" else "fuerza"
+            for nombre in nombres[:3]:
+                existing = Ejercicio.query.filter_by(id_gimnasio=gym.id, nombre=nombre).first()
+                if not existing:
+                    db.session.add(Ejercicio(
+                        id_gimnasio=gym.id,
+                        nombre=nombre,
+                        grupo_muscular=grupo,
+                        tipo=tipo,
+                        series=4,
+                        repeticiones="10-12",
+                    ))
+        ej_count = Ejercicio.query.filter_by(id_gimnasio=gym.id).count()
+        print(f"    Ejercicios: {ej_count}")
+        db.session.flush()
+
+        # TipoClase
+        for tc in TIPOS_CLASE_PG:
+            existing = TipoClase.query.filter_by(id_gimnasio=gym.id, nombre=tc["nombre"]).first()
+            if not existing:
+                db.session.add(TipoClase(id_gimnasio=gym.id, **tc))
+                print(f"    + TipoClase: {tc['nombre']}")
+            else:
+                print(f"    ok TipoClase: {tc['nombre']}")
+        db.session.flush()
+
+    db.session.commit()
+    print("\n  Catalogos PG insertados correctamente")
+
+
 # MongoDB
 
 def seed_mongo(gimnasios):
@@ -235,9 +308,9 @@ def seed_mongo(gimnasios):
     print("\nMongoDB ===")
     mdb = get_db()
 
-    print("Membresias:")
+    print("Membresias (legacy Mongo):")
     tipo_ids = []
-    for tm in TIPOS_MEMBRESIA:
+    for tm in TIPOS_MEMBRESIA_MONGO:
         existing = mdb.membresias.find_one({"nombre": tm["nombre"]})
         if not existing:
             r = mdb.membresias.insert_one(tm)
@@ -247,15 +320,12 @@ def seed_mongo(gimnasios):
             tipo_ids.append(existing["_id"])
             print(f"  ok {tm['nombre']}")
 
-    # Obtener miembros PG directamente de la BD (evita bugs de indices)
     rol_miembro = Rol.query.filter_by(nombre="Miembro").first()
     if not rol_miembro:
         print("  ERROR: rol Miembro no encontrado")
         return 0
 
-    # Construir mapa gym_id -> gym object
     gym_map = {g.id: g for g in gimnasios}
-
     miembros_pg = Usuario.query.filter_by(id_rol=rol_miembro.id).all()
     total_docs = {"miembros": 0, "asistencias": 0, "progreso": 0,
                   "sesiones": 0, "rutinas": 0, "pagos": 0, "miembro_membresia": 0}
@@ -382,7 +452,7 @@ def seed_mongo(gimnasios):
             dias_semana = ["Lunes","Martes","Miercoles","Jueves","Viernes","Sabado"]
             dias = []
             for i, grupo in enumerate(grupos):
-                ejercs = RNG.sample(EJERCICIOS[grupo], min(3, len(EJERCICIOS[grupo])))
+                ejercs = RNG.sample(EJERCICIOS_MAP[grupo], min(3, len(EJERCICIOS_MAP[grupo])))
                 dias.append({
                     "dia":            dias_semana[i % len(dias_semana)],
                     "grupo_muscular": grupo,
@@ -444,6 +514,7 @@ def seed():
     with app.app_context():
         gimnasios, roles = seed_pg()
         seed_billing(gimnasios)
+        seed_catalogos(gimnasios)
         total_mongo = seed_mongo(gimnasios)
 
         pg_total = Usuario.query.count()
