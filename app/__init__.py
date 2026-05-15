@@ -26,6 +26,10 @@ from app.routes.billing                import billing_bp
 from app.routes.billing_stripe         import billing_stripe_bp
 from app.routes.onboarding             import onboarding_bp
 from app.routes.catalogos              import catalogos_bp
+from app.routes.reports                import reports_bp
+from app.routes.spark_cancelaciones    import spark_cancelaciones_bp
+from app.routes.spark_rutinas          import spark_rutinas_bp
+from app.routes.notifications          import notifications_bp, init_scheduler
 
 
 def create_app():
@@ -78,5 +82,12 @@ def create_app():
     app.register_blueprint(billing_stripe_bp)
     app.register_blueprint(onboarding_bp)
     app.register_blueprint(catalogos_bp,           url_prefix="/api")
+    app.register_blueprint(reports_bp)
+    app.register_blueprint(spark_cancelaciones_bp)
+    app.register_blueprint(spark_rutinas_bp)
+    app.register_blueprint(notifications_bp)
+
+    # Inicializar scheduler de notificaciones (cron diario 08:00)
+    init_scheduler(app)
 
     return app
