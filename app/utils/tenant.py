@@ -37,6 +37,8 @@ _EXEMPT_PREFIXES = (
     "/api/auth/register",
     "/api/health",
     "/api/billing/webhook",
+    "/api/billing/stripe/webhook",
+    "/api/onboarding",
 )
 
 
