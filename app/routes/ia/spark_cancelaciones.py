@@ -23,7 +23,7 @@ from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import get_spark, cache_get, cache_set
 
 spark_cancelaciones_bp = Blueprint("spark_cancelaciones", __name__)
 
@@ -40,7 +40,7 @@ def _ejecutar_cancelaciones(spark, gym_id=None) -> dict:
     from pyspark.ml.classification import RandomForestClassifier
     from pyspark.ml.feature import VectorAssembler
     from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
-    from app.routes.spark_config import leer_coleccion
+    from app.routes.ia.spark_config import leer_coleccion
     from datetime import datetime, timezone
 
     ahora = datetime.now(timezone.utc)

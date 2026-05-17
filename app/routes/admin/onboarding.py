@@ -26,6 +26,7 @@ from app.models.pg.usuario             import Usuario
 from app.models.pg.plan_suscripcion    import PlanSuscripcion
 from app.models.pg.suscripcion         import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
+from app.utils.gym_types               import GYM_TYPES, get_gym_type_config, seed_default_memberships
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,21 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str) -> None:
 # ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+@onboarding_bp.route("/gym-types", methods=["GET"])
+def list_gym_types():
+    """Devuelve el catálogo de tipos de gimnasio para poblar el selector en el onboarding."""
+    tipos = [
+        {
+            "id":          key,
+            "label":       cfg["label"],
+            "description": cfg["description"],
+            "icon":        cfg["icon"],
+        }
+        for key, cfg in GYM_TYPES.items()
+    ]
+    return jsonify({"tipos": tipos}), 200
+
+
 @onboarding_bp.route("/register-gym", methods=["POST"])
 @limiter.limit("3 per hour; 10 per day")
 def register_gym():
@@ -118,9 +134,15 @@ def register_gym():
 
     gym_nombre = (gym_data.get("nombre") or "").strip()
     gym_email  = (gym_data.get("email_contacto") or "").strip().lower()
+    gym_tipo   = (gym_data.get("tipo_gimnasio") or "gimnasio_tradicional").strip()
     adm_nombre = (admin_data.get("nombre") or "").strip()
     adm_email  = (admin_data.get("email") or "").strip().lower()
     adm_pass   = admin_data.get("password", "")
+
+    # Normalizar tipo: si viene uno no reconocido, default a tradicional
+    if gym_tipo not in GYM_TYPES:
+        gym_tipo = "gimnasio_tradicional"
+    tipo_config = get_gym_type_config(gym_tipo)
 
     errores = []
     if not gym_nombre:          errores.append("gym.nombre es requerido")
@@ -161,6 +183,12 @@ def register_gym():
             activo         = True,
             email_contacto = gym_email,
             telefono       = gym_data.get("telefono", ""),
+            tipo_gimnasio  = gym_tipo,
+            configuracion  = {
+                "etiqueta_sesion": tipo_config["etiqueta_sesion"],
+                "modulos":         tipo_config["modulos"],
+                "label":           tipo_config["label"],
+            },
         )
         db.session.add(nuevo_gym)
         db.session.flush()  # obtener nuevo_gym.id
@@ -187,6 +215,9 @@ def register_gym():
         )
         db.session.add(suscripcion)
         db.session.flush()
+
+        # 3b. Sembrar TipoMembresia por defecto según tipo de gimnasio
+        seed_default_memberships(db.session, nuevo_gym.id, gym_tipo)
 
         # 4. Factura inicial pendiente
         factura = FacturaSuscripcion(

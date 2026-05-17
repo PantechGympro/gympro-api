@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import get_spark, cache_get, cache_set
 
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
 
@@ -42,7 +42,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
     from pyspark.ml.clustering import KMeans
     from pyspark.ml.feature import VectorAssembler, StandardScaler
     from pyspark.ml.evaluation import ClusteringEvaluator
-    from app.routes.spark_config import leer_coleccion
+    from app.routes.ia.spark_config import leer_coleccion
     import re as _re
 
     # 1. CARGA Y LIMPIEZA DE MIEMBROS (filtrado por gimnasio si aplica)

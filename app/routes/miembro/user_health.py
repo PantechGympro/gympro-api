@@ -1,8 +1,8 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
-from bson.objectid import ObjectId
 from app.mongo import get_db
+from app.utils.tenant import require_tenant
 
 user_health_bp = Blueprint('user_health', __name__)
 
@@ -41,11 +41,13 @@ def _calcular_imc(peso, estatura):
 
 @user_health_bp.route('/api/user/health', methods=['GET'])
 @jwt_required()
+@require_tenant
 def get_user_health():
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
 
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -158,11 +160,13 @@ def get_user_health():
 
 @user_health_bp.route('/api/user/health', methods=['POST'])
 @jwt_required()
+@require_tenant
 def update_user_health():
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
 

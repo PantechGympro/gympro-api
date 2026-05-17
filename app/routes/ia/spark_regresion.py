@@ -14,7 +14,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime, timedelta
 
-from app.routes.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import get_spark, cache_get, cache_set
 
 spark_regresion_bp = Blueprint("spark_regresion", __name__)
 
@@ -34,7 +34,7 @@ def _resolver_id_miembro_mongo(id_entrada: str):
     Devuelve el hex-id correcto para consultar progreso_fisico, o None.
     """
     from bson import ObjectId
-    from app.routes.spark_config import get_mongo_db
+    from app.routes.ia.spark_config import get_mongo_db
 
     db = get_mongo_db()
     try:
@@ -77,7 +77,7 @@ def _regresion_global(spark, gym_id=None):
     from pyspark.ml.feature import VectorAssembler
     from pyspark.ml.evaluation import RegressionEvaluator
     from pyspark.sql.types import StringType
-    from app.routes.spark_config import leer_coleccion, get_mongo_db
+    from app.routes.ia.spark_config import leer_coleccion, get_mongo_db
     import re as _re
 
     def oid_hex(val):
@@ -226,7 +226,7 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
     Sin Spark, sin JVM -- O(n_registros_miembro).
     """
     from bson import ObjectId
-    from app.routes.spark_config import get_mongo_db
+    from app.routes.ia.spark_config import get_mongo_db
 
     db = get_mongo_db()
     try:

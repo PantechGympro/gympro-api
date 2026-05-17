@@ -13,10 +13,18 @@ from app.mongo import get_db
 
 # ================= CONFIG =================
 
-MONGODUMP_PATH = "mongodump"
+MONGODUMP_PATH  = "mongodump"
+PG_DUMP_PATH    = "pg_dump"
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+BASE_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 BACKUP_DIR = os.path.join(BASE_DIR, "storage", "backups")
+
+# PostgreSQL connection info (leídas del entorno, igual que docker-compose las inyecta)
+PG_HOST     = os.getenv("POSTGRES_HOST",     "postgres")
+PG_PORT     = os.getenv("POSTGRES_PORT",     "5432")
+PG_USER     = os.getenv("POSTGRES_USER",     "gymuser")
+PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "gympassword")
+PG_DB       = os.getenv("POSTGRES_DB",       "gymprodb")
 
 LAST_FULL_BACKUP_FILE = os.path.join(BACKUP_DIR, "last_full_backup.txt")
 LAST_BACKUP_FILE = os.path.join(BACKUP_DIR, "last_backup_any.txt")
@@ -192,6 +200,32 @@ def generate_full_json(db, output_path):
 
 # ================= EMAIL =================
 
+def run_pg_dump(output_path: str) -> None:
+    """
+    Ejecuta pg_dump en formato custom (-Fc) para PostgreSQL.
+    Lanza subprocess.CalledProcessError si falla.
+    La contraseña se pasa por variable de entorno PGPASSWORD para evitar .pgpass.
+    """
+    env = os.environ.copy()
+    env["PGPASSWORD"] = PG_PASSWORD
+
+    subprocess.run(
+        [
+            PG_DUMP_PATH,
+            "-h", PG_HOST,
+            "-p", PG_PORT,
+            "-U", PG_USER,
+            "-Fc",          # formato custom binario (restaurable con pg_restore)
+            "-d", PG_DB,
+            "-f", output_path,
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+
 def send_email_with_attachments(app, files, backup_type):
     try:
         recipient = app.config.get("MAIL_RECIPIENT") or app.config.get("MAIL_USERNAME")
@@ -200,7 +234,12 @@ def send_email_with_attachments(app, files, backup_type):
             subject=f"[Backup] Respaldo {backup_type.upper()} generado",
             sender=app.config.get("MAIL_USERNAME"),
             recipients=[recipient],
-            body=f"El respaldo {backup_type} se generó correctamente en MongoDB.\n\nFecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            body=(
+                f"El respaldo {backup_type} se generó correctamente.\n\n"
+                f"• MongoDB: dump nativo + JSON + Excel + PDF\n"
+                f"• PostgreSQL: pg_dump (formato custom)\n\n"
+                f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ),
         )
 
         for file_type, file_path in files.items():
@@ -241,36 +280,41 @@ def run_backup(job_id: str, backup_type: str, app):
             mongo_uri = os.getenv("MONGO_URI", "mongodb://mongo:27017/gymdb")
             db_name = os.getenv("MONGO_DB", "gymdb")
 
-            archive = None
+            archive   = None
+            pg_dump   = None
             json_file = None
-            xlsx = None
-            pdf = None
+            xlsx      = None
+            pdf       = None
             file_size = 0
 
             if backup_type == "full":
-                backup_state["current_step"] = "Generando backup completo (.archive)"
-                backup_state["progress_percentage"] = 20
-                
-                archive = os.path.join(path, f"backup_full_{timestamp}.archive")
-                json_file = os.path.join(path, f"backup_full_{timestamp}.json")  # AÑADIDO
-                xlsx = os.path.join(path, f"backup_full_{timestamp}.xlsx")
-                pdf = os.path.join(path, f"backup_full_{timestamp}.pdf")
+                backup_state["current_step"] = "Generando dump MongoDB (.archive)"
+                backup_state["progress_percentage"] = 15
 
-                # Llamar a mongodump nativo
+                archive   = os.path.join(path, f"backup_full_{timestamp}.archive")
+                json_file = os.path.join(path, f"backup_full_{timestamp}.json")
+                xlsx      = os.path.join(path, f"backup_full_{timestamp}.xlsx")
+                pdf       = os.path.join(path, f"backup_full_{timestamp}.pdf")
+                pg_dump   = os.path.join(path, f"backup_pg_full_{timestamp}.dump")
+
                 subprocess.run(
                     [MONGODUMP_PATH, "--uri", mongo_uri, "--db", db_name, f"--archive={archive}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
                 )
 
-                backup_state["progress_percentage"] = 40  # Ajustado
-                backup_state["current_step"] = "Generando JSON completo"
-                generate_full_json(db, json_file)  # AÑADIDO
+                backup_state["progress_percentage"] = 30
+                backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
+                run_pg_dump(pg_dump)
 
-                backup_state["progress_percentage"] = 60  # Ajustado
+                backup_state["progress_percentage"] = 50
+                backup_state["current_step"] = "Generando JSON completo"
+                generate_full_json(db, json_file)
+
+                backup_state["progress_percentage"] = 65
                 backup_state["current_step"] = "Generando Excel"
                 generate_excel(db, xlsx)
 
-                backup_state["progress_percentage"] = 80  # Ajustado
+                backup_state["progress_percentage"] = 80
                 backup_state["current_step"] = "Generando PDF"
                 generate_pdf(db, pdf, mode="FULL")
 
@@ -282,18 +326,23 @@ def run_backup(job_id: str, backup_type: str, app):
                 if not since:
                     raise Exception("No existe respaldo FULL previo. Ejecute primero un backup completo.")
 
-                backup_state["current_step"] = "Generando backup diferencial (.json)"
-                backup_state["progress_percentage"] = 30
-                
+                backup_state["current_step"] = "Generando backup diferencial MongoDB (.json)"
+                backup_state["progress_percentage"] = 20
+
                 json_file = os.path.join(path, f"backup_diff_{timestamp}.json")
-                xlsx = os.path.join(path, f"backup_diff_{timestamp}.xlsx")
-                pdf = os.path.join(path, f"backup_diff_{timestamp}.pdf")
+                xlsx      = os.path.join(path, f"backup_diff_{timestamp}.xlsx")
+                pdf       = os.path.join(path, f"backup_diff_{timestamp}.pdf")
+                pg_dump   = os.path.join(path, f"backup_pg_diff_{timestamp}.dump")
 
                 generate_incremental_json(db, json_file, since)
-                
-                backup_state["progress_percentage"] = 60
+
+                backup_state["progress_percentage"] = 40
+                backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
+                run_pg_dump(pg_dump)
+
+                backup_state["progress_percentage"] = 65
                 generate_excel(db, xlsx, since)
-                
+
                 backup_state["progress_percentage"] = 80
                 generate_pdf(db, pdf, since, "DIFERENCIAL")
 
@@ -304,18 +353,23 @@ def run_backup(job_id: str, backup_type: str, app):
                 if not since:
                     raise Exception("No existe respaldo previo. Ejecute primero un backup completo.")
 
-                backup_state["current_step"] = "Generando backup incremental (.json)"
-                backup_state["progress_percentage"] = 30
-                
+                backup_state["current_step"] = "Generando backup incremental MongoDB (.json)"
+                backup_state["progress_percentage"] = 20
+
                 json_file = os.path.join(path, f"backup_inc_{timestamp}.json")
-                xlsx = os.path.join(path, f"backup_inc_{timestamp}.xlsx")
-                pdf = os.path.join(path, f"backup_inc_{timestamp}.pdf")
+                xlsx      = os.path.join(path, f"backup_inc_{timestamp}.xlsx")
+                pdf       = os.path.join(path, f"backup_inc_{timestamp}.pdf")
+                pg_dump   = os.path.join(path, f"backup_pg_inc_{timestamp}.dump")
 
                 generate_incremental_json(db, json_file, since)
-                
-                backup_state["progress_percentage"] = 60
+
+                backup_state["progress_percentage"] = 40
+                backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
+                run_pg_dump(pg_dump)
+
+                backup_state["progress_percentage"] = 65
                 generate_excel(db, xlsx, since)
-                
+
                 backup_state["progress_percentage"] = 80
                 generate_pdf(db, pdf, since, "INCREMENTAL")
 
@@ -324,16 +378,17 @@ def run_backup(job_id: str, backup_type: str, app):
             else:
                 raise Exception("Tipo de respaldo no válido")
 
-            # Calcular tamaño del archivo principal
+            # Tamaño basado en el archivo principal de Mongo
             main_file = archive if archive else json_file
             if main_file and os.path.exists(main_file):
                 file_size = os.path.getsize(main_file) / (1024 * 1024)  # MB
 
             backup_state["generated_files"] = {
-                "db_dump": main_file,
-                "json": json_file,  # AÑADIDO explícitamente para todos los tipos
-                "excel": xlsx,
-                "pdf": pdf
+                "db_dump":  main_file,
+                "pg_dump":  pg_dump,
+                "json":     json_file,
+                "excel":    xlsx,
+                "pdf":      pdf,
             }
 
             backup_state["progress_percentage"] = 90

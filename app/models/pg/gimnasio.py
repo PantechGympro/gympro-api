@@ -40,7 +40,11 @@ class Gimnasio(db.Model):
     activo             = db.Column(db.Boolean, default=True, nullable=False)
     email_contacto     = db.Column(db.String(255))
     telefono           = db.Column(db.String(20))
-    # Stripe Customer ID — se completa en Sprint 3 al integrar billing
+    # Tipo de establecimiento — usado para personalizar la experiencia
+    tipo_gimnasio      = db.Column(db.String(50), nullable=True)
+    # Config libre por tipo: etiquetas, módulos activos, etc.
+    configuracion      = db.Column(db.JSON, nullable=True, default=dict)
+    # Stripe Customer ID — se completa al integrar billing
     stripe_customer_id = db.Column(db.String(100))
     created_at         = db.Column(
         db.DateTime(timezone=True),
@@ -58,9 +62,11 @@ class Gimnasio(db.Model):
         return {
             "id":             self.id,
             "nombre":         self.nombre,
-            "plan":           self.plan.value,
+            "plan":           self.plan.value if hasattr(self.plan, "value") else self.plan,
             "activo":         self.activo,
             "email_contacto": self.email_contacto,
             "telefono":       self.telefono,
+            "tipo_gimnasio":  self.tipo_gimnasio,
+            "configuracion":  self.configuracion or {},
             "created_at":     self.created_at.isoformat() if self.created_at else None,
         }

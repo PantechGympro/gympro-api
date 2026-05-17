@@ -4,32 +4,39 @@ from .config import Config
 from .extensions import db, migrate, jwt, mail, limiter
 from .utils.tenant import init_tenant_middleware
 
-# Blueprints
-from app.backups.routes                import backups_bp
-from app.routes.miembros               import miembros_bp
-from app.routes.pagos                  import pagos_bp
-from app.routes.membresias             import membresias_bp
-from app.routes.miembro_membresias     import miembro_membresias_bp
-from app.routes.dashboard_routes       import dashboard_bp
-from app.routes.user_dashboard         import user_dashboard_bp
-from app.routes.user_payments          import user_payments_bp
-from app.routes.user_profile           import user_profile_bp
-from app.routes.user_health            import user_health_bp
-from app.routes.user_body_progress     import user_body_progress_bp
-from app.routes.user_membership        import user_membership_bp
-from app.routes.user_routine           import user_routines_bp
-from app.routes.trainer_routes         import trainer_bp
-from app.routes.spark_mapreduce        import spark_mapreduce_bp
-from app.routes.spark_kmeans           import spark_kmeans_bp
-from app.routes.spark_regresion        import spark_regresion_bp
-from app.routes.billing                import billing_bp
-from app.routes.billing_stripe         import billing_stripe_bp
-from app.routes.onboarding             import onboarding_bp
-from app.routes.catalogos              import catalogos_bp
-from app.routes.reports                import reports_bp
-from app.routes.spark_cancelaciones    import spark_cancelaciones_bp
-from app.routes.spark_rutinas          import spark_rutinas_bp
-from app.routes.notifications          import notifications_bp, init_scheduler
+# Blueprints — organizados por rol
+# Admin
+from app.routes.admin.miembros            import miembros_bp
+from app.routes.admin.pagos               import pagos_bp
+from app.routes.admin.dashboard_routes    import dashboard_bp
+from app.routes.admin.billing             import billing_bp
+from app.routes.admin.billing_stripe      import billing_stripe_bp
+from app.routes.admin.onboarding          import onboarding_bp
+from app.routes.admin.catalogos           import catalogos_bp
+from app.routes.admin.reports             import reports_bp
+from app.routes.admin.notifications       import notifications_bp, init_scheduler
+from app.routes.admin.ventas              import ventas_bp
+# Miembro
+from app.routes.miembro.user_dashboard    import user_dashboard_bp
+from app.routes.miembro.user_payments     import user_payments_bp
+from app.routes.miembro.user_profile      import user_profile_bp
+from app.routes.miembro.user_health       import user_health_bp
+from app.routes.miembro.user_body_progress import user_body_progress_bp
+from app.routes.miembro.user_membership   import user_membership_bp
+from app.routes.miembro.user_routine      import user_routines_bp
+# Entrenador
+from app.routes.entrenador.trainer_routes import trainer_bp
+# IA & Analytics
+from app.routes.ia.spark_mapreduce        import spark_mapreduce_bp
+from app.routes.ia.spark_kmeans           import spark_kmeans_bp
+from app.routes.ia.spark_regresion        import spark_regresion_bp
+from app.routes.ia.spark_cancelaciones    import spark_cancelaciones_bp
+from app.routes.ia.spark_rutinas          import spark_rutinas_bp
+# Compartido
+from app.routes.compartido.membresias         import membresias_bp
+from app.routes.compartido.miembro_membresias import miembro_membresias_bp
+# Backups (módulo propio)
+from app.backups.routes                   import backups_bp
 
 
 def create_app():
@@ -56,8 +63,8 @@ def create_app():
 
     init_tenant_middleware(app)
 
-    from .auth.routes    import auth_bp
-    from .routes.health  import health_bp
+    from .auth.routes                  import auth_bp
+    from .routes.compartido.health     import health_bp
 
     app.register_blueprint(auth_bp,               url_prefix="/api/auth")
     app.register_blueprint(health_bp,             url_prefix="/api")
@@ -86,6 +93,7 @@ def create_app():
     app.register_blueprint(spark_cancelaciones_bp)
     app.register_blueprint(spark_rutinas_bp)
     app.register_blueprint(notifications_bp)
+    app.register_blueprint(ventas_bp)
 
     # Inicializar scheduler de notificaciones (cron diario 08:00)
     init_scheduler(app)

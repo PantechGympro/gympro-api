@@ -1,21 +1,23 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
-from bson.objectid import ObjectId
 from app.mongo import get_db
+from app.utils.tenant import require_tenant
 
 user_body_progress_bp = Blueprint('user_body_progress', __name__)
 
 @user_body_progress_bp.route('/api/user/body-progress', methods=['GET'])
 @jwt_required()
+@require_tenant
 def get_body_progress():
     """
     Obtiene el progreso corporal del usuario con datos reales
     """
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -120,14 +122,16 @@ def get_body_progress():
 
 @user_body_progress_bp.route('/api/user/body-progress', methods=['POST'])
 @jwt_required()
+@require_tenant
 def add_body_progress():
     """
     Agrega un nuevo registro de progreso corporal
     """
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404

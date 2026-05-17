@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import get_spark, cache_get, cache_set
 
 spark_mapreduce_bp = Blueprint("spark_mapreduce", __name__)
 
@@ -24,7 +24,7 @@ def _cache_key(gym_id) -> str:
 
 def _mapreduce_ingresos(spark, gym_id=None):
     from pyspark.sql import functions as F
-    from app.routes.spark_config import leer_coleccion
+    from app.routes.ia.spark_config import leer_coleccion
 
     df = leer_coleccion(spark, "pagos")
     if gym_id is not None:
@@ -72,7 +72,7 @@ def _mapreduce_ingresos(spark, gym_id=None):
 
 def _mapreduce_asistencia(spark, gym_id=None):
     from pyspark.sql import functions as F
-    from app.routes.spark_config import leer_coleccion
+    from app.routes.ia.spark_config import leer_coleccion
 
     df = leer_coleccion(spark, "asistencias")
     if gym_id is not None:

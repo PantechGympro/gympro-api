@@ -38,25 +38,63 @@ class Miembro:
         db = get_db()
         foto_url = f"/static/uploads/{self.foto_perfil}" if self.foto_perfil else None
 
-        # --- Obtener datos del Usuario ---
-        usuario_doc = db.usuarios.find_one({"_id": self.id_usuario}) if self.id_usuario else None
-        nombre_usuario = usuario_doc["nombre"] if usuario_doc and "nombre" in usuario_doc else "Sin Usuario"
-        email_usuario = usuario_doc["email"] if usuario_doc and "email" in usuario_doc else "Sin Email"
+        # --- Obtener datos del Usuario (multi-path) ---
+        # Prioridad 1: campos desnormalizados del Sprint 2 (nombre/email en el doc)
+        # Prioridad 2: lookup a colección Mongo usuarios (legacy pre-Sprint 2)
+        # Prioridad 3: lookup a PostgreSQL por id_usuario_pg
+        nombre_usuario = None
+        email_usuario  = None
+
+        if self.nombre:
+            nombre_usuario = self.nombre
+            email_usuario  = self.email or "Sin Email"
+        elif self.id_usuario:
+            usuario_doc = db.usuarios.find_one({"_id": self.id_usuario})
+            if usuario_doc:
+                nombre_usuario = usuario_doc.get("nombre")
+                email_usuario  = usuario_doc.get("email")
+        if not nombre_usuario and self.id_usuario_pg:
+            try:
+                from app.models.pg.usuario import Usuario as UsuarioPG
+                u = UsuarioPG.query.get(int(self.id_usuario_pg))
+                if u:
+                    nombre_usuario = u.nombre
+                    email_usuario  = u.email
+            except Exception:
+                pass
+
+        nombre_usuario = nombre_usuario or "Sin Usuario"
+        email_usuario  = email_usuario  or "Sin Email"
 
         # --- Obtener Membresía Activa ---
         membresia_activa_data = None
-        # Buscar la asignación de membresía activa para este miembro
         mm_doc = db.miembro_membresia.find_one({"id_miembro": self._id, "estado": "Activa"})
         if mm_doc:
-            # Si hay asignación, buscar los detalles de la membresía (nombre)
-            membresia_doc = db.membresias.find_one({"_id": mm_doc["id_membresia"]})
-            if membresia_doc:
-                membresia_activa_data = {
-                    "nombre": membresia_doc["nombre"],
-                    "fecha_inicio": str(mm_doc.get("fecha_inicio", "")),
-                    "fecha_fin": str(mm_doc.get("fecha_fin", "")),
-                    "estado": mm_doc["estado"]
-                }
+            id_mem = mm_doc.get("id_membresia")
+            nombre_mem = "N/A"
+            # PG path (integer id, migrado en Sprint 3 / US14)
+            try:
+                pg_id = int(id_mem)
+                from app.models.pg.tipo_membresia import TipoMembresia
+                tm = TipoMembresia.query.get(pg_id)
+                if tm:
+                    nombre_mem = tm.nombre
+            except (TypeError, ValueError):
+                # Legacy Mongo path
+                from bson.objectid import ObjectId as OID
+                try:
+                    oid = OID(id_mem) if isinstance(id_mem, str) else id_mem
+                    legacy = db.membresias.find_one({"_id": oid})
+                    if legacy:
+                        nombre_mem = legacy.get("nombre", "N/A")
+                except Exception:
+                    pass
+            membresia_activa_data = {
+                "nombre":      nombre_mem,
+                "fecha_inicio": str(mm_doc.get("fecha_inicio", "")),
+                "fecha_fin":    str(mm_doc.get("fecha_fin", "")),
+                "estado":       mm_doc.get("estado", ""),
+            }
 
         return {
             "id": str(self._id) if self._id else None,

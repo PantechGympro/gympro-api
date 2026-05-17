@@ -87,9 +87,23 @@ def _build_token_mongo(user, nombre_rol: str) -> dict:
                 ).sort("fecha_fin", -1).limit(1)
             )
             if mm_activa:
-                mem_info = mongo_db.membresias.find_one({"_id": mm_activa[0]["id_membresia"]})
-                if mem_info:
-                    nombre_membresia = mem_info.get("nombre", "Sin Plan")
+                id_mem = mm_activa[0].get("id_membresia")
+                _nombre = None
+                # PG path (integer id — Sprint 3+)
+                try:
+                    from app.models.pg.tipo_membresia import TipoMembresia
+                    tm = TipoMembresia.query.get(int(id_mem))
+                    if tm:
+                        _nombre = tm.nombre
+                except (TypeError, ValueError, Exception):
+                    pass
+                # Legacy Mongo path
+                if _nombre is None:
+                    mem_info = mongo_db.membresias.find_one({"_id": id_mem})
+                    if mem_info:
+                        _nombre = mem_info.get("nombre", "Sin Plan")
+                if _nombre:
+                    nombre_membresia = _nombre
                     if any(p in nombre_membresia for p in ["Premium", "VIP"]):
                         access_level = "premium"
 

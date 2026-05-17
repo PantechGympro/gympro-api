@@ -80,7 +80,7 @@ def _hoy() -> str:
 # ─── Obtener datos de analytics (cache o re-ejecucion) ───────────────────────
 
 def _get_mapreduce_data(gym_id):
-    from app.routes.spark_config import cache_get, cache_set, get_spark
+    from app.routes.ia.spark_config import cache_get, cache_set, get_spark
     from app.routes.spark_mapreduce import _cache_key, _ejecutar_y_construir_payload
 
     key    = _cache_key(gym_id)
@@ -94,7 +94,7 @@ def _get_mapreduce_data(gym_id):
 
 
 def _get_kmeans_data(gym_id, k=3):
-    from app.routes.spark_config import cache_get, cache_set, get_spark
+    from app.routes.ia.spark_config import cache_get, cache_set, get_spark
     from app.routes.spark_kmeans import _cache_key, _ejecutar_kmeans, _build_payload
 
     key    = _cache_key(gym_id, k)
@@ -187,7 +187,7 @@ def report_miembros_csv():
 @jwt_required()
 @require_tenant
 def report_cancelaciones_csv():
-    from app.routes.spark_config import cache_get
+    from app.routes.ia.spark_config import cache_get
     gym_id = get_jwt().get("id_gimnasio")
     key    = f"cancelaciones_gym{gym_id}"
     data   = cache_get(key)

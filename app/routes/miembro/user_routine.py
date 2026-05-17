@@ -1,8 +1,9 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
 from bson.objectid import ObjectId
 from app.mongo import get_db
+from app.utils.tenant import require_tenant
 
 user_routines_bp = Blueprint('user_routines', __name__)
 
@@ -48,11 +49,13 @@ def _build_routine_dict(db, rutina_doc):
 
 @user_routines_bp.route('/routines', methods=['GET'])
 @jwt_required()
+@require_tenant
 def get_user_routines():
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -73,11 +76,13 @@ def get_user_routines():
 
 @user_routines_bp.route('/routines/<id>', methods=['GET'])
 @jwt_required()
+@require_tenant
 def get_routine(id):
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -99,11 +104,13 @@ def get_routine(id):
 
 @user_routines_bp.route('/routines', methods=['POST'])
 @jwt_required()
+@require_tenant
 def create_routine():
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -165,11 +172,13 @@ def create_routine():
 
 @user_routines_bp.route('/routines/<id>', methods=['PUT'])
 @jwt_required()
+@require_tenant
 def update_routine(id):
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -243,11 +252,13 @@ def update_routine(id):
 
 @user_routines_bp.route('/routines/<id>', methods=['DELETE'])
 @jwt_required()
+@require_tenant
 def delete_routine(id):
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
@@ -280,11 +291,13 @@ def delete_routine(id):
 
 @user_routines_bp.route('/routines/<id>/duplicate', methods=['POST'])
 @jwt_required()
+@require_tenant
 def duplicate_routine(id):
     try:
-        db = get_db()
-        user_id = ObjectId(get_jwt_identity())
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
         
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404

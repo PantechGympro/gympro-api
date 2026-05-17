@@ -37,12 +37,19 @@ def membresias_por_expirar():
                     if usuario_doc and "nombre" in usuario_doc:
                         nombre_miembro = usuario_doc["nombre"]
             
-            # Obtener nombre de la membresía
+            # Obtener nombre de la membresía (PG primero, legacy Mongo como fallback)
             nombre_plan = "N/A"
             if "id_membresia" in mm:
-                membresia_doc = db.membresias.find_one({"_id": mm["id_membresia"]})
-                if membresia_doc and "nombre" in membresia_doc:
-                    nombre_plan = membresia_doc["nombre"]
+                id_mem = mm["id_membresia"]
+                try:
+                    from app.models.pg.tipo_membresia import TipoMembresia
+                    tm = TipoMembresia.query.get(int(id_mem))
+                    if tm:
+                        nombre_plan = tm.nombre
+                except (TypeError, ValueError, Exception):
+                    membresia_doc = db.membresias.find_one({"_id": id_mem})
+                    if membresia_doc:
+                        nombre_plan = membresia_doc.get("nombre", "N/A")
             
             # Calcular estado de urgencia
             # Asegurarnos de que fecha_fin sea datetime para la resta
@@ -103,31 +110,41 @@ def obtener_membresia_activa():
         if not membresia_activa or "id_membresia" not in membresia_activa:
             return jsonify({"tiene_membresia": False}), 200
 
-        # Buscar los detalles del plan en la colección membresias
-        plan_doc = db.membresias.find_one({"_id": membresia_activa["id_membresia"]})
-        
-        if not plan_doc:
-            return jsonify({"tiene_membresia": False}), 200
+        # ✅ Resolver nombre del plan: PG primero (Sprint 3+), legacy Mongo como fallback
+        id_membresia = membresia_activa["id_membresia"]
+        nombre_plan = "Desconocido"
+        plan_id = None
 
-        # ✅ DETERMINAR NIVEL DE ACCESO BASADO EN TUS PLANES
-        nombre_plan = plan_doc.get("nombre", "Desconocido")
-        
+        try:
+            from app.models.pg.tipo_membresia import TipoMembresia
+            pg_id = int(id_membresia)
+            tm = TipoMembresia.query.get(pg_id)
+            if tm:
+                nombre_plan = tm.nombre
+                plan_id = str(pg_id)
+        except (TypeError, ValueError, Exception):
+            # Legacy Mongo path
+            plan_doc = db.membresias.find_one({"_id": id_membresia})
+            if plan_doc:
+                nombre_plan = plan_doc.get("nombre", "Desconocido")
+                plan_id = str(plan_doc["_id"])
+
         planes_premium = ["Premium", "VIP"]
         tipo_acceso = "premium" if any(p in nombre_plan for p in planes_premium) else "basico"
-        
+
         # Manejo seguro de fechas para strftime
         fecha_inicio = membresia_activa.get("fecha_inicio")
         fecha_fin = membresia_activa.get("fecha_fin")
-        
+
         str_inicio = fecha_inicio.strftime("%Y-%m-%d") if isinstance(fecha_inicio, datetime) else str(fecha_inicio)
         str_fin = fecha_fin.strftime("%Y-%m-%d") if isinstance(fecha_fin, datetime) else str(fecha_fin)
 
         return jsonify({
             "tiene_membresia": True,
             "membresia": {
-                "id": str(plan_doc["_id"]),
+                "id": plan_id,
                 "nombre": nombre_plan,
-                "tipo": tipo_acceso,  # "premium" o "basico"
+                "tipo": tipo_acceso,
                 "fecha_inicio": str_inicio,
                 "fecha_fin": str_fin,
                 "estado": membresia_activa.get("estado")

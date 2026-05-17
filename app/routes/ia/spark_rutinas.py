@@ -18,7 +18,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import get_spark, cache_get, cache_set
 
 spark_rutinas_bp = Blueprint("spark_rutinas", __name__)
 
@@ -45,7 +45,7 @@ def _cache_key_rec(id_miembro):
 # ─── Rutinas populares del gimnasio ──────────────────────────────────────────
 
 def _rutinas_populares(gym_id=None) -> list:
-    from app.routes.spark_config import get_mongo_db
+    from app.routes.ia.spark_config import get_mongo_db
     db    = get_mongo_db()
     match = {} if gym_id is None else {"id_gimnasio": int(gym_id)}
 
@@ -71,7 +71,7 @@ def _recomendaciones_para_miembro(spark, id_miembro_hex: str, gym_id=None, top_n
     from pyspark.sql.types import DoubleType, IntegerType
     from pyspark.ml.feature import VectorAssembler, StandardScaler
     from pyspark.ml.functions import vector_to_array
-    from app.routes.spark_config import leer_coleccion, get_mongo_db
+    from app.routes.ia.spark_config import leer_coleccion, get_mongo_db
     from bson import ObjectId
 
     db = get_mongo_db()
