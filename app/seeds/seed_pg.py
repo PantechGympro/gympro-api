@@ -22,6 +22,7 @@ load_dotenv()
 
 from app import create_app
 from app.extensions import db
+from flask_migrate import upgrade as db_upgrade
 from app.models.pg.rol                 import Rol
 from app.models.pg.gimnasio            import Gimnasio
 from app.models.pg.usuario             import Usuario
@@ -331,8 +332,14 @@ def reset_all(mdb):
     print("Reset BD ===")
 
     # ── PostgreSQL ─────────────────────────────────────────────────────────────
-    # Usamos engine.begin() (conexión raw) para evitar que un error a mitad de loop
-    # deje la ORM session en estado dirty/rollback-only.
+    # Garantizar que el schema está al día antes de truncar.
+    # db_upgrade() aplica todas las migraciones Alembic pendientes (idempotente).
+    # En primera ejecución crea las tablas; en re-ejecuciones es no-op.
+    print("  Aplicando migraciones Alembic...")
+    db_upgrade()
+
+    # Truncar todas las tablas en una sola transacción atómica.
+    # Tras db_upgrade() las tablas siempre existen.
     with db.engine.begin() as conn:
         conn.execute(text(
             "TRUNCATE TABLE "
