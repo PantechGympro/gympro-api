@@ -571,7 +571,7 @@ def seed_mongo_gym(gym, miembros_pg, tm_map, cfg):
             f_pago_dt = f_pago if isinstance(f_pago, datetime) else datetime.fromisoformat(str(f_pago))
             pagos_bulk.append({
                 "id_miembro":  uid, "id_gimnasio": gym_id,
-                "monto":       tm_p.precio,
+                "monto":       float(tm_p.precio),
                 "metodo_pago": RNG.choice(METODOS_PAGO),
                 "concepto":    f"Membresia {tm_p.nombre}",
                 "fecha_pago":  f_pago_dt,
