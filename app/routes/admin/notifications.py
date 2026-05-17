@@ -184,7 +184,7 @@ def init_scheduler(app):
 def trigger_check():
     """Dispara el chequeo de vencimientos de forma manual (solo Admin)."""
     claims = get_jwt()
-    if claims.get("role") not in ("Administrador", "SuperAdmin"):
+    if claims.get("role") not in ("owner_gym", "superadmin"):
         return jsonify({"error": "Solo administradores pueden ejecutar esta accion"}), 403
 
     from flask import current_app

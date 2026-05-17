@@ -157,10 +157,10 @@ def register_gym():
     if Usuario.query.filter_by(email=adm_email).first():
         return jsonify({"msg": "El correo del administrador ya esta registrado"}), 409
 
-    # Obtener rol Administrador
-    rol_admin = Rol.query.filter_by(nombre="Administrador").first()
+    # Obtener rol owner_gym
+    rol_admin = Rol.query.filter_by(nombre="owner_gym").first()
     if not rol_admin:
-        return jsonify({"msg": "Error interno: rol Administrador no encontrado"}), 500
+        return jsonify({"msg": "Error interno: rol owner_gym no encontrado"}), 500
 
     # Obtener plan (default: basico)
     id_plan = data.get("id_plan")
@@ -240,7 +240,7 @@ def register_gym():
             identity = str(nuevo_admin.id),
             additional_claims = {
                 "email":           adm_email,
-                "role":            "Administrador",
+                "role":            "owner_gym",
                 "id_gimnasio":     nuevo_gym.id,
                 "plan":            _plan_val,
                 "access_level":    "basico",
@@ -257,7 +257,7 @@ def register_gym():
                 "id":     nuevo_admin.id,
                 "nombre": nuevo_admin.nombre,
                 "email":  nuevo_admin.email,
-                "role":   "Administrador",
+                "role":   "owner_gym",
             },
             "suscripcion": suscripcion.to_dict(),
             "dias_prueba": 14,

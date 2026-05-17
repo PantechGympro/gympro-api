@@ -8,7 +8,7 @@ Sprint 3 / US13 (pendiente): integración real con Stripe (checkout session,
 
 Roles permitidos:
   - Administrador del gimnasio → lectura + modificación de su propia suscripción.
-  - SuperAdmin (role="SuperAdmin") → acceso total a cualquier gimnasio.
+  - SuperAdmin (role="superadmin") → acceso total a cualquier gimnasio.
   - Otros roles → solo GET de su plan actual.
 
 Endpoints:
@@ -37,7 +37,7 @@ billing_bp = Blueprint("billing", __name__, url_prefix="/api/billing")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _es_admin(claims: dict) -> bool:
-    return claims.get("role") in ("Administrador", "SuperAdmin")
+    return claims.get("role") in ("owner_gym", "superadmin")
 
 
 def _suscripcion_activa(gym_id: int) -> Suscripcion | None:

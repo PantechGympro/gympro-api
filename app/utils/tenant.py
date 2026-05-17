@@ -72,6 +72,16 @@ def init_tenant_middleware(app):
             g.tenant_id = None
             return
 
+        # superadmin opera a nivel de plataforma — no está ligado a ningún gimnasio.
+        # Se le asigna tenant_id=None y g.is_superadmin=True para que los endpoints
+        # puedan optar por mostrar datos de todos los gimnasios.
+        if claims.get("role") == "superadmin":
+            g.tenant_id    = None
+            g.is_superadmin = True
+            return
+
+        g.is_superadmin = False
+
         # Extraer id_gimnasio del claim JWT
         tenant_id = claims.get("id_gimnasio")
         g.tenant_id = tenant_id

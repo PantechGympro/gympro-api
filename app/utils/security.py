@@ -6,13 +6,13 @@ Uso:
 
     @backups_bp.route("/trigger", methods=["POST"])
     @jwt_required()
-    @require_role("Administrador")
+    @require_role("owner_gym", "superadmin")
     def trigger_backup():
         ...
 
     # Múltiples roles permitidos:
     @jwt_required()
-    @require_role("Administrador", "Recepcionista")
+    @require_role("owner_gym", "superadmin", "Recepcionista")
     def endpoint():
         ...
 

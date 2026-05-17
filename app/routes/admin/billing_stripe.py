@@ -53,7 +53,7 @@ def _get_stripe():
 
 
 def _es_admin(claims: dict) -> bool:
-    return claims.get("role") in ("Administrador", "SuperAdmin")
+    return claims.get("role") in ("owner_gym", "superadmin")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

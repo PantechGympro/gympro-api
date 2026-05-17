@@ -340,11 +340,12 @@ def reset_all(mdb):
 
     # Truncar todas las tablas en una sola transacción atómica.
     # Tras db_upgrade() las tablas siempre existen.
+    # IMPORTANTE: usar nombres reales de tabla (plural, según __tablename__).
     with db.engine.begin() as conn:
         conn.execute(text(
             "TRUNCATE TABLE "
-            "factura_suscripcion, suscripcion, tipo_membresia, ejercicio, "
-            "tipo_clase, usuario, gimnasio, plan_suscripcion, rol "
+            "facturas_suscripcion, suscripciones, tipos_membresia, ejercicios, "
+            "tipos_clase, usuarios, gimnasios, planes_suscripcion, roles "
             "RESTART IDENTITY CASCADE"
         ))
     print("  PG truncado (atómico)")
@@ -368,7 +369,13 @@ def reset_all(mdb):
 def seed_pg_base():
     print("Roles + Planes SaaS ===")
     roles = {}
-    for nombre in ["Administrador","Entrenador","Recepcionista","Miembro"]:
+    # Roles de la plataforma:
+    #   superadmin  → operador de la plataforma (sin gimnasio asignado)
+    #   owner_gym   → dueño/admin del gimnasio (tenant admin)
+    #   Entrenador  → trainer asignado al gimnasio
+    #   Recepcionista → staff de front-desk
+    #   Miembro     → cliente final
+    for nombre in ["superadmin", "owner_gym", "Entrenador", "Recepcionista", "Miembro"]:
         r = Rol(nombre=nombre)
         db.session.add(r)
         db.session.flush()
@@ -387,6 +394,20 @@ def seed_pg_base():
         db.session.flush()
         planes_map[p.nombre] = p
     db.session.commit()
+    # ── Usuario superadmin de plataforma (sin gimnasio) ───────────────────────
+    sa_user = Usuario(
+        nombre="Platform Admin",
+        email="superadmin@gymprodev.com",
+        id_rol=roles["superadmin"].id,
+        id_gimnasio=None,
+        activo=True,
+    )
+    sa_user.set_password("SuperAdmin1234!")
+    db.session.add(sa_user)
+    db.session.commit()
+    _USED_EMAILS.add("superadmin@gymprodev.com")
+    print(f"  Superadmin: superadmin@gymprodev.com")
+
     print(f"  {len(roles)} roles, {len(planes_map)} planes SaaS")
     return roles, planes_map
 
@@ -413,7 +434,7 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
         estado="pagada", fecha_emision=ahora, fecha_vencimiento=ahora+timedelta(days=30)))
 
     admin = Usuario(nombre=cfg["admin_nombre"], email=cfg["admin_email"],
-                    id_rol=roles["Administrador"].id, id_gimnasio=gym.id, activo=True)
+                    id_rol=roles["owner_gym"].id, id_gimnasio=gym.id, activo=True)
     admin.set_password("Admin1234!")
     db.session.add(admin)
     db.session.flush()

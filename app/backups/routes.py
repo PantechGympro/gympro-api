@@ -20,7 +20,7 @@ backups_bp = Blueprint("backups", __name__, url_prefix="/api/backups")
 
 @backups_bp.route("/dashboard-summary", methods=["GET"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def dashboard_summary():
     history = load_history()
 
@@ -50,7 +50,7 @@ def dashboard_summary():
 
 @backups_bp.route("/history", methods=["GET"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def backup_history():
     history = load_history()
     return jsonify(history), 200
@@ -58,7 +58,7 @@ def backup_history():
 
 @backups_bp.route("/trigger", methods=["POST"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def trigger_backup():
     if backup_state["is_running"]:
         return jsonify({
@@ -95,7 +95,7 @@ def trigger_backup():
 
 @backups_bp.route("/status", methods=["GET"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def backup_status():
     response = {
         "is_running": backup_state["is_running"],
@@ -120,7 +120,7 @@ def backup_status():
 
 @backups_bp.route("/download/<filename>", methods=["GET"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def download_backup(filename):
     # Sanitizar el nombre de archivo para evitar path traversal
     filename = os.path.basename(filename)
@@ -135,7 +135,7 @@ def download_backup(filename):
 
 @backups_bp.route("/restore", methods=["POST"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def restore_backup():
     data = request.get_json()
 
@@ -179,7 +179,7 @@ def restore_backup():
 
 @backups_bp.route("/test-email", methods=["GET"])
 @jwt_required()
-@require_role("Administrador")
+@require_role("owner_gym", "superadmin")
 def test_email():
     from flask_mail import Message
     from app.extensions import mail

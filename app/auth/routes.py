@@ -33,6 +33,33 @@ auth_bp = Blueprint("auth", __name__)
 def _build_token_pg(usuario: UsuarioPG) -> dict:
     """Construye el payload JWT para un usuario de PostgreSQL."""
     rol_nombre = usuario.rol.nombre if usuario.rol else "Desconocido"
+
+    # superadmin no tiene gimnasio — se le asigna plan "enterprise" de plataforma
+    if rol_nombre == "superadmin":
+        return {
+            "identity": str(usuario.id),
+            "claims": {
+                "email":        usuario.email,
+                "role":         "superadmin",
+                "id_gimnasio":  None,
+                "plan":         "enterprise",
+                "access_level": "premium",
+                "perfil_completo": True,
+                "peso_inicial": None,
+                "fuente":       "pg",
+            },
+            "user_response": {
+                "id":           str(usuario.id),
+                "nombre":       usuario.nombre,
+                "email":        usuario.email,
+                "role":         "superadmin",
+                "id_gimnasio":  None,
+                "plan":         "enterprise",
+                "access_level": "premium",
+                "perfil_completo": True,
+            },
+        }
+
     # plan es str con PGEnum(create_type=False); con db.Enum(PlanEnum) sería .value
     _plan = usuario.gimnasio.plan if usuario.gimnasio else "basico"
     plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
@@ -47,7 +74,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
             "perfil_completo": True,
             "peso_inicial":    None,
-            "fuente":          "pg",   # indica origen del usuario — quitar en Sprint 3
+            "fuente":          "pg",
         },
         "user_response": {
             "id":              str(usuario.id),
