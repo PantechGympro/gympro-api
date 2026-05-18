@@ -37,6 +37,13 @@ from app.routes.compartido.membresias         import membresias_bp
 from app.routes.compartido.miembro_membresias import miembro_membresias_bp
 # Backups (módulo propio)
 from app.backups.routes                   import backups_bp
+# Superadmin — gestión de plataforma SaaS
+from app.routes.superadmin.gimnasios      import gimnasios_admin_bp
+from app.routes.superadmin.suscripciones  import suscripciones_admin_bp
+from app.routes.superadmin.planes         import planes_admin_bp
+from app.routes.superadmin.usuarios       import usuarios_admin_bp
+from app.routes.superadmin.backups_admin  import backups_admin_bp
+from app.routes.superadmin.spark_platform import spark_platform_bp
 
 
 def create_app():
@@ -94,6 +101,13 @@ def create_app():
     app.register_blueprint(spark_rutinas_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(ventas_bp)
+    # Superadmin — todos bajo /api/superadmin
+    app.register_blueprint(gimnasios_admin_bp,    url_prefix="/api/superadmin")
+    app.register_blueprint(suscripciones_admin_bp, url_prefix="/api/superadmin")
+    app.register_blueprint(planes_admin_bp,        url_prefix="/api/superadmin")
+    app.register_blueprint(usuarios_admin_bp,      url_prefix="/api/superadmin")
+    app.register_blueprint(backups_admin_bp,       url_prefix="/api/superadmin")
+    app.register_blueprint(spark_platform_bp,      url_prefix="/api/superadmin")
 
     # Inicializar scheduler de notificaciones (cron diario 08:00)
     init_scheduler(app)
