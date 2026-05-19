@@ -204,13 +204,13 @@ def generate_full_json(db, output_path):
 def run_pg_dump(output_path: str) -> None:
     """
     Ejecuta pg_dump en formato custom (-Fc) para PostgreSQL.
-    Lanza subprocess.CalledProcessError si falla.
     La contraseña se pasa por variable de entorno PGPASSWORD para evitar .pgpass.
+    Lanza RuntimeError con el stderr real de pg_dump si falla.
     """
     env = os.environ.copy()
     env["PGPASSWORD"] = PG_PASSWORD
 
-    subprocess.run(
+    result = subprocess.run(
         [
             PG_DUMP_PATH,
             "-h", PG_HOST,
@@ -223,8 +223,13 @@ def run_pg_dump(output_path: str) -> None:
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        check=True,
     )
+    if result.returncode != 0:
+        stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"pg_dump falló (código {result.returncode}) — "
+            f"host={PG_HOST} user={PG_USER} db={PG_DB} | {stderr_msg}"
+        )
 
 
 def send_email_with_attachments(app, files, backup_type):
@@ -421,4 +426,8 @@ def run_backup(job_id: str, backup_type: str, app):
                 "type": backup_type,
                 "size": "ERROR",
                 "url": None,
-                "erro
+                "error": str(e)
+            })
+
+        finally:
+            backup_state["is_running"] = False
