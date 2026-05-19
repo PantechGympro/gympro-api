@@ -1,4 +1,5 @@
 import os
+from sqlalchemy.pool import NullPool
 
 
 class Config:
@@ -19,11 +20,16 @@ class Config:
         "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # NullPool: crea una conexión nueva por request y la cierra al terminar.
+    # Necesario con Gunicorn en modo fork (--worker-class sync): los workers
+    # heredan las conexiones del proceso master al hacer fork(), dejando el
+    # estado TCP compartido entre procesos. Con un pool persistente (QueuePool)
+    # los workers corruptos responden None silenciosamente → fallthrough a Mongo → 401.
+    # NullPool elimina el pool completamente; cada worker abre y cierra su propia
+    # conexión sin estado compartido. Overhead mínimo en producción con pgBouncer,
+    # aceptable en dev/staging directo a Postgres.
     SQLALCHEMY_ENGINE_OPTIONS = {
-        "pool_pre_ping": True,       # verifica la conexión antes de usarla
-        "pool_recycle": 300,         # recicla conexiones cada 5 minutos
-        "pool_size": 5,
-        "max_overflow": 10,
+        "poolclass": NullPool,
     }
 
     # ── Email ─────────────────────────────────────────────────────────────────

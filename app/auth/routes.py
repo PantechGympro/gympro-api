@@ -167,7 +167,7 @@ def _build_token_mongo(user, nombre_rol: str) -> dict:
 @auth_bp.route("/login", methods=["POST"])
 @limiter.limit("5 per minute; 30 per hour")
 def login():
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data or not data.get("email") or not data.get("password"):
         return jsonify({"msg": "Datos incompletos"}), 400
 
