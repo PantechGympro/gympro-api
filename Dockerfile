@@ -67,10 +67,6 @@ COPY --chown=gymuser:gymuser . .
 # Dar permisos de ejecución al entrypoint
 RUN chmod +x /app/entrypoint.sh
 
-USER gymuser
-
-EXPOSE 5000
-
-# entrypoint.sh: corre `flask db upgrade` (migraciones Alembic) y luego gunicorn.
-# Esto garantiza que tablas y tipos PG existan antes de aceptar tráfico.
-CMD ["/app/entrypoint.sh"]
+# Crear directorio de storage para backups y transferir ownership a gymuser
+# Debe hacerse antes de USER gymuser ya que /app pertenece a root
+RUN mkdir -p /app/storage/backups && chown -R gymuser:gymuser /app/s

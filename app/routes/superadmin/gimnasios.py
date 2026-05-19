@@ -137,6 +137,7 @@ def listar_gimnasios():
     return jsonify({
         "gimnasios": items,
         "total":     paginado.total,
+        "activos":   Gimnasio.query.filter_by(activo=True).count(),
         "page":      page,
         "pages":     paginado.pages,
         "per_page":  per_page,
@@ -252,5 +253,4 @@ def metricas_gimnasio(gym_id: int):
         "asistencias_12m":     asistencias_12m,
         "ingresos_12m":        ingresos_12m,
         "membresias_activas":  membresias_activas,
-        "generado_en":         datetime.utcnow().isoformat(),
-    }), 200
+      

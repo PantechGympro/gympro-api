@@ -11,6 +11,8 @@ Endpoints:
     GET  /api/superadmin/analytics/churn-gimnasios gimnasios con riesgo de churn SaaS
     GET  /api/superadmin/analytics/crecimiento     crecimiento de miembros por gimnasio
 """
+import decimal
+
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required
 from datetime import datetime
@@ -35,15 +37,27 @@ _CACHE_TTL_PLATFORM = 6   # horas — se actualiza más frecuente que por gimnas
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _clean(lst: list) -> list:
-    """Sanitiza tipos Decimal/float de Spark antes de JSON serialization."""
+    """
+    Convierte tipos no serializables de PySpark a Python nativos antes de jsonify.
+
+    Problemas que resuelve:
+      - decimal.Decimal (columnas DoubleType/DecimalType de Spark) → float
+      - Row.items() no disponible en PySpark < 3.0 → usar asDict()
+      - datetime / date → isoformat()
+    """
     cleaned = []
     for row in lst:
+        row_dict = row.asDict() if hasattr(row, "asDict") else dict(row)
         clean_row = {}
-        for k, v in row.items():
-            if hasattr(v, "to_decimal"):
-                clean_row[k] = round(float(v.to_decimal()), 2)
+        for k, v in row_dict.items():
+            if v is None:
+                clean_row[k] = None
+            elif isinstance(v, decimal.Decimal):
+                clean_row[k] = round(float(v), 2)
             elif isinstance(v, float):
                 clean_row[k] = round(v, 2)
+            elif hasattr(v, "isoformat"):          # datetime / date
+                clean_row[k] = v.isoformat()
             else:
                 clean_row[k] = v
         cleaned.append(clean_row)
@@ -59,6 +73,17 @@ def _analytics_plataforma(spark) -> dict:
 
     # ── Ingresos por gimnasio ─────────────────────────────────────────────────
     df_pagos = leer_coleccion(spark, "pagos")
+
+    # Colección vacía: el conector MongoDB no puede inferir schema → devolver vacío
+    _pagos_cols = set(df_pagos.columns)
+    if "fecha_pago" not in _pagos_cols or "monto" not in _pagos_cols:
+        return {
+            "algoritmo":               "MapReduce Plataforma",
+            "ingresos_por_periodo_gym": [],
+            "resumen_por_gimnasio":     [],
+            "ejecutado_en":            datetime.now().isoformat(),
+        }
+
     ingresos_por_gym = (
         df_pagos
         .withColumn("fecha_dt", F.to_timestamp(F.col("fecha_pago")))
@@ -135,8 +160,12 @@ def _proyeccion_ingresos(spark) -> dict:
     from pyspark.ml.regression import LinearRegression
     from pyspark.ml.feature import VectorAssembler
 
+    _raw_pagos = leer_coleccion(spark, "pagos")
+    if "fecha_pago" not in set(_raw_pagos.columns) or "monto" not in set(_raw_pagos.columns):
+        return {"error": "Datos insuficientes para proyección (mínimo 3 períodos)", "datos_historicos": []}
+
     df_pagos = (
-        leer_coleccion(spark, "pagos")
+        _raw_pagos
         .withColumn("fecha_dt", F.to_timestamp(F.col("fecha_pago")))
         .withColumn("periodo",  F.date_format(F.col("fecha_dt"), "yyyy-MM"))
         .filter(F.col("monto").isNotNull() & F.col("periodo").isNotNull())
@@ -282,8 +311,16 @@ def _crecimiento_miembros(spark) -> dict:
     """
     from pyspark.sql import functions as F
 
+    df_miembros_crec = leer_coleccion(spark, "miembros")
+    if "fecha_registro" not in set(df_miembros_crec.columns):
+        return {
+            "algoritmo":    "Crecimiento Mensual por Gimnasio",
+            "crecimiento":  [],
+            "ejecutado_en": datetime.now().isoformat(),
+        }
+
     df = (
-        leer_coleccion(spark, "miembros")
+        df_miembros_crec
         .withColumn("fecha_dt", F.to_timestamp(F.col("fecha_registro")))
         .withColumn("periodo",  F.date_format(F.col("fecha_dt"), "yyyy-MM"))
         .filter(F.col("periodo").isNotNull())
@@ -383,49 +420,4 @@ def proyeccion_ingresos():
         return jsonify(payload), 200
     except RuntimeError as e:
         return jsonify({"error": str(e), "spark_enabled": SPARK_ENABLED}), 503
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@spark_platform_bp.route("/analytics/churn-gimnasios", methods=["GET"])
-@jwt_required()
-@require_role("superadmin")
-def churn_gimnasios():
-    """
-    Gimnasios con riesgo de churn SaaS (suscripción vencida, sin actividad).
-    No usa Spark — consulta directa PG + Mongo, respuesta inmediata.
-    """
-    try:
-        payload = _churn_gimnasios()
-        return jsonify(payload), 200
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@spark_platform_bp.route("/analytics/crecimiento", methods=["GET"])
-@jwt_required()
-@require_role("superadmin")
-def crecimiento_miembros():
-    """
-    Crecimiento mensual de nuevos miembros por gimnasio.
-    Cache de 6h.
-    """
-    key    = "platform_crecimiento_v1"
-    cached = cache_get(key, ttl_hours=_CACHE_TTL_PLATFORM)
-    if cached:
-        cached["desde_cache"] = True
-        return jsonify(cached), 200
-
-    try:
-        spark   = get_spark()
-        payload = _crecimiento_miembros(spark)
-        payload["desde_cache"] = False
-        cache_set(key, payload)
-        return jsonify(payload), 200
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": SPARK_ENABLED}), 503
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    except Ex

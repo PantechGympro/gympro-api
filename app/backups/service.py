@@ -74,6 +74,7 @@ def load_history():
         return []
 
 def save_history(entry):
+    os.makedirs(BACKUP_DIR, exist_ok=True)   # garantiza que el dir existe antes de escribir
     history = load_history()
     history.insert(0, entry)
     history = history[:10]  # máximo 10 registros
@@ -420,8 +421,4 @@ def run_backup(job_id: str, backup_type: str, app):
                 "type": backup_type,
                 "size": "ERROR",
                 "url": None,
-                "error": str(e)
-            })
-
-        finally:
-            backup_state["is_running"] = False
+                "erro

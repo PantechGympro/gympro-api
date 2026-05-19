@@ -5,6 +5,10 @@
 # sin necesidad de correr comandos manuales post-deploy.
 set -e
 
+echo "==> Creando directorio de storage para backups..."
+mkdir -p /app/storage/backups
+echo "==> Storage OK"
+
 echo "==> Aplicando migraciones Alembic..."
 alembic upgrade head
 echo "==> Migraciones OK"

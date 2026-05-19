@@ -37,7 +37,7 @@ def listar_planes():
         d = p.to_dict()
         d["suscriptores_activos"] = subs_activas
         result.append(d)
-    return jsonify(result), 200
+    return jsonify({"planes": result}), 200
 
 
 @planes_admin_bp.route("/planes", methods=["POST"])
@@ -160,4 +160,4 @@ def toggle_plan(plan_id: int):
 
     plan.activo = True
     db.session.commit()
-    return jsonify({"msg": "Plan activado.", "id": plan.id, "activo": True}), 200
+    return jsonify({"msg": "Plan activado.", "id": plan.id, "activo": 
