@@ -29,6 +29,7 @@ alembic>=1.13.0
 # ── Analytics / Big Data ──────────────────────────────────────────────────────
 pyspark==3.5.3
 pandas==2.2.3
+openpyxl==3.1.5        # motor Excel para pandas ExcelWriter (engine="openpyxl")
 # setuptools provee distutils (removido en Python 3.12 pero requerido por pyspark.ml.image)
 setuptools>=70.0
 
