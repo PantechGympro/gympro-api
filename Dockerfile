@@ -30,18 +30,29 @@ RUN pip install --upgrade pip && \
 FROM python:3.12-slim-bookworm AS runtime
 
 # Java 17 JRE — requerido por PySpark (Spark corre en la JVM)
+# postgresql-client-16 — pg_dump DEBE coincidir con la versión del servidor (postgres:16)
+#   Se instala desde el repo PGDG oficial; el paquete genérico "postgresql-client"
+#   en Debian bookworm instala v15 que rechaza conectarse a servidores v16.
 # mongodb-database-tools — provee mongodump/mongorestore para backups tipo "full"
-# Se instala desde el repositorio oficial de MongoDB (no está en repos Debian base)
+#   Se instala desde el repositorio oficial de MongoDB (no está en repos Debian base)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gnupg \
         curl \
         openjdk-17-jre-headless \
+    # ── Repo PGDG para postgresql-client-16 ──────────────────────────────────
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] \
+       https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+    # ── Repo MongoDB para mongodump ───────────────────────────────────────────
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
        | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg \
     && echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
        https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" \
        > /etc/apt/sources.list.d/mongodb-org-7.0.list \
     && apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-client-16 \
         mongodb-database-tools \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,4 +80,12 @@ RUN chmod +x /app/entrypoint.sh
 
 # Crear directorio de storage para backups y transferir ownership a gymuser
 # Debe hacerse antes de USER gymuser ya que /app pertenece a root
-RUN mkdir -p /app/storage/backups && chown -R gymuser:gymuser /app/s
+RUN mkdir -p /app/storage/backups && chown -R gymuser:gymuser /app/storage
+
+USER gymuser
+
+EXPOSE 5000
+
+# entrypoint.sh: corre `flask db upgrade` (migraciones Alembic) y luego gunicorn.
+# Esto garantiza que tablas y tipos PG existan antes de aceptar tráfico.
+CMD ["/app/entrypoint.sh"]

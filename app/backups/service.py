@@ -225,6 +225,9 @@ def run_pg_dump(output_path: str) -> None:
         stderr=subprocess.PIPE,
     )
     if result.returncode != 0:
+        # Limpiar el archivo parcial/vacío que pg_dump deja al fallar
+        if os.path.exists(output_path):
+            os.remove(output_path)
         stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(
             f"pg_dump falló (código {result.returncode}) — "
