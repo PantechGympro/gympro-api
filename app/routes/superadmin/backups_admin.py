@@ -80,13 +80,24 @@ def _save_schedule_config(config: dict) -> None:
 @require_role("superadmin")
 def backup_status():
     """Estado actual del proceso de backup."""
+    # last_backup: prioridad al estado en memoria (backup en curso o reciente),
+    # si no hay, leer el último "completado" del historial (persiste entre reinicios).
+    last_bk = backup_state["last_backup"]
+    if not last_bk:
+        try:
+            hist = load_history()
+            completados = [h for h in hist if h.get("status") == "completado"]
+            if completados:
+                last_bk = completados[0].get("date")   # ya es ISO string
+        except Exception:
+            pass
+
     response = {
         "is_running":          backup_state["is_running"],
         "progress_percentage": backup_state["progress_percentage"],
         "current_step":        backup_state["current_step"],
         "last_backup":         (
-            backup_state["last_backup"].isoformat()
-            if backup_state["last_backup"] else None
+            last_bk.isoformat() if hasattr(last_bk, "isoformat") else last_bk
         ),
         "files": {},
     }
@@ -138,20 +149,6 @@ def trigger_backup():
         daemon=True,
     )
     thread.start()
-
-    # Registrar en historial — se protege con try/except para que un fallo
-    # de escritura (ej. directorio todavía inexistente) no cancele el 202.
-    superadmin_id = get_jwt_identity()
-    try:
-        save_history({
-            "date":          datetime.utcnow().isoformat(),
-            "type":          tipo,
-            "status":        "iniciado",
-            "job_id":        job_id,
-            "disparado_por": superadmin_id,
-        })
-    except Exception as hist_err:
-        current_app.logger.warning(f"[backup trigger] save_history falló: {hist_err}")
 
     return jsonify({
         "msg":    f"Backup {tipo} iniciado.",
@@ -279,4 +276,10 @@ def restore_backup():
             "disparado_por": get_jwt_identity(),
         })
         return jsonify({
-            
+            "msg":  "Base de datos restaurada correctamente.",
+            "file": filename,
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"[backup restore] Error: {e}")
+        return jsonify({"msg": "Error al restaurar.", "detalle": str(e)}), 500

@@ -404,10 +404,16 @@ def run_backup(job_id: str, backup_type: str, app):
             backup_state["current_step"] = "Guardando historial"
 
             save_history({
-                "date": datetime.now().isoformat(),
-                "type": backup_type,
-                "size": f"{file_size:.2f} MB",
-                "url": main_file
+                "date":    datetime.now().isoformat(),
+                "type":    backup_type,
+                "status":  "completado",
+                "job_id":  job_id,
+                "size":    f"{file_size:.2f} MB",
+                "files": {
+                    k: os.path.basename(v)
+                    for k, v in backup_state["generated_files"].items()
+                    if v and os.path.exists(v)
+                },
             })
 
             backup_state["progress_percentage"] = 95
@@ -423,13 +429,13 @@ def run_backup(job_id: str, backup_type: str, app):
             backup_state["current_step"] = f"Error: {str(e)}"
             backup_state["progress_percentage"] = 0
             print("[BACKUP ERROR]", e)
-            
+
             save_history({
-                "date": datetime.now().isoformat(),
-                "type": backup_type,
-                "size": "ERROR",
-                "url": None,
-                "error": str(e)
+                "date":   datetime.now().isoformat(),
+                "type":   backup_type,
+                "status": "error",
+                "job_id": job_id,
+                "error":  str(e),
             })
 
         finally:
