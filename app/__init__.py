@@ -5,17 +5,22 @@ from .extensions import db, migrate, jwt, mail, limiter
 from .utils.tenant import init_tenant_middleware
 
 # Blueprints — organizados por rol
-# Admin
-from app.routes.admin.miembros            import miembros_bp
-from app.routes.admin.pagos               import pagos_bp
-from app.routes.admin.dashboard_routes    import dashboard_bp
-from app.routes.admin.billing             import billing_bp
-from app.routes.admin.billing_stripe      import billing_stripe_bp
-from app.routes.admin.onboarding          import onboarding_bp
-from app.routes.admin.catalogos           import catalogos_bp
-from app.routes.admin.reports             import reports_bp
-from app.routes.admin.notifications       import notifications_bp, init_scheduler
-from app.routes.admin.ventas              import ventas_bp
+# Owner Gym (antes "admin")
+from app.routes.owner_gym.miembros            import miembros_bp
+from app.routes.owner_gym.pagos               import pagos_bp
+from app.routes.owner_gym.dashboard_routes    import dashboard_bp
+from app.routes.owner_gym.billing             import billing_bp
+from app.routes.owner_gym.billing_stripe      import billing_stripe_bp
+from app.routes.owner_gym.onboarding          import onboarding_bp
+from app.routes.owner_gym.catalogos           import catalogos_bp
+from app.routes.owner_gym.reports             import reports_bp
+from app.routes.owner_gym.notifications       import notifications_bp, init_scheduler
+from app.routes.owner_gym.ventas              import ventas_bp
+# Owner Gym — nuevos endpoints bajo /api/owner_gym
+from app.routes.owner_gym.owner_dashboard     import owner_dashboard_bp
+from app.routes.owner_gym.owner_profile       import owner_profile_bp
+from app.routes.owner_gym.owner_trainers      import owner_trainers_bp
+from app.routes.owner_gym.owner_membresias    import owner_membresias_bp
 # Miembro
 from app.routes.miembro.user_dashboard    import user_dashboard_bp
 from app.routes.miembro.user_payments     import user_payments_bp
@@ -101,6 +106,11 @@ def create_app():
     app.register_blueprint(spark_rutinas_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(ventas_bp)
+    # Owner Gym — todos bajo /api/owner_gym
+    app.register_blueprint(owner_dashboard_bp,  url_prefix="/api/owner_gym")
+    app.register_blueprint(owner_profile_bp,    url_prefix="/api/owner_gym")
+    app.register_blueprint(owner_trainers_bp,   url_prefix="/api/owner_gym")
+    app.register_blueprint(owner_membresias_bp, url_prefix="/api/owner_gym")
     # Superadmin — todos bajo /api/superadmin
     app.register_blueprint(gimnasios_admin_bp,    url_prefix="/api/superadmin")
     app.register_blueprint(suscripciones_admin_bp, url_prefix="/api/superadmin")
