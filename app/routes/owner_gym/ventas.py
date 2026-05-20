@@ -34,24 +34,32 @@ def registrar_venta():
         if not items:
             return jsonify({"error": "El carrito está vacío"}), 400
 
-        if metodo not in ("Efectivo", "Tarjeta"):
+        if metodo not in ("Efectivo", "Tarjeta", "Transferencia"):
             return jsonify({"error": "Método de pago inválido"}), 400
 
         doc = {
-            "items":       items,
-            "total":       float(total),
-            "metodo_pago": metodo,
-            "fecha":       datetime.now(timezone.utc),
-            "id_gimnasio": id_gimnasio,
+            "items":          items,
+            "total":          float(total),
+            "metodo_pago":    metodo,
+            "fecha":          datetime.now(timezone.utc),
+            "id_gimnasio":    id_gimnasio,
+            # Datos opcionales del comprador
+            "id_miembro":     data.get("id_miembro"),
+            "nombre_miembro": data.get("nombre_miembro", ""),
+            # Datos de pago según método
+            "numero_tarjeta": data.get("numero_tarjeta", ""),
+            "referencia":     data.get("referencia", ""),
         }
         result = db.ventas.insert_one(doc)
 
         return jsonify({
-            "id":          str(result.inserted_id),
-            "total":       doc["total"],
-            "metodo_pago": doc["metodo_pago"],
-            "items":       items,
-            "fecha":       doc["fecha"].isoformat(),
+            "id":             str(result.inserted_id),
+            "total":          doc["total"],
+            "metodo_pago":    doc["metodo_pago"],
+            "items":          items,
+            "fecha":          doc["fecha"].isoformat(),
+            "nombre_miembro": doc["nombre_miembro"],
+            "referencia":     doc["referencia"],
         }), 201
 
     except Exception as e:

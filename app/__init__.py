@@ -21,6 +21,7 @@ from app.routes.owner_gym.owner_dashboard     import owner_dashboard_bp
 from app.routes.owner_gym.owner_profile       import owner_profile_bp
 from app.routes.owner_gym.owner_trainers      import owner_trainers_bp
 from app.routes.owner_gym.owner_membresias    import owner_membresias_bp
+from app.routes.owner_gym.owner_productos     import owner_productos_bp
 # Miembro
 from app.routes.miembro.user_dashboard    import user_dashboard_bp
 from app.routes.miembro.user_payments     import user_payments_bp
@@ -111,6 +112,7 @@ def create_app():
     app.register_blueprint(owner_profile_bp,    url_prefix="/api/owner_gym")
     app.register_blueprint(owner_trainers_bp,   url_prefix="/api/owner_gym")
     app.register_blueprint(owner_membresias_bp, url_prefix="/api/owner_gym")
+    app.register_blueprint(owner_productos_bp,  url_prefix="/api/owner_gym")
     # Superadmin — todos bajo /api/superadmin
     app.register_blueprint(gimnasios_admin_bp,    url_prefix="/api/superadmin")
     app.register_blueprint(suscripciones_admin_bp, url_prefix="/api/superadmin")
