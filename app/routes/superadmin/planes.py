@@ -160,4 +160,4 @@ def toggle_plan(plan_id: int):
 
     plan.activo = True
     db.session.commit()
-    return jsonify({"msg": "Plan activado.", "id": plan.id, "activo": 
+    return jsonify({"msg": "Plan activado.", "id": plan.id, "activo": True}), 200

@@ -420,4 +420,49 @@ def proyeccion_ingresos():
         return jsonify(payload), 200
     except RuntimeError as e:
         return jsonify({"error": str(e), "spark_enabled": SPARK_ENABLED}), 503
-    except Ex
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@spark_platform_bp.route("/analytics/churn-gimnasios", methods=["GET"])
+@jwt_required()
+@require_role("superadmin")
+def churn_gimnasios():
+    """
+    Gimnasios con riesgo de churn SaaS (suscripción vencida, sin actividad).
+    No usa Spark — consulta directa PG + Mongo, respuesta inmediata.
+    """
+    try:
+        payload = _churn_gimnasios()
+        return jsonify(payload), 200
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@spark_platform_bp.route("/analytics/crecimiento", methods=["GET"])
+@jwt_required()
+@require_role("superadmin")
+def crecimiento_miembros():
+    """
+    Crecimiento mensual de nuevos miembros por gimnasio.
+    Cache de 6h.
+    """
+    key    = "platform_crecimiento_v1"
+    cached = cache_get(key, ttl_hours=_CACHE_TTL_PLATFORM)
+    if cached:
+        cached["desde_cache"] = True
+        return jsonify(cached), 200
+
+    try:
+        spark   = get_spark()
+        payload = _crecimiento_miembros(spark)
+        payload["desde_cache"] = False
+        cache_set(key, payload)
+        return jsonify(payload), 200
+    except RuntimeError as e:
+        return jsonify({"error": str(e), "spark_enabled": SPARK_ENABLED}), 503
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500

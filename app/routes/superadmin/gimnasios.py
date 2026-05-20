@@ -253,4 +253,5 @@ def metricas_gimnasio(gym_id: int):
         "asistencias_12m":     asistencias_12m,
         "ingresos_12m":        ingresos_12m,
         "membresias_activas":  membresias_activas,
-      
+        "generado_en":         datetime.utcnow().isoformat(),
+    }), 200

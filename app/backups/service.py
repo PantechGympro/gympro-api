@@ -74,12 +74,52 @@ def load_history():
         return []
 
 def save_history(entry):
-    os.makedirs(BACKUP_DIR, exist_ok=True)   # garantiza que el dir existe antes de escribir
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     history = load_history()
     history.insert(0, entry)
-    history = history[:10]  # máximo 10 registros
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2, ensure_ascii=False)
+
+
+def _find_and_delete(filename: str) -> None:
+    """Busca un archivo por nombre en BACKUP_DIR y lo elimina si existe."""
+    for root, _, files in os.walk(BACKUP_DIR):
+        if filename in files:
+            try:
+                os.remove(os.path.join(root, filename))
+            except OSError as exc:
+                print(f"[backup cleanup] No se pudo borrar {filename}: {exc}")
+            return
+
+
+def cleanup_old_backups(max_keep: int = 3) -> None:
+    """
+    Mantiene solo los últimos `max_keep` backups completados en disco e historial.
+    Elimina los archivos físicos de los backups que quedan fuera del límite.
+    Los registros de error se purgan a un máximo de 5 para no ensuciar el historial.
+    """
+    history = load_history()
+
+    completed = [h for h in history if h.get("status") == "completado"]
+    errors    = [h for h in history if h.get("status") == "error"]
+
+    # Backups a eliminar (los más antiguos que excedan el límite)
+    to_remove = completed[max_keep:]
+
+    for entry in to_remove:
+        for fname in (entry.get("files") or {}).values():
+            if fname:
+                _find_and_delete(fname)
+
+    # Reconstruir historial limpio
+    new_history = sorted(
+        completed[:max_keep] + errors[:5],
+        key=lambda h: h.get("date", ""),
+        reverse=True,
+    )
+
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(new_history, f, indent=2, ensure_ascii=False)
 
 
 # ================= FILTROS MONGODB =================
@@ -424,6 +464,12 @@ def run_backup(job_id: str, backup_type: str, app):
             backup_state["current_step"] = "Completado"
             backup_state["progress_percentage"] = 100
             backup_state["last_backup"] = datetime.now()
+
+            # Purgar backups viejos — mantener solo los 3 más recientes
+            try:
+                cleanup_old_backups(max_keep=3)
+            except Exception as cleanup_err:
+                print(f"[backup cleanup] Error al purgar: {cleanup_err}")
 
         except Exception as e:
             backup_state["current_step"] = f"Error: {str(e)}"

@@ -22,11 +22,13 @@ from datetime import datetime
 import threading
 import uuid
 import os
+import json
 
 from app.backups.service import (
     backup_state,
     run_backup,
     BACKUP_DIR,
+    HISTORY_FILE,
     load_history,
     save_history,
 )
@@ -180,6 +182,67 @@ def historial_backups():
     return jsonify({
         "historial": history[:limit],
         "total":     len(history),
+    }), 200
+
+
+@backups_admin_bp.route("/backups/historial/<job_id>", methods=["DELETE"])
+@jwt_required()
+@require_role("superadmin")
+def delete_historial_entry(job_id: str):
+    """
+    Elimina una entrada del historial por job_id.
+    Si tiene archivos asociados ('files'), los borra del disco también.
+    job_id especial: '__errors__' elimina todas las entradas con status 'error'.
+    """
+    history = load_history()
+
+    def _is_junk(h: dict) -> bool:
+        """
+        Detecta entradas que no son backups completados, cubriendo ambos formatos:
+        - Nuevo formato:  status == "error"
+        - Viejo formato:  size == "ERROR"  o  tiene campo "error"  o  status == "iniciado"
+        - Sin status y sin files → entrada huérfana (nunca completó)
+        """
+        s = h.get("status")
+        return (
+            s == "error"
+            or s == "iniciado"
+            or h.get("size") == "ERROR"
+            or (h.get("error") is not None)
+            or (s is None and not h.get("files") and not h.get("url"))
+        )
+
+    if job_id == "__errors__":
+        to_remove = [h for h in history if _is_junk(h)]
+        new_hist  = [h for h in history if not _is_junk(h)]
+    else:
+        to_remove = [h for h in history if h.get("job_id") == job_id]
+        new_hist  = [h for h in history if h.get("job_id") != job_id]
+
+    if not to_remove:
+        return jsonify({"msg": "Entrada no encontrada."}), 404
+
+    # Eliminar archivos físicos del backup
+    deleted_files = []
+    for entry in to_remove:
+        for fname in (entry.get("files") or {}).values():
+            if fname:
+                for root, _, files in os.walk(BACKUP_DIR):
+                    if fname in files:
+                        try:
+                            os.remove(os.path.join(root, fname))
+                            deleted_files.append(fname)
+                        except OSError:
+                            pass
+                        break
+
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(new_hist, f, indent=2, ensure_ascii=False)
+
+    return jsonify({
+        "msg":           f"{len(to_remove)} entrada(s) eliminada(s).",
+        "deleted_files": deleted_files,
     }), 200
 
 
