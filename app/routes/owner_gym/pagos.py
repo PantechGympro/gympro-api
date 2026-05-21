@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from datetime import date
 from dateutil.relativedelta import relativedelta
+from bson import ObjectId
 import math
 
 from app.mongo import get_db
@@ -117,3 +118,189 @@ def listar_pagos():
     except Exception as e:
         print(f"Error listando pagos: {e}")
         return jsonify({"pagos": [], "total": 0}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/pagos/categorias — Categorías únicas con ventas en este gimnasio
+# ─────────────────────────────────────────────────────────────────────────────
+@pagos_bp.route("/api/pagos/categorias", methods=["GET"])
+@jwt_required()
+@require_tenant
+def listar_categorias_ventas():
+    """Devuelve las categorías distintas presentes en ventas POS del gimnasio."""
+    try:
+        db     = get_db()
+        gym_id = g.tenant_id
+
+        pipeline = [
+            {"$match": {"id_gimnasio": gym_id}},
+            {"$unwind": "$items"},
+            {"$group": {"_id": "$items.categoria"}},
+            {"$match": {"_id": {"$ne": None}}},
+            {"$sort": {"_id": 1}},
+        ]
+        cats = [r["_id"] for r in db.ventas.aggregate(pipeline) if r.get("_id")]
+        return jsonify({"categorias": cats}), 200
+
+    except Exception as e:
+        print(f"Error en listar_categorias_ventas: {e}")
+        return jsonify({"categorias": []}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/pagos/todos — Feed unificado: membresías + ventas POS
+#   ?tipo=todos|membresia|venta   (default: todos)
+#   ?categoria=<str>              (sólo cuando tipo=venta, filtra por categoría de ítem)
+#   ?page=<int>                   (default: 1)
+# ─────────────────────────────────────────────────────────────────────────────
+@pagos_bp.route("/api/pagos/todos", methods=["GET"])
+@jwt_required()
+@require_tenant
+def listar_todos_movimientos():
+    """Feed paginado unificado de membresías y ventas POS con filtros opcionales."""
+    try:
+        db        = get_db()
+        gym_id    = g.tenant_id
+        page      = request.args.get("page", 1, type=int)
+        tipo      = request.args.get("tipo", "todos")          # todos | membresia | venta
+        categoria = (request.args.get("categoria") or "").strip()
+        per_page  = 6
+        skip      = (page - 1) * per_page
+
+        # ── Construir pipeline según filtro de tipo ───────────────────────────
+        if tipo == "membresia":
+            # Solo pagos de membresías
+            pipeline = [
+                {"$match": {"id_gimnasio": gym_id}},
+                {"$addFields": {
+                    "_tipo":     {"$literal": "membresia"},
+                    "_fecha_dt": {"$toDate": "$fecha_pago"},
+                    "_monto":    "$monto",
+                }},
+                {"$sort": {"_fecha_dt": -1}},
+                {"$facet": {
+                    "metadata": [{"$count": "total"}],
+                    "data":     [{"$skip": skip}, {"$limit": per_page}],
+                }},
+            ]
+            agg   = list(db.pagos.aggregate(pipeline))
+
+        elif tipo == "venta":
+            # Solo ventas POS (con filtro opcional de categoría)
+            venta_match: dict = {"id_gimnasio": gym_id}
+            if categoria:
+                venta_match["items.categoria"] = categoria
+
+            pipeline = [
+                {"$match": venta_match},
+                {"$addFields": {
+                    "_tipo":     {"$literal": "venta"},
+                    "_fecha_dt": "$fecha",
+                    "_monto":    "$total",
+                }},
+                {"$sort": {"_fecha_dt": -1}},
+                {"$facet": {
+                    "metadata": [{"$count": "total"}],
+                    "data":     [{"$skip": skip}, {"$limit": per_page}],
+                }},
+            ]
+            agg = list(db.ventas.aggregate(pipeline))
+
+        else:
+            # Todos: union de ambas colecciones
+            pipeline = [
+                {"$match": {"id_gimnasio": gym_id}},
+                {"$addFields": {
+                    "_tipo":     {"$literal": "membresia"},
+                    "_fecha_dt": {"$toDate": "$fecha_pago"},
+                    "_monto":    "$monto",
+                }},
+                {"$unionWith": {
+                    "coll": "ventas",
+                    "pipeline": [
+                        {"$match": {"id_gimnasio": gym_id}},
+                        {"$addFields": {
+                            "_tipo":     {"$literal": "venta"},
+                            "_fecha_dt": "$fecha",
+                            "_monto":    "$total",
+                        }},
+                    ],
+                }},
+                {"$sort": {"_fecha_dt": -1}},
+                {"$facet": {
+                    "metadata": [{"$count": "total"}],
+                    "data":     [{"$skip": skip}, {"$limit": per_page}],
+                }},
+            ]
+            agg = list(db.pagos.aggregate(pipeline))
+
+        total = agg[0]["metadata"][0]["total"] if agg and agg[0]["metadata"] else 0
+        docs  = agg[0]["data"] if agg else []
+
+        # ── Batch-lookup nombres para pagos de membresía ──────────────────────
+        ids_lookup = set()
+        for doc in docs:
+            if doc.get("_tipo") == "membresia" and doc.get("id_miembro"):
+                try:
+                    ids_lookup.add(ObjectId(str(doc["id_miembro"])))
+                except Exception:
+                    pass
+
+        nombre_cache: dict = {}
+        if ids_lookup:
+            for m in db.miembros.find({"_id": {"$in": list(ids_lookup)}}):
+                full = f"{m.get('nombre', '')} {m.get('apellido', '')}".strip()
+                nombre_cache[str(m["_id"])] = full or "—"
+
+        # ── Serializar ────────────────────────────────────────────────────────
+        movimientos = []
+        for doc in docs:
+            doc_tipo  = doc.get("_tipo", "membresia")
+            fecha     = doc.get("_fecha_dt")
+            fecha_str = fecha.isoformat() if hasattr(fecha, "isoformat") else str(fecha or "")
+
+            if doc_tipo == "membresia":
+                id_m   = doc.get("id_miembro")
+                nombre = nombre_cache.get(str(id_m), "—") if id_m else "—"
+                movimientos.append({
+                    "id":          str(doc["_id"]),
+                    "tipo":        "membresia",
+                    "titulo":      nombre,
+                    "monto":       float(doc.get("_monto", 0)),
+                    "metodo_pago": doc.get("metodo_pago", ""),
+                    "concepto":    doc.get("concepto", ""),
+                    "fecha":       fecha_str,
+                    "categoria":   None,
+                })
+            else:
+                nombre  = (doc.get("nombre_miembro") or "").strip() or "Cliente general"
+                items   = doc.get("items", [])
+                resumen = items[0].get("nombre", "Venta POS") if items else "Venta POS"
+                if len(items) > 1:
+                    resumen = f"{resumen} +{len(items) - 1} más"
+                # Categorías presentes en la venta (únicas)
+                cats = list(dict.fromkeys(
+                    i.get("categoria", "") for i in items if i.get("categoria")
+                ))
+                movimientos.append({
+                    "id":          str(doc["_id"]),
+                    "tipo":        "venta",
+                    "titulo":      nombre,
+                    "monto":       float(doc.get("_monto", 0)),
+                    "metodo_pago": doc.get("metodo_pago", ""),
+                    "concepto":    resumen,
+                    "fecha":       fecha_str,
+                    "categoria":   cats[0] if len(cats) == 1 else (", ".join(cats) if cats else None),
+                })
+
+        pages = math.ceil(total / per_page) if total > 0 else 0
+        return jsonify({
+            "movimientos": movimientos,
+            "total":       total,
+            "pages":       pages,
+            "page":        page,
+        }), 200
+
+    except Exception as e:
+        print(f"Error en listar_todos_movimientos: {e}")
+        return jsonify({"movimientos": [], "total": 0, "pages": 0, "page": 1}), 500

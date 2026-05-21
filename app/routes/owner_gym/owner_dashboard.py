@@ -221,38 +221,87 @@ def get_ingresos_historicos():
 @require_role("owner_gym")
 @require_tenant
 def get_actividad_reciente():
-    """Feed de actividad reciente: últimos pagos y registros de miembros."""
+    """Feed de actividad reciente: últimos pagos, registros de miembros y ventas POS."""
+    from bson import ObjectId
+
     gym_id = g.tenant_id
     mdb    = get_db()
-    limit  = min(20, request.args.get("limit", 10, type=int))
+    limit  = min(30, request.args.get("limit", 20, type=int))
 
-    # Últimos pagos
+    # ── Últimos pagos de membresías ───────────────────────────────────────────
     pagos = list(
         mdb.pagos.find({"id_gimnasio": gym_id})
         .sort("fecha_pago", -1).limit(limit)
     )
-    # Últimos miembros registrados
+
+    # Batch-lookup de nombres: pagos guardan id_miembro (ObjectId) sin nombre
+    ids_sin_nombre = set()
+    for p in pagos:
+        if not (p.get("nombre_miembro") or "").strip():
+            raw = p.get("id_miembro")
+            if raw:
+                try:
+                    ids_sin_nombre.add(ObjectId(str(raw)))
+                except Exception:
+                    pass
+
+    nombre_cache: dict = {}
+    if ids_sin_nombre:
+        for m in mdb.miembros.find({"_id": {"$in": list(ids_sin_nombre)}}):
+            full = f"{m.get('nombre', '')} {m.get('apellido', '')}".strip()
+            nombre_cache[str(m["_id"])] = full or "—"
+
+    # ── Últimos miembros registrados ──────────────────────────────────────────
     miembros = list(
         mdb.miembros.find({"id_gimnasio_pg": gym_id})
         .sort("fecha_registro", -1).limit(limit)
     )
 
+    # ── Últimas ventas POS ────────────────────────────────────────────────────
+    ventas_pos = list(
+        mdb.ventas.find({"id_gimnasio": gym_id})
+        .sort("fecha", -1).limit(limit)
+    )
+
+    # ── Construir feed ────────────────────────────────────────────────────────
     actividad = []
+
     for p in pagos:
+        nombre = (p.get("nombre_miembro") or "").strip()
+        if not nombre:
+            raw = p.get("id_miembro")
+            nombre = nombre_cache.get(str(raw), "—") if raw else "—"
         actividad.append({
-            "tipo":    "pago",
-            "icono":   "💳",
-            "texto":   f"{p.get('nombre_miembro', p.get('id_miembro', '—'))} — ${float(p.get('monto', 0)):.2f}",
-            "fecha":   str(p.get("fecha_pago", "")),
-            "metodo":  p.get("metodo_pago", ""),
+            "tipo":   "pago",
+            "titulo": nombre,
+            "sub":    p.get("metodo_pago", ""),
+            "monto":  float(p.get("monto", 0)),
+            "fecha":  str(p.get("fecha_pago", "")),
         })
+
     for m in miembros:
+        nombre = f"{m.get('nombre', '—')} {m.get('apellido', '')}".strip()
         actividad.append({
             "tipo":   "registro",
-            "icono":  "👤",
-            "texto":  f"Nuevo miembro: {m.get('nombre', '—')}",
+            "titulo": nombre,
+            "sub":    m.get("estado", ""),
             "fecha":  str(m.get("fecha_registro", "")),
-            "estado": m.get("estado", ""),
+        })
+
+    for v in ventas_pos:
+        nombre = (v.get("nombre_miembro") or "").strip() or "Cliente general"
+        items  = v.get("items", [])
+        resumen = items[0].get("nombre", "Venta") if items else "Venta"
+        if len(items) > 1:
+            resumen = f"{resumen} +{len(items) - 1} más"
+        fecha_v = v.get("fecha")
+        fecha_str = fecha_v.isoformat() if hasattr(fecha_v, "isoformat") else str(fecha_v or "")
+        actividad.append({
+            "tipo":   "venta",
+            "titulo": nombre,
+            "sub":    resumen,
+            "monto":  float(v.get("total", 0)),
+            "fecha":  fecha_str,
         })
 
     actividad.sort(key=lambda x: x.get("fecha", ""), reverse=True)

@@ -15,9 +15,12 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from bson import ObjectId
 from datetime import datetime, timezone
+from dateutil.relativedelta import relativedelta
 
 from app.mongo import get_db
 from app.utils.tenant import require_tenant
+
+LOW_STOCK_THRESHOLD = 5  # umbral global de "stock bajo"
 
 owner_productos_bp = Blueprint("owner_productos", __name__)
 
@@ -33,6 +36,87 @@ def _serialize(p):
         "imagenes":    p.get("imagenes", []),
         "activo":      p.get("activo", True),
     }
+
+
+# ─── GET /alertas ────────────────────────────────────────────────────────────
+
+@owner_productos_bp.route("/alertas", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_alertas():
+    """
+    Devuelve alertas operativas del gimnasio:
+      · Productos sin stock (nivel: error)
+      · Productos con stock bajo ≤ LOW_STOCK_THRESHOLD (nivel: warning)
+      · Membresías por vencer próximos 7 días (nivel: warning)
+      · Membresías ya vencidas con estado activo (nivel: error)
+    """
+    db      = get_db()
+    gym_id  = g.tenant_id
+    alertas = []
+
+    # ── Productos sin stock ───────────────────────────────────────────────────
+    sin_stock = list(db.productos.find(
+        {"id_gimnasio": gym_id, "activo": True, "stock": 0}
+    ))
+    for p in sin_stock:
+        alertas.append({
+            "nivel":   "error",
+            "tipo":    "sin_stock",
+            "titulo":  f"{p['nombre']} — Sin stock",
+            "detalle": "El producto está agotado. Reabastecer urgente.",
+            "icono":   "📦",
+        })
+
+    # ── Productos con stock bajo ──────────────────────────────────────────────
+    bajo_stock = list(db.productos.find({
+        "id_gimnasio": gym_id,
+        "activo": True,
+        "stock": {"$gt": 0, "$lte": LOW_STOCK_THRESHOLD},
+    }))
+    for p in bajo_stock:
+        alertas.append({
+            "nivel":   "warning",
+            "tipo":    "stock_bajo",
+            "titulo":  f"{p['nombre']} — Stock bajo",
+            "detalle": f"Quedan {p['stock']} unidad(es). Considera reabastecer.",
+            "icono":   "⚠️",
+        })
+
+    # ── Membresías por vencer (próximos 7 días) ───────────────────────────────
+    now    = datetime.now(timezone.utc)
+    hoy    = now.date().isoformat()
+    en_7   = (now + relativedelta(days=7)).date().isoformat()
+    por_vencer = db.miembro_membresias.count_documents({
+        "id_gimnasio": gym_id,
+        "estado": "activa",
+        "fecha_fin": {"$gte": hoy, "$lte": en_7},
+    })
+    if por_vencer > 0:
+        alertas.append({
+            "nivel":   "warning",
+            "tipo":    "membresias_por_vencer",
+            "titulo":  f"{por_vencer} membresía(s) vencen esta semana",
+            "detalle": "Próximos 7 días. Notifica a los miembros para renovar.",
+            "icono":   "🗓️",
+        })
+
+    # ── Membresías vencidas con estado aún "activa" ───────────────────────────
+    vencidas = db.miembro_membresias.count_documents({
+        "id_gimnasio": gym_id,
+        "estado": "activa",
+        "fecha_fin": {"$lt": hoy},
+    })
+    if vencidas > 0:
+        alertas.append({
+            "nivel":   "error",
+            "tipo":    "membresias_vencidas",
+            "titulo":  f"{vencidas} membresía(s) vencida(s) sin actualizar",
+            "detalle": "Revisar y marcar como vencidas o renovar.",
+            "icono":   "❌",
+        })
+
+    return jsonify({"alertas": alertas, "total": len(alertas)}), 200
 
 
 # ─── GET /productos ───────────────────────────────────────────────────────────
