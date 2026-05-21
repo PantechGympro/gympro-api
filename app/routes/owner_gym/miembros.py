@@ -147,24 +147,32 @@ def actualizar_miembro(id):
     if miembro.id_gimnasio_pg != gym_id:
         return jsonify({"error": "No autorizado"}), 403
 
-    usuario = User.find_by_id(miembro.id_usuario)
-    if not usuario: return jsonify({"error": "Usuario base no encontrado"}), 404
-    
+    usuario = User.find_by_id(miembro.id_usuario) if miembro.id_usuario else None
+
     data = request.form
     file = request.files.get('foto')
 
     try:
-        if data.get('nombre'): usuario.nombre = data.get('nombre')
-        
-        if data.get('email'):
-            existente = User.find_by_email(data.get('email'))
-            if existente and existente._id != usuario._id:
-                return jsonify({"error": "El email ya está en uso por otro usuario"}), 400
-            usuario.email = data.get('email')
-        
-        # Guardamos cambios del usuario
-        usuario.save()
-        
+        nuevo_nombre = data.get('nombre') or None
+        nuevo_email  = data.get('email')  or None
+
+        # Actualizar User de Mongo si existe
+        if usuario:
+            if nuevo_nombre:
+                usuario.nombre = nuevo_nombre
+            if nuevo_email:
+                existente = User.find_by_email(nuevo_email)
+                if existente and existente._id != usuario._id:
+                    return jsonify({"error": "El email ya está en uso por otro usuario"}), 400
+                usuario.email = nuevo_email
+            usuario.save()
+
+        # Siempre actualizar campos desnormalizados en Miembro (búsqueda + to_dict)
+        if nuevo_nombre:
+            miembro.nombre = nuevo_nombre
+        if nuevo_email:
+            miembro.email = nuevo_email
+
         if data.get('telefono'): miembro.telefono = data.get('telefono')
         if data.get('sexo'): miembro.sexo = data.get('sexo')
         if data.get('peso_inicial'): miembro.peso_inicial = data.get('peso_inicial')
