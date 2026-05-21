@@ -44,6 +44,10 @@ class Config:
     # ── Rate Limiting (Flask-Limiter + Redis) ─────────────────────────────────
     # Redis compartido entre todos los workers de Gunicorn para contadores globales.
     # Sin Redis, cada worker tendría su propio contador y los límites serían ineficaces.
+    # ── Upload size ───────────────────────────────────────────────────────────
+    # 15 MB — permite hasta 3 imágenes base64 de ~4 MB c/u antes de encoding.
+    MAX_CONTENT_LENGTH = 15 * 1024 * 1024
+
     RATELIMIT_STORAGE_URI  = os.getenv("REDIS_URL", "redis://redis:6379/0")
     RATELIMIT_HEADERS_ENABLED = True   # Agrega X-RateLimit-* headers a las respuestas
     RATELIMIT_SWALLOW_ERRORS  = True   # Fail open: si Redis cae, no bloquea requests

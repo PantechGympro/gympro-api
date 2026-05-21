@@ -43,6 +43,7 @@ from app.routes.compartido.membresias         import membresias_bp
 from app.routes.compartido.miembro_membresias import miembro_membresias_bp
 # Backups (módulo propio)
 from app.backups.routes                   import backups_bp
+from app.backups.tenant_routes            import tenant_backups_bp
 # Superadmin — gestión de plataforma SaaS
 from app.routes.superadmin.gimnasios      import gimnasios_admin_bp
 from app.routes.superadmin.suscripciones  import suscripciones_admin_bp
@@ -113,6 +114,7 @@ def create_app():
     app.register_blueprint(owner_trainers_bp,   url_prefix="/api/owner_gym")
     app.register_blueprint(owner_membresias_bp, url_prefix="/api/owner_gym")
     app.register_blueprint(owner_productos_bp,  url_prefix="/api/owner_gym")
+    app.register_blueprint(tenant_backups_bp,  url_prefix="/api/owner_gym")
     # Superadmin — todos bajo /api/superadmin
     app.register_blueprint(gimnasios_admin_bp,    url_prefix="/api/superadmin")
     app.register_blueprint(suscripciones_admin_bp, url_prefix="/api/superadmin")
