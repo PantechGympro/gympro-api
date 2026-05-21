@@ -139,6 +139,54 @@ def crear_staff():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PUT /api/owner_gym/staff/<id>
+# ─────────────────────────────────────────────────────────────────────────────
+@owner_trainers_bp.route("/staff/<int:user_id>", methods=["PUT"])
+@jwt_required()
+@require_role("owner_gym")
+@require_tenant
+def actualizar_staff(user_id: int):
+    """
+    Edita datos de un miembro del staff (entrenador o recepcionista).
+    Body JSON (todos opcionales):
+        { "nombre": "...", "email": "...", "password": "...", "rol": "Entrenador" }
+    """
+    gym_id   = g.tenant_id
+    role_ids = _staff_filter(gym_id)
+    usuario  = Usuario.query.filter_by(id=user_id, id_gimnasio=gym_id).first()
+    if not usuario or usuario.id_rol not in role_ids:
+        return jsonify({"msg": "Usuario no encontrado"}), 404
+
+    data     = request.get_json() or {}
+    nombre   = (data.get("nombre")   or "").strip() or None
+    email    = (data.get("email")    or "").strip().lower() or None
+    password = (data.get("password") or "").strip() or None
+    rol_name = (data.get("rol")      or "").strip() or None
+
+    if nombre:
+        usuario.nombre = nombre
+
+    if email and email != usuario.email:
+        if Usuario.query.filter_by(email=email).first():
+            return jsonify({"msg": "El email ya está registrado"}), 409
+        usuario.email = email
+
+    if password:
+        usuario.set_password(password)
+
+    if rol_name:
+        if rol_name not in _STAFF_ROLES:
+            return jsonify({"msg": f"rol debe ser uno de: {', '.join(_STAFF_ROLES)}"}), 400
+        rol_obj = Rol.query.filter_by(nombre=rol_name).first()
+        if not rol_obj:
+            return jsonify({"msg": f"Rol '{rol_name}' no existe en la base de datos"}), 500
+        usuario.id_rol = rol_obj.id
+
+    db.session.commit()
+    return jsonify({"msg": "Usuario actualizado", **usuario.to_dict()}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PATCH /api/owner_gym/staff/<id>/toggle
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_trainers_bp.route("/staff/<int:user_id>/toggle", methods=["PATCH"])

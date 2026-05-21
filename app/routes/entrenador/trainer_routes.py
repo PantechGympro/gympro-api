@@ -7,9 +7,83 @@ import traceback
 from app.mongo import get_db
 from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario
+from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
+
+
+# ═══════════════════════════════════════════════════════════════
+#  RUTA — DASHBOARD RESUMEN
+# ═══════════════════════════════════════════════════════════════
+
+@trainer_bp.route('/dashboard', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_trainer_dashboard():
+    """Resumen ejecutivo para el landing del entrenador."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        today_start = datetime.combine(date.today(), datetime.min.time())
+        today_end   = datetime.combine(date.today(), datetime.max.time())
+        week_start  = datetime.combine(
+            date.today() - timedelta(days=date.today().weekday()),
+            datetime.min.time()
+        )
+
+        # Datos del entrenador desde PG
+        usuario = Usuario.query.get(trainer_id)
+        if not usuario:
+            return jsonify({"error": "Entrenador no encontrado"}), 404
+
+        # KPIs
+        total_clients = mdb.miembros.count_documents({
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "estado":           "Activo",
+        })
+        sessions_today_list = list(mdb.sesiones.find({
+            "id_entrenador_pg": trainer_id,
+            "fecha":            {"$gte": today_start, "$lte": today_end},
+        }).sort("hora_inicio", 1))
+        sessions_week_total = mdb.sesiones.count_documents({
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "fecha":            {"$gte": week_start},
+        })
+        sessions_week_done = mdb.sesiones.count_documents({
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "fecha":            {"$gte": week_start},
+            "estado":           "completed",
+        })
+
+        # Próximas sesiones programadas (sin contar hoy en curso)
+        upcoming = list(mdb.sesiones.find({
+            "id_entrenador_pg": trainer_id,
+            "fecha":            {"$gt": datetime.now()},
+            "estado":           {"$in": ["scheduled"]},
+        }).sort("fecha", 1).limit(5))
+
+        return jsonify({
+            "trainer_name": usuario.nombre,
+            "stats": {
+                "total_clients":   total_clients,
+                "sessions_today":  len(sessions_today_list),
+                "sessions_week":   sessions_week_total,
+                "completion_rate": round(sessions_week_done / sessions_week_total * 100)
+                                   if sessions_week_total else 0,
+            },
+            "today_sessions":    [_sesion_to_dict(mdb, s) for s in sessions_today_list],
+            "upcoming_sessions": [_sesion_to_dict(mdb, s) for s in upcoming],
+        }), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -163,13 +237,6 @@ def get_trainer_profile():
             {"id_entrenador_pg": trainer_id, "estado": "completed"}
         )
 
-        ingresos_pipeline = [
-            {"$match":  {"id_entrenador_pg": trainer_id}},
-            {"$group":  {"_id": None, "total": {"$sum": "$monto"}}}
-        ]
-        ingresos_result = list(mdb.pagos.aggregate(ingresos_pipeline))
-        total_ingresos  = ingresos_result[0]["total"] if ingresos_result else 0
-
         eval_pipeline = [
             {"$match": {"id_entrenador_pg": trainer_id}},
             {"$group": {"_id": None, "promedio": {"$avg": "$calificacion"}}}
@@ -195,7 +262,6 @@ def get_trainer_profile():
             'stats': {
                 'totalClients':  total_clientes,
                 'totalSessions': total_sesiones,
-                'totalEarnings': float(total_ingresos),
                 'avgRating':     round(calificacion_promedio, 1),
                 'yearsActive':   anos_activos,
                 'certifications':len(certificaciones)
@@ -349,7 +415,10 @@ def get_sessions():
             .limit(per_page)
         )
 
-        all_sessions = list(mdb.sesiones.find({"id_entrenador_pg": trainer_id}))
+        all_sessions = list(mdb.sesiones.find({
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   g.tenant_id,
+        }))
         stats = _compute_stats(all_sessions)
 
         return jsonify({
@@ -501,11 +570,12 @@ def get_routines():
                 total_ejercicios += len(ejercicios)
                 for ej in ejercicios:
                     exercise_list.append({
-                        'name':  ej.get("nombre_ejercicio", ""),
-                        'sets':  f"{ej.get('series', '')}x{ej.get('repeticiones', '')}",
-                        'rest':  ej.get("notas") or '60s',
-                        'day':   dia.get("dia_semana") or '',
-                        'peso':  ej.get("peso") or ''
+                        'name':     ej.get("nombre_ejercicio", ""),
+                        'sets':     f"{ej.get('series', '')}x{ej.get('repeticiones', '')}",
+                        'rest':     ej.get("notas") or '60s',
+                        'day':      dia.get("dia_semana") or '',
+                        'peso':     ej.get("peso") or '',
+                        'imagenes': ej.get("imagenes") or [],
                     })
 
             result.append({
@@ -585,6 +655,8 @@ def create_routine():
                     "repeticiones":     str(ej.get('reps', '12')),
                     "peso":             ej.get('peso', ''),
                     "notas":            ej.get('notes', ''),
+                    # Hasta 3 imágenes base64 de cómo ejecutar el ejercicio
+                    "imagenes":         [img for img in ej.get('imagenes', []) if img][:3],
                     "orden":            order_e
                 }
                 for order_e, ej in enumerate(day_data.get('exercises', []))
@@ -636,6 +708,102 @@ def assign_routine_to_member(routine_id):
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BIBLIOTECA DE EJERCICIOS (catálogo PG por gimnasio)
+# ═══════════════════════════════════════════════════════════════
+
+@trainer_bp.route('/exercises', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_exercises():
+    """Lista todos los ejercicios activos del gimnasio."""
+    gym_id = g.tenant_id
+    search = request.args.get('search', '').strip()
+    grupo  = request.args.get('grupo_muscular', '').strip()
+
+    q = Ejercicio.query.filter_by(id_gimnasio=gym_id, activo=True)
+    if search:
+        q = q.filter(Ejercicio.nombre.ilike(f'%{search}%'))
+    if grupo:
+        q = q.filter_by(grupo_muscular=grupo)
+
+    exercises = q.order_by(Ejercicio.nombre).all()
+    return jsonify({'exercises': [e.to_dict() for e in exercises]}), 200
+
+
+@trainer_bp.route('/exercises', methods=['POST'])
+@jwt_required()
+@require_tenant
+def create_exercise():
+    """Crea un ejercicio en la biblioteca del gimnasio."""
+    gym_id = g.tenant_id
+    data   = request.get_json() or {}
+    nombre = (data.get('nombre') or '').strip()
+
+    if not nombre:
+        return jsonify({'error': 'El nombre es requerido'}), 400
+    if Ejercicio.query.filter_by(id_gimnasio=gym_id, nombre=nombre).first():
+        return jsonify({'error': 'Ya existe un ejercicio con ese nombre'}), 409
+
+    ej = Ejercicio(
+        id_gimnasio    = gym_id,
+        nombre         = nombre,
+        descripcion    = data.get('descripcion') or None,
+        grupo_muscular = data.get('grupo_muscular') or None,
+        tipo           = data.get('tipo') or None,
+        series         = int(data['series']) if data.get('series') else None,
+        repeticiones   = data.get('repeticiones') or None,
+        duracion_min   = int(data['duracion_min']) if data.get('duracion_min') else None,
+    )
+    pg_db.session.add(ej)
+    pg_db.session.commit()
+    return jsonify(ej.to_dict()), 201
+
+
+@trainer_bp.route('/exercises/<int:exercise_id>', methods=['PUT'])
+@jwt_required()
+@require_tenant
+def update_exercise(exercise_id):
+    """Actualiza un ejercicio de la biblioteca."""
+    gym_id = g.tenant_id
+    ej     = Ejercicio.query.filter_by(id=exercise_id, id_gimnasio=gym_id, activo=True).first()
+    if not ej:
+        return jsonify({'error': 'Ejercicio no encontrado'}), 404
+
+    data = request.get_json() or {}
+
+    nuevo_nombre = (data.get('nombre') or '').strip()
+    if nuevo_nombre and nuevo_nombre != ej.nombre:
+        if Ejercicio.query.filter_by(id_gimnasio=gym_id, nombre=nuevo_nombre).first():
+            return jsonify({'error': 'Ya existe un ejercicio con ese nombre'}), 409
+        ej.nombre = nuevo_nombre
+
+    if 'descripcion'    in data: ej.descripcion    = data['descripcion'] or None
+    if 'grupo_muscular' in data: ej.grupo_muscular = data['grupo_muscular'] or None
+    if 'tipo'           in data: ej.tipo           = data['tipo'] or None
+    if 'series'         in data: ej.series         = int(data['series']) if data['series'] else None
+    if 'repeticiones'   in data: ej.repeticiones   = data['repeticiones'] or None
+    if 'duracion_min'   in data: ej.duracion_min   = int(data['duracion_min']) if data['duracion_min'] else None
+
+    pg_db.session.commit()
+    return jsonify(ej.to_dict()), 200
+
+
+@trainer_bp.route('/exercises/<int:exercise_id>', methods=['DELETE'])
+@jwt_required()
+@require_tenant
+def delete_exercise(exercise_id):
+    """Soft-delete de un ejercicio (activo=False)."""
+    gym_id = g.tenant_id
+    ej     = Ejercicio.query.filter_by(id=exercise_id, id_gimnasio=gym_id).first()
+    if not ej:
+        return jsonify({'error': 'Ejercicio no encontrado'}), 404
+
+    ej.activo = False
+    pg_db.session.commit()
+    return jsonify({'msg': 'Ejercicio eliminado'}), 200
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -737,20 +905,20 @@ def _sesion_to_dict(mdb, s: dict) -> dict:
     hora_str  = hora if isinstance(hora, str) else "00:00"
 
     return {
-        "id_sesion":      str(s["_id"]),
-        "date":           fecha_str.split('T')[0] if 'T' in fecha_str else fecha_str,
-        "time":           hora_str,
-        "client":         _get_client_name(mdb, s),
-        "type":           s.get("tipo"),
-        "duration":       f"{s.get('duracion_minutos', 60)} min",
-        "duracion_minutos":s.get("duracion_minutos", 60),
-        "location":       s.get("ubicacion") or "Sin ubicación",
-        "status":         s.get("estado"),
-        "notes":          s.get("notas") or "",
-        "exercises":      s.get("num_ejercicios") or 0,
-        "attendance":     bool(s.get("asistencia")),
-        "nombre_sesion":  s.get("nombre_sesion") or "",
-        "id_miembro":     str(s["id_miembro"]) if s.get("id_miembro") else None,
+        "id_sesion":       str(s["_id"]),
+        "date":            fecha_str.split('T')[0] if 'T' in fecha_str else fecha_str,
+        "time":            hora_str,
+        "client":          _get_client_name(mdb, s),
+        "type":            s.get("tipo"),
+        "duration":        f"{s.get('duracion_minutos', 60)} min",
+        "duracion_minutos": s.get("duracion_minutos", 60),
+        "location":        s.get("ubicacion") or "Sin ubicación",
+        "status":          s.get("estado"),
+        "notes":           s.get("notas") or "",
+        "exercises":       s.get("num_ejercicios") or 0,
+        "attendance":      bool(s.get("asistencia")),
+        "nombre_sesion":   s.get("nombre_sesion") or "",
+        "id_miembro":      str(s["id_miembro"]) if s.get("id_miembro") else None,
     }
 
 
@@ -777,12 +945,14 @@ def _compute_stats(sessions: list) -> dict:
 def calcular_racha_dias(mdb, id_miembro):
     try:
         asistencias = list(mdb.asistencias.find({"id_miembro": id_miembro}).sort("fecha", -1))
-        if not asistencias: return 0
+        if not asistencias:
+            return 0
         racha        = 0
         fecha_actual = datetime.now().date()
         for asistencia in asistencias:
             f_asist = asistencia.get("fecha")
-            if isinstance(f_asist, datetime): f_asist = f_asist.date()
+            if isinstance(f_asist, datetime):
+                f_asist = f_asist.date()
             if f_asist == fecha_actual or f_asist == fecha_actual - timedelta(days=racha):
                 racha += 1
                 fecha_actual = f_asist
@@ -799,9 +969,10 @@ def calcular_tasa_asistencia(mdb, id_miembro):
         programadas  = mdb.sesiones.count_documents({
             "id_miembro": id_miembro,
             "fecha":      {"$gte": fecha_inicio},
-            "estado":     {"$in": ['completed', 'cancelled']}
+            "estado":     {"$in": ["completed", "cancelled"]}
         })
-        if programadas == 0: return 0
+        if programadas == 0:
+            return 0
         completadas = mdb.sesiones.count_documents({
             "id_miembro": id_miembro,
             "fecha":      {"$gte": fecha_inicio},
@@ -813,30 +984,38 @@ def calcular_tasa_asistencia(mdb, id_miembro):
 
 
 def determinar_estado_cliente(ultima_sesion, tasa_asistencia):
+    """Retorna 'active' | 'risk' | 'inactive' — alineado con filtros del frontend."""
     try:
-        if not ultima_sesion: return 'warning'
-        fecha_us = ultima_sesion.get("fecha")
-        if isinstance(fecha_us, datetime): fecha_us = fecha_us.date()
-        dias = (datetime.now().date() - fecha_us).days
-        return 'warning' if dias > 7 or tasa_asistencia < 70 else 'active'
+        if tasa_asistencia == 0:
+            return 'inactive'
+        if tasa_asistencia < 70:
+            return 'risk'
+        return 'active'
     except Exception:
         return 'active'
 
 
 def _pct_growth(current, previous):
-    if previous == 0: return 100 if current > 0 else 0
+    if previous == 0:
+        return 100 if current > 0 else 0
     return round(((current - previous) / previous) * 100)
 
 
 def _format_fecha(ts):
     try:
-        if not ts: return 'Nunca'
-        if isinstance(ts, str): ts = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+        if not ts:
+            return 'Nunca'
+        if isinstance(ts, str):
+            ts = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
         diff = datetime.now() - ts
         days = diff.days
-        if days == 0:   return 'Hoy'
-        elif days == 1: return 'Ayer'
-        elif days < 7:  return f'Hace {days} días'
-        else:           return ts.strftime('%d/%m/%Y')
+        if days == 0:
+            return 'Hoy'
+        elif days == 1:
+            return 'Ayer'
+        elif days < 7:
+            return f'Hace {days} días'
+        else:
+            return ts.strftime('%d/%m/%Y')
     except Exception:
         return '-'

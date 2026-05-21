@@ -48,6 +48,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
     # 1. CARGA Y LIMPIEZA DE MIEMBROS (filtrado por gimnasio si aplica)
     df_miembros = leer_coleccion(spark, "miembros").select(
         F.col("_id").alias("id_miembro"),
+        F.col("nombre"),
         F.col("peso_inicial").cast("double"),
         F.col("estatura").cast("double"),
         F.col("sexo"),
@@ -97,6 +98,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
 
     df_features = df.select(
         F.col("id_miembro"),
+        F.col("nombre"),
         F.col("peso_final").alias("peso"),
         F.col("imc_calculado").alias("imc"),
         F.col("grasa_final").alias("grasa"),
@@ -160,6 +162,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
     asignaciones = (
         df_result.select(
             oid_udf(F.col("id_miembro")).alias("id_miembro"),
+            "nombre",
             "cluster", "sexo",
             F.round("peso",    1).alias("peso"),
             F.round("imc",     2).alias("imc"),
