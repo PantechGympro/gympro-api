@@ -747,6 +747,7 @@ def create_exercise():
     if Ejercicio.query.filter_by(id_gimnasio=gym_id, nombre=nombre).first():
         return jsonify({'error': 'Ya existe un ejercicio con ese nombre'}), 409
 
+    raw_imgs = data.get('imagenes') or []
     ej = Ejercicio(
         id_gimnasio    = gym_id,
         nombre         = nombre,
@@ -756,6 +757,8 @@ def create_exercise():
         series         = int(data['series']) if data.get('series') else None,
         repeticiones   = data.get('repeticiones') or None,
         duracion_min   = int(data['duracion_min']) if data.get('duracion_min') else None,
+        imagenes       = [img for img in raw_imgs if img][:3] or None,
+        video          = data.get('video') or None,
     )
     pg_db.session.add(ej)
     pg_db.session.commit()
@@ -786,6 +789,10 @@ def update_exercise(exercise_id):
     if 'series'         in data: ej.series         = int(data['series']) if data['series'] else None
     if 'repeticiones'   in data: ej.repeticiones   = data['repeticiones'] or None
     if 'duracion_min'   in data: ej.duracion_min   = int(data['duracion_min']) if data['duracion_min'] else None
+    if 'imagenes'       in data:
+        raw = data['imagenes'] or []
+        ej.imagenes = [img for img in raw if img][:3] or None
+    if 'video'          in data: ej.video          = data['video'] or None
 
     pg_db.session.commit()
     return jsonify(ej.to_dict()), 200

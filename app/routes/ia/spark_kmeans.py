@@ -49,6 +49,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
     df_miembros = leer_coleccion(spark, "miembros").select(
         F.col("_id").alias("id_miembro"),
         F.col("nombre"),
+        F.col("id_usuario_pg").cast("integer"),   # FK a usuarios PG (para nombre real)
         F.col("peso_inicial").cast("double"),
         F.col("estatura").cast("double"),
         F.col("sexo"),
@@ -99,6 +100,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
     df_features = df.select(
         F.col("id_miembro"),
         F.col("nombre"),
+        F.col("id_usuario_pg"),
         F.col("peso_final").alias("peso"),
         F.col("imc_calculado").alias("imc"),
         F.col("grasa_final").alias("grasa"),
@@ -163,6 +165,7 @@ def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
         df_result.select(
             oid_udf(F.col("id_miembro")).alias("id_miembro"),
             "nombre",
+            F.col("id_usuario_pg"),
             "cluster", "sexo",
             F.round("peso",    1).alias("peso"),
             F.round("imc",     2).alias("imc"),
@@ -203,6 +206,56 @@ def _build_payload(k: int, max_iter: int, resumen: list, asignaciones: list,
 
 
 # ------------------------------------------------------------------------------
+# ENRIQUECIMIENTO DE NOMBRES DESDE POSTGRESQL
+# ------------------------------------------------------------------------------
+
+import re as _re_nombre
+_AUTO_NAME_RE = _re_nombre.compile(r'^miembro\s+[0-9a-f]{16,}$', _re_nombre.IGNORECASE)
+
+
+def _enrich_nombres(asignaciones: list) -> list:
+    """
+    Reemplaza el campo 'nombre' de cada asignación con el nombre real de la
+    tabla usuarios de PostgreSQL (lookup batch por id_usuario_pg).
+
+    Si el miembro no tiene id_usuario_pg o el nombre PG no está disponible,
+    se conserva el valor original de Mongo.
+    """
+    from app.models.pg.usuario import Usuario
+
+    # IDs de usuarios PG que necesitamos enriquecer
+    pg_ids = set()
+    for row in asignaciones:
+        uid = row.get("id_usuario_pg")
+        if uid is not None:
+            try:
+                pg_ids.add(int(uid))
+            except (TypeError, ValueError):
+                pass
+
+    if not pg_ids:
+        return asignaciones
+
+    usuarios = Usuario.query.filter(Usuario.id.in_(pg_ids)).all()
+    user_map = {u.id: u.nombre for u in usuarios}
+
+    enriched = []
+    for row in asignaciones:
+        new_row = dict(row)
+        uid = row.get("id_usuario_pg")
+        if uid is not None:
+            try:
+                real_name = user_map.get(int(uid))
+                if real_name:
+                    new_row["nombre"] = real_name
+            except (TypeError, ValueError):
+                pass
+        enriched.append(new_row)
+
+    return enriched
+
+
+# ------------------------------------------------------------------------------
 # ENDPOINTS
 # ------------------------------------------------------------------------------
 
@@ -235,6 +288,7 @@ def kmeans_analytics():
         resumen, asignaciones, centroides, silhouette = _ejecutar_kmeans(
             spark, k=k, max_iter=max_iter, gym_id=gym_id
         )
+        asignaciones = _enrich_nombres(asignaciones)
         payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette)
         payload["desde_cache"] = False
         cache_set(key, payload)
@@ -271,6 +325,7 @@ def kmeans_train():
         resumen, asignaciones, centroides, silhouette = _ejecutar_kmeans(
             spark, k=k, max_iter=max_iter, gym_id=gym_id
         )
+        asignaciones = _enrich_nombres(asignaciones)
         payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette)
         payload["desde_cache"] = False
         cache_set(key, payload)
