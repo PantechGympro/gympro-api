@@ -144,18 +144,23 @@ def _ejecutar_cancelaciones(gym_id=None) -> dict:
     ).fit(X_tr, y_tr)
 
     # 8. Evaluación
-    y_pred = rf.predict(X_te) if len(X_te) > 0 else rf.predict(X_tr)
-    y_ref  = y_te if len(X_te) > 0 else y_tr
-    y_prob = rf.predict_proba(X_te)[:, 1] if len(X_te) > 0 else rf.predict_proba(X_tr)[:, 1]
+    eval_X = X_te if len(X_te) > 0 else X_tr
+    eval_y = y_te if len(X_te) > 0 else y_tr
+    y_pred      = rf.predict(eval_X)
+    proba_eval  = rf.predict_proba(eval_X)
+    # Cuando todos los labels son la misma clase sklearn sólo devuelve 1 columna
+    pos_col     = 1 if proba_eval.shape[1] > 1 else 0
+    y_prob      = proba_eval[:, pos_col]
 
-    acc = round(float(accuracy_score(y_ref, y_pred)), 4)
+    acc = round(float(accuracy_score(eval_y, y_pred)), 4)
     try:
-        auc = round(float(roc_auc_score(y_ref, y_prob)), 4)
+        auc = round(float(roc_auc_score(eval_y, y_prob)), 4)
     except Exception:
         auc = 0.0
 
     # 9. Predicción sobre todos los miembros
-    probs_all = rf.predict_proba(X)[:, 1]
+    proba_all = rf.predict_proba(X)
+    probs_all = proba_all[:, 1] if proba_all.shape[1] > 1 else proba_all[:, 0]
     predicciones = []
     for i, r in enumerate(rows):
         prob   = float(probs_all[i])
