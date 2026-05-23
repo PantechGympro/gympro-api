@@ -260,11 +260,12 @@ def get_trainer_profile():
             'certifications': ', '.join([c.get("nombre", "") for c in certificaciones]),
             'bio':            perfil.get("biografia", "")      if perfil else "",
             'stats': {
-                'totalClients':  total_clientes,
-                'totalSessions': total_sesiones,
-                'avgRating':     round(calificacion_promedio, 1),
-                'yearsActive':   anos_activos,
-                'certifications':len(certificaciones)
+                'totalClients':   total_clientes,
+                'totalSessions':  total_sesiones,
+                'totalEarnings':  0,   # reservado — se calculará desde pagos en sprint futuro
+                'avgRating':      round(calificacion_promedio, 1),
+                'yearsActive':    anos_activos,
+                'certifications': len(certificaciones),
             },
             'achievements': [
                 {
@@ -512,25 +513,60 @@ def update_session_status(session_id):
 @jwt_required()
 @require_tenant
 def get_trainer_members():
+    """
+    Devuelve todos los miembros activos del gimnasio.
+    - 'is_my_client': True si ya están asignados a este entrenador.
+    - Nombres enriquecidos desde PostgreSQL (fuente de verdad).
+    Query param opcional: ?my_clients=1  → solo los asignados al entrenador.
+    """
     try:
         mdb        = get_db()
         trainer_id = int(get_jwt_identity())
         gym_id     = g.tenant_id
+        only_mine  = request.args.get('my_clients', '0') == '1'
 
-        miembros = list(mdb.miembros.find({
-            "id_entrenador_pg": trainer_id,
-            "id_gimnasio_pg":   gym_id,
-            "estado":           "Activo"
-        }))
+        query = {"id_gimnasio_pg": gym_id, "estado": "Activo"}
+        if only_mine:
+            query["id_entrenador_pg"] = trainer_id
 
-        members = [
-            {
-                "id_miembro": str(m["_id"]),
-                "nombre":     m.get("nombre", f"Miembro {m['_id']}"),
-                "email":      m.get("email", ""),
-            }
-            for m in miembros
-        ]
+        miembros = list(mdb.miembros.find(query))
+
+        # Batch-enrich nombres desde PostgreSQL (evita stale names de Mongo)
+        pg_ids = set()
+        for m in miembros:
+            uid = m.get("id_usuario_pg")
+            if uid is not None:
+                try:
+                    pg_ids.add(int(uid))
+                except (TypeError, ValueError):
+                    pass
+
+        user_map = {}
+        if pg_ids:
+            usuarios = Usuario.query.filter(Usuario.id.in_(pg_ids)).all()
+            user_map = {u.id: u.nombre for u in usuarios}
+
+        members = []
+        for m in miembros:
+            uid      = m.get("id_usuario_pg")
+            pg_nombre = None
+            if uid is not None:
+                try:
+                    pg_nombre = user_map.get(int(uid))
+                except (TypeError, ValueError):
+                    pass
+
+            nombre = pg_nombre or m.get("nombre") or f"Miembro {m['_id']}"
+            members.append({
+                "id_miembro":   str(m["_id"]),
+                "nombre":       nombre,
+                "email":        m.get("email", ""),
+                "is_my_client": m.get("id_entrenador_pg") == trainer_id,
+            })
+
+        # Ordenar: primero los propios, luego el resto; ambos grupos por nombre
+        members.sort(key=lambda x: (0 if x["is_my_client"] else 1, x["nombre"].lower()))
+
         return jsonify({"members": members}), 200
 
     except Exception as e:
@@ -821,6 +857,11 @@ def delete_exercise(exercise_id):
 @jwt_required()
 @require_tenant
 def get_reports():
+    """
+    Reportes completos del entrenador.
+    Devuelve: stats, monthlyData (últimos 6 meses), sessionTypes,
+              clientProgress (top 5), metrics detalladas.
+    """
     try:
         mdb        = get_db()
         trainer_id = int(get_jwt_identity())
@@ -828,54 +869,160 @@ def get_reports():
         range_param= request.args.get('range', 'month')
 
         today = datetime.combine(date.today(), datetime.max.time())
-        if range_param == 'week':
-            start = datetime.combine(date.today() - timedelta(days=date.today().weekday()), datetime.min.time())
-        elif range_param == 'month':
-            start = today.replace(day=1, hour=0, minute=0, second=0)
-        elif range_param == 'quarter':
-            month_start = ((today.month - 1) // 3) * 3 + 1
-            start = today.replace(month=month_start, day=1, hour=0, minute=0, second=0)
-        else:
-            start = today.replace(month=1, day=1, hour=0, minute=0, second=0)
 
+        if range_param == 'week':
+            start = datetime.combine(
+                date.today() - timedelta(days=date.today().weekday()),
+                datetime.min.time()
+            )
+        elif range_param == 'month':
+            start = datetime.combine(
+                date.today().replace(day=1), datetime.min.time()
+            )
+        elif range_param == 'quarter':
+            month_start = ((date.today().month - 1) // 3) * 3 + 1
+            start = datetime.combine(
+                date.today().replace(month=month_start, day=1), datetime.min.time()
+            )
+        else:  # year
+            start = datetime.combine(
+                date.today().replace(month=1, day=1), datetime.min.time()
+            )
+
+        base_query = {"id_entrenador_pg": trainer_id, "fecha": {"$gte": start}}
+
+        # ── KPIs del período ──────────────────────────────────────────────────
         total_sessions = mdb.sesiones.count_documents({
-            "id_entrenador_pg": trainer_id,
-            "fecha":            {"$gte": start},
-            "estado":           "completed"
+            **base_query, "estado": "completed"
+        })
+        total_scheduled = mdb.sesiones.count_documents(base_query)
+        total_cancelled = mdb.sesiones.count_documents({
+            **base_query, "estado": "cancelled"
         })
         total_clients = mdb.miembros.count_documents({
             "id_entrenador_pg": trainer_id,
             "id_gimnasio_pg":   gym_id,
-            "estado":           "Activo"
+            "estado":           "Activo",
         })
 
-        rev_pipeline = [
-            {"$match": {"id_entrenador_pg": trainer_id, "fecha_pago": {"$gte": start}}},
-            {"$group": {"_id": None, "total": {"$sum": "$monto"}}}
-        ]
-        rev_res       = list(mdb.pagos.aggregate(rev_pipeline))
-        total_revenue = rev_res[0]['total'] if rev_res else 0
-
-        prev_start    = start - (today - start)
+        # Período anterior para crecimiento
+        period_len = today - start
+        prev_start = start - period_len
         prev_sessions = mdb.sesiones.count_documents({
             "id_entrenador_pg": trainer_id,
-            "fecha":            {"$gte": prev_start, "$lt": start},
-            "estado":           "completed"
+            "fecha": {"$gte": prev_start, "$lt": start},
+            "estado": "completed",
         })
         session_growth = _pct_growth(total_sessions, prev_sessions)
 
+        # Calificación promedio
+        eval_res = list(mdb.evaluaciones_entrenador.aggregate([
+            {"$match": {"id_entrenador_pg": trainer_id}},
+            {"$group": {"_id": None, "avg": {"$avg": "$calificacion"}}},
+        ]))
+        avg_rating = round(eval_res[0]["avg"], 1) if eval_res else 0
+
+        # ── Evolución mensual (últimos 6 meses) ───────────────────────────────
+        six_months_ago = datetime.combine(
+            (date.today().replace(day=1) - timedelta(days=5 * 30)).replace(day=1),
+            datetime.min.time()
+        )
+        monthly_raw = list(mdb.sesiones.aggregate([
+            {"$match": {
+                "id_entrenador_pg": trainer_id,
+                "fecha": {"$gte": six_months_ago},
+            }},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m", "date": "$fecha"}},
+                "completadas": {"$sum": {"$cond": [{"$eq": ["$estado", "completed"]}, 1, 0]}},
+                "canceladas":  {"$sum": {"$cond": [{"$eq": ["$estado", "cancelled"]}, 1, 0]}},
+                "total":       {"$sum": 1},
+            }},
+            {"$sort": {"_id": 1}},
+        ]))
+
+        _MES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+        monthly_data = []
+        for m in monthly_raw:
+            yr, mo = m["_id"].split("-")
+            monthly_data.append({
+                "month":      f"{_MES[int(mo)-1]} {yr[-2:]}",
+                "sessions":   m["completadas"],
+                "cancelled":  m["canceladas"],
+                "total":      m["total"],
+            })
+
+        # ── Tipos de sesión en el período ─────────────────────────────────────
+        type_raw = list(mdb.sesiones.aggregate([
+            {"$match": {**base_query, "estado": "completed"}},
+            {"$group": {"_id": "$tipo", "count": {"$sum": 1}}},
+        ]))
+        session_types = [
+            {"tipo": t.get("_id") or "Sin tipo", "count": t["count"]}
+            for t in type_raw
+        ]
+
+        # ── Top 5 clientes por sesiones completadas ───────────────────────────
+        top_raw = list(mdb.sesiones.aggregate([
+            {"$match": {**base_query, "estado": "completed", "id_miembro": {"$ne": None}}},
+            {"$group": {"_id": "$id_miembro", "sessions": {"$sum": 1}}},
+            {"$sort": {"sessions": -1}},
+            {"$limit": 5},
+        ]))
+
+        top_clients = []
+        for c in top_raw:
+            nombre = "Sin nombre"
+            miembro = mdb.miembros.find_one({"_id": c["_id"]}, {"nombre": 1, "id_usuario_pg": 1})
+            if miembro:
+                uid = miembro.get("id_usuario_pg")
+                if uid:
+                    try:
+                        u = Usuario.query.get(int(uid))
+                        if u:
+                            nombre = u.nombre
+                    except Exception:
+                        pass
+                if nombre == "Sin nombre":
+                    nombre = miembro.get("nombre", "Sin nombre")
+            top_clients.append({"name": nombre, "sessions": c["sessions"]})
+
+        max_sessions = max((c["sessions"] for c in top_clients), default=1)
+        for c in top_clients:
+            c["improvement"] = round(c["sessions"] / max_sessions * 100)
+
+        # ── Métricas derivadas ─────────────────────────────────────────────────
+        attendance_rate    = round(total_sessions / total_scheduled * 100) if total_scheduled else 0
+        cancellation_rate  = round(total_cancelled / total_scheduled * 100) if total_scheduled else 0
+        sessions_per_client= round(total_sessions / total_clients, 1) if total_clients else 0
+
         return jsonify({
             'success': True,
+            'range':   range_param,
             'stats': {
-                'revenue':  total_revenue,
-                'sessions': total_sessions,
-                'clients':  total_clients,
+                'revenue':   0,          # reservado para integración con pagos
+                'sessions':  total_sessions,
+                'clients':   total_clients,
+                'avgRating': avg_rating,
                 'growth': {
                     'sessions': session_growth,
                     'revenue':  0,
-                    'clients':  0
-                }
-            }
+                    'clients':  0,
+                },
+            },
+            'monthlyData':    monthly_data,
+            'sessionTypes':   session_types,
+            'clientProgress': top_clients,
+            'metrics': {
+                'attendanceRate':    attendance_rate,
+                'cancellationRate':  cancellation_rate,
+                'sessionsPerClient': sessions_per_client,
+                'totalScheduled':    total_scheduled,
+                'totalCancelled':    total_cancelled,
+                'satisfaction':      avg_rating,
+                'retentionRate':     0,   # requiere historial multi-período
+                'newClients':        0,   # requiere campo fecha_asignacion en miembros
+            },
         }), 200
 
     except Exception as e:

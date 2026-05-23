@@ -89,16 +89,18 @@ def _regresion_global(spark, gym_id=None):
     oid_udf = F.udf(oid_hex, StringType())
 
     # 1. CARGA DE PROGRESO con id_miembro normalizado a hex
+    # Nota: el seed guarda fecha_registro como string 'YYYY-MM-DD'.
+    # cast("date") parsea tanto strings ISO como timestamps de Mongo.
     df = (
         leer_coleccion(spark, "progreso_fisico")
         .withColumn("id_miembro_hex", oid_udf(F.col("id_miembro")))
         .select(
             F.col("id_miembro_hex").alias("id_miembro"),
             F.col("peso").cast("double"),
-            F.col("imc").cast("double").alias("bmi"),       # campo en seed es "imc"
-            F.lit(None).cast("double").alias("cintura"),    # no generado en seed, se imputa
+            F.col("imc").cast("double").alias("bmi"),           # campo en seed es "imc"
+            F.col("cintura").cast("double"),                    # None si no existe → imputacion
             F.col("grasa_corporal").cast("double"),
-            F.col("fecha_registro"),
+            F.col("fecha_registro").cast("date").alias("fecha_registro"),  # normalizar string → date
         )
         .filter(
             F.col("peso").isNotNull() &
@@ -216,6 +218,30 @@ def _build_global_payload(metricas: dict, coeficientes: dict, tendencia: list) -
 # PREDICCION INDIVIDUAL -- pymongo + algebra lineal pura (sin Spark)
 # ------------------------------------------------------------------------------
 
+def _to_naive_datetime(val) -> "datetime | None":
+    """
+    Convierte cualquier representación de fecha a datetime naive (sin timezone).
+    Acepta: datetime (con o sin tz), date, str ISO 'YYYY-MM-DD' o 'YYYY-MM-DDTHH:MM:SS'.
+    El seed guarda fecha_registro como string -- esta funcion normaliza ambos casos.
+    """
+    from datetime import date as _date
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None)
+    if isinstance(val, _date):
+        return datetime(val.year, val.month, val.day)
+    if isinstance(val, str):
+        val = val.strip()
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(val[:len(fmt)], fmt)
+            except ValueError:
+                continue
+    return None
+
+
 def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
                                 coeficientes: dict, medias: dict):
     """
@@ -224,6 +250,9 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
 
     Formula: peso = intercepto + sum(coef_i * x_i)
     Sin Spark, sin JVM -- O(n_registros_miembro).
+
+    Nota: el seed almacena fecha_registro como string ISO ('YYYY-MM-DD').
+    _to_naive_datetime() normaliza strings y datetimes con tz indistintamente.
     """
     from bson import ObjectId
     from app.routes.ia.spark_config import get_mongo_db
@@ -234,44 +263,48 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
     except Exception:
         return None, []
 
+    # Ordenar por fecha string funciona correctamente con formato ISO 'YYYY-MM-DD'
     registros = list(
         db.progreso_fisico.find(
             {"id_miembro": oid},
-            {"peso": 1, "imc": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
+            {"peso": 1, "imc": 1, "grasa_corporal": 1, "cintura": 1,
+             "fecha_registro": 1, "_id": 0},
         ).sort("fecha_registro", 1)
     )
 
     if not registros:
         return None, []
 
-    historial = [
-        {
-            "fecha": r["fecha_registro"].strftime("%Y-%m-%d")
-                     if hasattr(r["fecha_registro"], "strftime")
-                     else str(r["fecha_registro"]),
-            "peso": round(float(r["peso"]), 1),
-        }
-        for r in registros
-        if r.get("peso") is not None
-    ]
+    # Construir historial -- normalizar fecha independientemente del tipo almacenado
+    historial = []
+    for r in registros:
+        if r.get("peso") is None:
+            continue
+        try:
+            peso = round(float(r["peso"]), 1)
+        except (TypeError, ValueError):
+            continue
+        dt = _to_naive_datetime(r.get("fecha_registro"))
+        historial.append({
+            "fecha": dt.strftime("%Y-%m-%d") if dt else str(r.get("fecha_registro", "")),
+            "peso":  peso,
+        })
 
     if not historial:
         return None, []
 
-    # Calcular dias actuales desde primer registro
-    primer_fecha = registros[0]["fecha_registro"]
-    if hasattr(primer_fecha, "replace"):
-        primer_fecha = primer_fecha.replace(tzinfo=None)
-    try:
-        dias_actuales = (datetime.now() - primer_fecha).days
-    except TypeError:
+    # Dias transcurridos desde el primer registro hasta hoy
+    primer_dt = _to_naive_datetime(registros[0].get("fecha_registro"))
+    if primer_dt is None:
         dias_actuales = 0
+    else:
+        dias_actuales = max(0, (datetime.now() - primer_dt).days)
 
-    # Datos del ultimo registro para prediccion ceteris paribus
+    # Valores del ultimo registro para la prediccion (ceteris paribus)
     ultimo  = registros[-1]
     cintura = float(ultimo.get("cintura") or medias.get("cintura", 80.0))
     grasa   = float(ultimo.get("grasa_corporal") or medias.get("grasa", 22.0))
-    bmi     = float(ultimo.get("imc") or 25.0)   # campo en seed es "imc"
+    bmi     = float(ultimo.get("imc") or 25.0)   # seed guarda campo 'imc'
 
     coef = coeficientes
     predicciones_futuras = []
