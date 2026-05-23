@@ -148,8 +148,13 @@ def _mapreduce_asistencia(db, gym_id=None):
         elif isinstance(fecha, str):
             for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
                 try:
-                    dt = datetime.strptime(fecha[:len(fmt)], fmt)
+                    dt = datetime.strptime(fecha, fmt)
                     break
+                except ValueError:
+                    continue
+            else:
+                try:
+                    dt = datetime.strptime(fecha[:10], "%Y-%m-%d")
                 except ValueError:
                     continue
         if dt is None:

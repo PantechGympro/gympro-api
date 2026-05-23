@@ -42,12 +42,18 @@ def _to_naive_datetime(val) -> "datetime | None":
         return datetime(val.year, val.month, val.day)
     if isinstance(val, str):
         val = val.strip()
+        # Intentar el string completo con cada formato
         for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
                     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
             try:
-                return datetime.strptime(val[:len(fmt)], fmt)
+                return datetime.strptime(val, fmt)
             except ValueError:
                 continue
+        # Fallback: tomar solo los primeros 10 chars como fecha ISO
+        try:
+            return datetime.strptime(val[:10], "%Y-%m-%d")
+        except ValueError:
+            pass
     return None
 
 

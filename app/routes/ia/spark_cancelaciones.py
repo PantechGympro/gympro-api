@@ -90,8 +90,10 @@ def _ejecutar_cancelaciones(gym_id=None) -> dict:
         if isinstance(val, datetime): return val.replace(tzinfo=None)
         if isinstance(val, str):
             for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-                try: return datetime.strptime(val[:len(fmt)], fmt)
+                try: return datetime.strptime(val, fmt)
                 except ValueError: continue
+            try: return datetime.strptime(val[:10], "%Y-%m-%d")
+            except ValueError: pass
         return None
 
     rows = []
