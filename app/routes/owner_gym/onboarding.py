@@ -16,7 +16,7 @@ Ruta: POST /api/onboarding/register-gym
 import logging
 from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import create_access_token
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt, get_jwt_identity
 from flask_mail import Message
 
 from app.extensions import db, mail, limiter
@@ -193,13 +193,14 @@ def register_gym():
         db.session.add(nuevo_gym)
         db.session.flush()  # obtener nuevo_gym.id
 
-        # 2. Crear Usuario administrador
+        # 2. Crear Usuario administrador (primer_login=True para forzar onboarding)
         nuevo_admin = Usuario(
-            nombre      = adm_nombre,
-            email       = adm_email,
-            id_rol      = rol_admin.id,
-            id_gimnasio = nuevo_gym.id,
-            activo      = True,
+            nombre       = adm_nombre,
+            email        = adm_email,
+            id_rol       = rol_admin.id,
+            id_gimnasio  = nuevo_gym.id,
+            activo       = True,
+            primer_login = True,
         )
         nuevo_admin.set_password(adm_pass)
         db.session.add(nuevo_admin)
@@ -234,7 +235,7 @@ def register_gym():
         # 5. Email de bienvenida (no bloquea si falla)
         _enviar_bienvenida(adm_email, gym_nombre, adm_nombre)
 
-        # 6. Generar JWT para login inmediato
+        # 6. Generar JWT para login inmediato (primer_login=True → fuerza onboarding)
         _plan_val = nuevo_gym.plan if isinstance(nuevo_gym.plan, str) else nuevo_gym.plan.value
         token = create_access_token(
             identity = str(nuevo_admin.id),
@@ -245,6 +246,7 @@ def register_gym():
                 "plan":            _plan_val,
                 "access_level":    "basico",
                 "perfil_completo": True,
+                "primer_login":    True,
                 "fuente":          "pg",
             },
         )
@@ -254,10 +256,11 @@ def register_gym():
             "access_token": token,
             "gym":          nuevo_gym.to_dict(),
             "admin": {
-                "id":     nuevo_admin.id,
-                "nombre": nuevo_admin.nombre,
-                "email":  nuevo_admin.email,
-                "role":   "owner_gym",
+                "id":          nuevo_admin.id,
+                "nombre":      nuevo_admin.nombre,
+                "email":       nuevo_admin.email,
+                "role":        "owner_gym",
+                "primer_login": True,
             },
             "suscripcion": suscripcion.to_dict(),
             "dias_prueba": 14,
@@ -267,3 +270,115 @@ def register_gym():
         db.session.rollback()
         logger.exception("Error en onboarding de gimnasio")
         return jsonify({"msg": "Error interno al registrar el gimnasio", "detalle": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPLETE SETUP — primer login del dueño
+# ─────────────────────────────────────────────────────────────────────────────
+
+@onboarding_bp.route("/complete-setup", methods=["PUT"])
+@jwt_required()
+def complete_setup():
+    """
+    Completa el onboarding del dueño en su primer inicio de sesión.
+
+    Body JSON:
+    {
+      "nueva_password": "NuevaSegura1234!",   (requerido)
+      "gym": {
+        "tipo_gimnasio":    "crossfit_functional",
+        "descripcion":      "El mejor gym de la ciudad",
+        "direccion":        "Av. Principal 123, Monterrey",
+        "horario_apertura": "06:00",
+        "horario_cierre":   "22:00",
+        "capacidad_maxima": 80,
+        "redes": {
+          "instagram": "@migym",
+          "facebook":  "fb.com/migym",
+          "website":   "https://migym.mx"
+        }
+      }
+    }
+    """
+    claims      = get_jwt()
+    user_id     = get_jwt_identity()
+    id_gimnasio = claims.get("id_gimnasio")
+
+    if claims.get("role") not in ("owner_gym", "admin", "Administrador"):
+        return jsonify({"msg": "Acceso denegado"}), 403
+
+    data          = request.get_json() or {}
+    nueva_pass    = (data.get("nueva_password") or "").strip()
+    gym_info      = data.get("gym", {})
+
+    if not nueva_pass:
+        return jsonify({"msg": "nueva_password es requerida"}), 400
+    if len(nueva_pass) < 8:
+        return jsonify({"msg": "La contraseña debe tener al menos 8 caracteres"}), 400
+
+    usuario = Usuario.query.get(int(user_id))
+    if not usuario:
+        return jsonify({"msg": "Usuario no encontrado"}), 404
+
+    gym = Gimnasio.query.get(id_gimnasio) if id_gimnasio else None
+
+    try:
+        # 1. Cambiar contraseña
+        usuario.set_password(nueva_pass)
+        usuario.primer_login = False
+
+        # 2. Actualizar configuración del gimnasio
+        if gym and gym_info:
+            # Tipo de gimnasio (y reconfigurar módulos si cambió)
+            nuevo_tipo = (gym_info.get("tipo_gimnasio") or "").strip()
+            if nuevo_tipo and nuevo_tipo in GYM_TYPES:
+                cfg_tipo = get_gym_type_config(nuevo_tipo)
+                gym.tipo_gimnasio = nuevo_tipo
+                config_base = {
+                    "etiqueta_sesion": cfg_tipo["etiqueta_sesion"],
+                    "modulos":         cfg_tipo["modulos"],
+                    "label":           cfg_tipo["label"],
+                }
+            else:
+                config_base = dict(gym.configuracion or {})
+
+            # Mezclar campos de preferencias en configuracion JSON
+            config_base.update({
+                "descripcion":      gym_info.get("descripcion", config_base.get("descripcion", "")),
+                "direccion":        gym_info.get("direccion",   config_base.get("direccion", "")),
+                "horario_apertura": gym_info.get("horario_apertura", config_base.get("horario_apertura", "")),
+                "horario_cierre":   gym_info.get("horario_cierre",   config_base.get("horario_cierre", "")),
+                "capacidad_maxima": gym_info.get("capacidad_maxima", config_base.get("capacidad_maxima", 0)),
+                "redes":            gym_info.get("redes",       config_base.get("redes", {})),
+            })
+            gym.configuracion = config_base
+
+        db.session.commit()
+
+        # 3. Emitir nuevo JWT con primer_login=False
+        _plan = gym.plan if gym else "basico"
+        plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
+        nuevo_token = create_access_token(
+            identity = str(usuario.id),
+            additional_claims = {
+                "email":           usuario.email,
+                "role":            claims.get("role"),
+                "id_gimnasio":     id_gimnasio,
+                "plan":            plan,
+                "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
+                "perfil_completo": True,
+                "primer_login":    False,
+                "fuente":          "pg",
+            },
+        )
+
+        return jsonify({
+            "msg":          "Configuración completada",
+            "access_token": nuevo_token,
+            "gym":          gym.to_dict() if gym else None,
+        }), 200
+
+    except Exception as exc:
+        db.session.rollback()
+        logger.exception("Error en complete-setup")
+        return jsonify({"msg": "Error interno", "detalle": str(exc)}), 500

@@ -64,6 +64,8 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
     _plan = usuario.gimnasio.plan if usuario.gimnasio else "basico"
     plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
 
+    primer_login = getattr(usuario, "primer_login", False)
+
     return {
         "identity": str(usuario.id),
         "claims": {
@@ -74,6 +76,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
             "perfil_completo": True,
             "peso_inicial":    None,
+            "primer_login":    primer_login,
             "fuente":          "pg",
         },
         "user_response": {
@@ -85,6 +88,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "plan":            plan,
             "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
             "perfil_completo": True,
+            "primer_login":    primer_login,
         },
     }
 

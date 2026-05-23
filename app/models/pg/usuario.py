@@ -41,6 +41,9 @@ class Usuario(db.Model):
     id_gimnasio = db.Column(db.Integer, db.ForeignKey("gimnasios.id"), nullable=True, index=True)
     gimnasio    = db.relationship("Gimnasio", back_populates="usuarios")
 
+    # Onboarding: True = primer login, debe completar configuración del gimnasio
+    primer_login = db.Column(db.Boolean, default=False, nullable=False, server_default="false")
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def set_password(self, password: str) -> None:
