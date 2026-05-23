@@ -1,28 +1,28 @@
 """
-spark_kmeans.py -- Clustering K-Means de miembros por composicion corporal.
+spark_kmeans.py — Clustering K-Means de miembros por composición corporal.
 
-Cache por (gym_id, k) con TTL configurable (ANALYTICS_CACHE_TTL_HOURS).
-La SparkSession es el singleton de spark_config.get_spark().
+Motor: scikit-learn (en proceso, sin JVM, sin internet).
+Datos: pymongo directo sobre colecciones miembros y progreso_fisico.
+
+Caché por (gym_id, k) con TTL configurable (ANALYTICS_CACHE_TTL_HOURS).
 """
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.ia.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
 
-# Etiquetas dinamicas: el indice dentro de la lista = id de cluster ordenado
-# por IMC promedio ascendente (se asignan en _build_payload despues de ordenar)
 _LABEL_POOL = [
     "Principiante / Alta Prioridad",
     "Intermedio / Mantenimiento",
-    "Avanzado / Optimizacion",
+    "Avanzado / Optimización",
     "Elite / Rendimiento",
     "Senior / Bajo Impacto",
-    "Recuperacion Activa",
+    "Recuperación Activa",
     "Alto Volumen / Hipertrofia",
-    "Definicion / Corte",
+    "Definición / Corte",
 ]
 
 
@@ -30,172 +30,150 @@ def _cache_key(gym_id, k: int) -> str:
     return f"kmeans_gym{gym_id}_k{k}"
 
 
-# ------------------------------------------------------------------------------
-# LOGICA K-MEANS
-# ------------------------------------------------------------------------------
+# ── Lógica K-Means ────────────────────────────────────────────────────────────
 
-def _ejecutar_kmeans(spark, k: int = 3, max_iter: int = 20,
-                     seed: int = 42, gym_id=None):
-    from pyspark.sql import functions as F
-    from pyspark.sql.window import Window
-    from pyspark.sql.types import StringType
-    from pyspark.ml.clustering import KMeans
-    from pyspark.ml.feature import VectorAssembler, StandardScaler
-    from pyspark.ml.evaluation import ClusteringEvaluator
-    from app.routes.ia.spark_config import leer_coleccion
-    import re as _re
+def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=None):
+    """
+    K-Means con StandardScaler sobre features de composición corporal.
+    Retorna: (resumen_clusters, asignaciones, centroides, silhouette)
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score
 
-    # 1. CARGA Y LIMPIEZA DE MIEMBROS (filtrado por gimnasio si aplica)
-    df_miembros = leer_coleccion(spark, "miembros").select(
-        F.col("_id").alias("id_miembro"),
-        F.col("nombre"),
-        F.col("id_usuario_pg").cast("integer"),   # FK a usuarios PG (para nombre real)
-        F.col("peso_inicial").cast("double"),
-        F.col("estatura").cast("double"),
-        F.col("sexo"),
-        F.col("id_gimnasio_pg").cast("integer"),
-    ).filter(
-        F.col("peso_inicial").isNotNull() &
-        F.col("estatura").isNotNull() &
-        (F.col("estatura") > 0)
-    )
+    db = get_mongo_db()
+
+    # 1. Cargar miembros del gimnasio
+    query_m = {}
     if gym_id is not None:
-        df_miembros = df_miembros.filter(F.col("id_gimnasio_pg") == int(gym_id))
+        query_m["id_gimnasio_pg"] = int(gym_id)
+    query_m["peso_inicial"] = {"$ne": None}
+    query_m["estatura"]     = {"$ne": None}
 
-    # 2. PROGRESO FISICO -- solo el registro mas reciente por miembro
-    w = Window.partitionBy("id_miembro_prog").orderBy(F.col("fecha_registro").desc())
-    df_progreso = (
-        leer_coleccion(spark, "progreso_fisico")
-        .select(
-            F.col("id_miembro").alias("id_miembro_prog"),
-            F.col("peso").cast("double"),
-            F.col("imc").cast("double").alias("bmi"),
-            F.col("grasa_corporal").cast("double"),
-            F.col("masa_muscular").cast("double"),
-            F.col("fecha_registro"),
-        )
-        .withColumn("rn", F.row_number().over(w))
-        .filter(F.col("rn") == 1)
-        .drop("rn", "fecha_registro")
-    )
+    miembros = list(db.miembros.find(query_m, {
+        "_id": 1, "nombre": 1, "id_usuario_pg": 1,
+        "peso_inicial": 1, "estatura": 1, "sexo": 1,
+    }))
+    if not miembros:
+        raise ValueError("No hay miembros con datos suficientes para clustering.")
 
-    # 3. JOIN miembros + progreso
-    df = df_miembros.join(
-        df_progreso,
-        df_miembros["id_miembro"] == df_progreso["id_miembro_prog"],
-        "left",
-    )
+    # 2. Cargar último registro de progreso por miembro (para peso/imc/grasa/musculo actuales)
+    member_oids = [m["_id"] for m in miembros]
+    pipeline = [
+        {"$match": {"id_miembro": {"$in": member_oids}}},
+        {"$sort": {"fecha_registro": -1}},
+        {"$group": {
+            "_id":          "$id_miembro",
+            "peso":         {"$first": "$peso"},
+            "bmi":          {"$first": "$imc"},
+            "grasa":        {"$first": "$grasa_corporal"},
+            "musculo":      {"$first": "$masa_muscular"},
+        }},
+    ]
+    progreso_map = {str(r["_id"]): r for r in db.progreso_fisico.aggregate(pipeline)}
 
-    # 4. INGENIERIA DE CARACTERISTICAS -- IMC calculado + imputacion de nulos
-    df = (
-        df
-        .withColumn("imc_calculado",
-            F.when(F.col("bmi").isNotNull(), F.col("bmi"))
-             .otherwise(F.col("peso_inicial") / (F.col("estatura") * F.col("estatura"))))
-        .withColumn("peso_final",    F.coalesce(F.col("peso"),           F.col("peso_inicial")))
-        .withColumn("grasa_final",   F.coalesce(F.col("grasa_corporal"), F.lit(20.0)))
-        .withColumn("musculo_final", F.coalesce(F.col("masa_muscular"),  F.lit(30.0)))
-    )
+    # 3. Combinar features
+    records = []
+    for m in miembros:
+        mid  = str(m["_id"])
+        prog = progreso_map.get(mid, {})
 
-    df_features = df.select(
-        F.col("id_miembro"),
-        F.col("nombre"),
-        F.col("id_usuario_pg"),
-        F.col("peso_final").alias("peso"),
-        F.col("imc_calculado").alias("imc"),
-        F.col("grasa_final").alias("grasa"),
-        F.col("musculo_final").alias("musculo"),
-        F.col("sexo"),
-    ).filter(F.col("peso").isNotNull() & F.col("imc").isNotNull())
+        try:
+            peso_i   = float(m.get("peso_inicial") or 0)
+            estatura = float(m.get("estatura") or 0)
+        except (TypeError, ValueError):
+            continue
+        if estatura <= 0:
+            continue
 
-    n = df_features.count()
+        imc_calc = peso_i / (estatura ** 2)
+
+        peso    = float(prog.get("peso")    or peso_i)
+        imc     = float(prog.get("bmi")     or imc_calc)
+        grasa   = float(prog.get("grasa")   or 20.0)
+        musculo = float(prog.get("musculo") or 30.0)
+
+        records.append({
+            "id_miembro":   mid,
+            "nombre":       m.get("nombre", ""),
+            "id_usuario_pg": m.get("id_usuario_pg"),
+            "sexo":         m.get("sexo", ""),
+            "peso":         peso,
+            "imc":          imc,
+            "grasa":        grasa,
+            "musculo":      musculo,
+        })
+
+    n = len(records)
     if n < k:
         raise ValueError(f"Datos insuficientes: {n} miembros con datos, se necesitan al menos {k}.")
 
-    # 5. VECTORIZACION + ESCALADO
-    assembler = VectorAssembler(
-        inputCols=["peso", "imc", "grasa", "musculo"], outputCol="features_raw"
-    )
-    scaler = StandardScaler(
-        inputCol="features_raw", outputCol="features", withStd=True, withMean=True
-    )
-    df_assembled = assembler.transform(df_features)
-    df_scaled    = scaler.fit(df_assembled).transform(df_assembled)
+    X = np.array([[r["peso"], r["imc"], r["grasa"], r["musculo"]] for r in records])
 
-    # 6. ENTRENAMIENTO
-    model     = KMeans(featuresCol="features", predictionCol="cluster",
-                       k=k, maxIter=max_iter, seed=seed).fit(df_scaled)
-    df_result = model.transform(df_scaled)
+    # 4. Escalado + K-Means
+    scaler  = StandardScaler()
+    X_sc    = scaler.fit_transform(X)
+    model   = KMeans(n_clusters=k, max_iter=max_iter, random_state=seed, n_init=10).fit(X_sc)
+    labels  = model.labels_
 
-    # 7. EVALUACION -- Coeficiente de Silueta
-    silhouette = ClusteringEvaluator(
-        featuresCol="features", predictionCol="cluster", metricName="silhouette"
-    ).evaluate(df_result)
+    sil = round(float(silhouette_score(X_sc, labels)), 4) if n > k else 0.0
 
-    # Centroides en espacio escalado (para inspeccion tecnica)
+    # 5. Centroides en espacio escalado (para inspección técnica)
     centroides = [
-        {"cluster": i, "peso_norm": round(float(c[0]), 4), "imc_norm": round(float(c[1]), 4),
-         "grasa_norm": round(float(c[2]), 4), "musculo_norm": round(float(c[3]), 4)}
-        for i, c in enumerate(model.clusterCenters())
+        {"cluster": i,
+         "peso_norm":    round(float(c[0]), 4),
+         "imc_norm":     round(float(c[1]), 4),
+         "grasa_norm":   round(float(c[2]), 4),
+         "musculo_norm": round(float(c[3]), 4)}
+        for i, c in enumerate(model.cluster_centers_)
     ]
 
-    # 8. RESUMEN por cluster (valores reales sin escalar)
-    resumen = (
-        df_result.groupBy("cluster")
-        .agg(
-            F.count("*").alias("num_miembros"),
-            F.round(F.avg("peso"),    2).alias("peso_promedio"),
-            F.round(F.avg("imc"),     2).alias("imc_promedio"),
-            F.round(F.avg("grasa"),   2).alias("grasa_promedio"),
-            F.round(F.avg("musculo"), 2).alias("musculo_promedio"),
-        )
-        .orderBy("imc_promedio")   # ordena por IMC para asignar etiquetas consistentemente
-    )
+    # 6. Resumen por cluster (valores reales, ordenado por imc promedio)
+    from collections import defaultdict
+    cluster_rows: dict[int, list] = defaultdict(list)
+    for i, r in enumerate(records):
+        cluster_rows[int(labels[i])].append(r)
 
-    # Convertir ObjectId -> hex
-    def _oid_hex(val):
-        if val is None:
-            return None
-        m = _re.search(r"[0-9a-fA-F]{24}", str(val))
-        return m.group(0) if m else str(val)
+    resumen_raw = []
+    for cl, rows in cluster_rows.items():
+        resumen_raw.append({
+            "cluster":         cl,
+            "num_miembros":    len(rows),
+            "peso_promedio":   round(sum(r["peso"]   for r in rows) / len(rows), 2),
+            "imc_promedio":    round(sum(r["imc"]    for r in rows) / len(rows), 2),
+            "grasa_promedio":  round(sum(r["grasa"]  for r in rows) / len(rows), 2),
+            "musculo_promedio":round(sum(r["musculo"]for r in rows) / len(rows), 2),
+        })
+    resumen_raw.sort(key=lambda x: x["imc_promedio"])
 
-    oid_udf = F.udf(_oid_hex, StringType())
+    asignaciones = [
+        {
+            "id_miembro": r["id_miembro"],
+            "nombre":     r["nombre"],
+            "id_usuario_pg": r["id_usuario_pg"],
+            "cluster":    int(labels[i]),
+            "sexo":       r["sexo"],
+            "peso":       round(r["peso"],    1),
+            "imc":        round(r["imc"],     2),
+            "grasa":      round(r["grasa"],   1),
+            "musculo":    round(r["musculo"], 1),
+        }
+        for i, r in enumerate(records)
+    ]
+    asignaciones.sort(key=lambda x: x["cluster"])
 
-    asignaciones = (
-        df_result.select(
-            oid_udf(F.col("id_miembro")).alias("id_miembro"),
-            "nombre",
-            F.col("id_usuario_pg"),
-            "cluster", "sexo",
-            F.round("peso",    1).alias("peso"),
-            F.round("imc",     2).alias("imc"),
-            F.round("grasa",   1).alias("grasa"),
-            F.round("musculo", 1).alias("musculo"),
-        ).orderBy("cluster")
-    )
-
-    return (
-        [row.asDict() for row in resumen.collect()],
-        [row.asDict() for row in asignaciones.collect()],
-        centroides,
-        round(silhouette, 4),
-    )
+    return resumen_raw, asignaciones, centroides, sil
 
 
-def _build_payload(k: int, max_iter: int, resumen: list, asignaciones: list,
-                   centroides: list, silhouette: float) -> dict:
-    """
-    Construye la respuesta. Las etiquetas se asignan por posicion en la lista
-    de resumen (ya ordenada por imc_promedio asc), de modo que funcionan para
-    cualquier valor de k entre 2 y 8.
-    """
+def _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette) -> dict:
     resumen_con_etiqueta = [
         {**row, "etiqueta": _LABEL_POOL[i] if i < len(_LABEL_POOL) else f"Grupo {i}"}
         for i, row in enumerate(resumen)
     ]
     return {
         "algoritmo":        "K-Means",
-        "descripcion":      f"Clustering de miembros en {k} grupos por composicion corporal",
+        "descripcion":      f"Clustering de miembros en {k} grupos por composición corporal",
         "parametros":       {"k": k, "max_iter": max_iter},
         "silhouette":       silhouette,
         "centroides":       centroides,
@@ -205,74 +183,43 @@ def _build_payload(k: int, max_iter: int, resumen: list, asignaciones: list,
     }
 
 
-# ------------------------------------------------------------------------------
-# ENRIQUECIMIENTO DE NOMBRES DESDE POSTGRESQL
-# ------------------------------------------------------------------------------
-
-import re as _re_nombre
-_AUTO_NAME_RE = _re_nombre.compile(r'^miembro\s+[0-9a-f]{16,}$', _re_nombre.IGNORECASE)
-
+# ── Enriquecimiento de nombres desde PostgreSQL ───────────────────────────────
 
 def _enrich_nombres(asignaciones: list) -> list:
-    """
-    Reemplaza el campo 'nombre' de cada asignación con el nombre real de la
-    tabla usuarios de PostgreSQL (lookup batch por id_usuario_pg).
-
-    Si el miembro no tiene id_usuario_pg o el nombre PG no está disponible,
-    se conserva el valor original de Mongo.
-    """
     from app.models.pg.usuario import Usuario
-
-    # IDs de usuarios PG que necesitamos enriquecer
     pg_ids = set()
     for row in asignaciones:
         uid = row.get("id_usuario_pg")
         if uid is not None:
-            try:
-                pg_ids.add(int(uid))
-            except (TypeError, ValueError):
-                pass
+            try: pg_ids.add(int(uid))
+            except (TypeError, ValueError): pass
 
     if not pg_ids:
         return asignaciones
 
-    usuarios = Usuario.query.filter(Usuario.id.in_(pg_ids)).all()
-    user_map = {u.id: u.nombre for u in usuarios}
-
+    user_map = {u.id: u.nombre for u in Usuario.query.filter(Usuario.id.in_(pg_ids)).all()}
     enriched = []
     for row in asignaciones:
         new_row = dict(row)
         uid = row.get("id_usuario_pg")
         if uid is not None:
             try:
-                real_name = user_map.get(int(uid))
-                if real_name:
-                    new_row["nombre"] = real_name
-            except (TypeError, ValueError):
-                pass
+                real = user_map.get(int(uid))
+                if real: new_row["nombre"] = real
+            except (TypeError, ValueError): pass
         enriched.append(new_row)
-
     return enriched
 
 
-# ------------------------------------------------------------------------------
-# ENDPOINTS
-# ------------------------------------------------------------------------------
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @spark_kmeans_bp.route("/api/analytics/kmeans", methods=["GET"])
 @jwt_required()
 def kmeans_analytics():
-    """
-    Devuelve el resultado desde cache (TTL = ANALYTICS_CACHE_TTL_HOURS).
-    Si expiro o no existe, entrena el modelo y lo guarda.
-
-    Query params:
-      k        (int, 2-8, default=3)
-      max_iter (int, default=20)  -- solo se usa al entrenar
-    """
+    """Devuelve resultado desde caché. Si expiró, entrena y guarda."""
     try:
         k        = request.args.get("k",        3,  type=int)
-        max_iter = request.args.get("max_iter", 20, type=int)
+        max_iter = request.args.get("max_iter", 300, type=int)
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
@@ -284,20 +231,17 @@ def kmeans_analytics():
             cached["desde_cache"] = True
             return jsonify(cached), 200
 
-        spark = get_spark()
-        resumen, asignaciones, centroides, silhouette = _ejecutar_kmeans(
-            spark, k=k, max_iter=max_iter, gym_id=gym_id
+        resumen, asignaciones, centroides, sil = _ejecutar_kmeans(
+            k=k, max_iter=max_iter, gym_id=gym_id
         )
         asignaciones = _enrich_nombres(asignaciones)
-        payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette)
+        payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, sil)
         payload["desde_cache"] = False
         cache_set(key, payload)
         return jsonify(payload), 200
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -306,27 +250,22 @@ def kmeans_analytics():
 @spark_kmeans_bp.route("/api/analytics/kmeans/train", methods=["POST"])
 @jwt_required()
 def kmeans_train():
-    """
-    Fuerza re-entrenamiento y actualiza cache para este gimnasio y k.
-
-    Body JSON (opcional): { "k": 3, "max_iter": 20 }
-    """
+    """Fuerza re-entrenamiento y actualiza caché."""
     try:
         body     = request.get_json(silent=True) or {}
         k        = int(body.get("k",        request.args.get("k",        3,  type=int)))
-        max_iter = int(body.get("max_iter", request.args.get("max_iter", 20, type=int)))
+        max_iter = int(body.get("max_iter", request.args.get("max_iter", 300, type=int)))
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
         gym_id = get_jwt().get("id_gimnasio")
         key    = _cache_key(gym_id, k)
 
-        spark = get_spark()
-        resumen, asignaciones, centroides, silhouette = _ejecutar_kmeans(
-            spark, k=k, max_iter=max_iter, gym_id=gym_id
+        resumen, asignaciones, centroides, sil = _ejecutar_kmeans(
+            k=k, max_iter=max_iter, gym_id=gym_id
         )
         asignaciones = _enrich_nombres(asignaciones)
-        payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette)
+        payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, sil)
         payload["desde_cache"] = False
         cache_set(key, payload)
 

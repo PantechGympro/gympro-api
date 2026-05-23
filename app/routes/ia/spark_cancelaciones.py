@@ -1,29 +1,25 @@
 """
-spark_cancelaciones.py -- Prediccion de riesgo de cancelacion de membresia.
+spark_cancelaciones.py — Predicción de riesgo de cancelación de membresía.
 
-Sprint 4 / US19: Random Forest Classifier (MLlib) entrenado con datos de
-asistencia, pagos y estado de membresia por miembro.
+Motor: scikit-learn RandomForestClassifier (en proceso, sin JVM, sin internet).
+Datos: pymongo directo sobre colecciones miembros, asistencias, pagos, miembro_membresia.
 
 Features:
-  - dias_sin_asistir       : dias desde la ultima asistencia registrada
-  - num_asistencias_ult60  : asistencias en los ultimos 60 dias
-  - total_pagos            : numero de pagos historicos del miembro
+  - dias_sin_asistir       : días desde la última asistencia registrada
+  - num_asistencias_ult60  : asistencias en los últimos 60 días
+  - total_pagos            : número de pagos históricos del miembro
   - meses_activo           : meses desde el registro del miembro
-  - tiene_membresia_activa : 1 si la membresia esta activa, 0 si vencio
+  - tiene_membresia_activa : 1.0 si la membresía está activa, 0.0 si venció
 
 Label (target):
-  - 1 = en riesgo (dias_sin_asistir > 21 O membresia vencida)
+  - 1 = en riesgo (dias_sin_asistir > 21 O membresía vencida)
   - 0 = activo y estable
-
-Endpoints:
-  GET  /api/analytics/cancelaciones         -- prediccion desde cache
-  POST /api/analytics/cancelaciones/train   -- re-entrena y actualiza cache
 """
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from app.routes.ia.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 
 spark_cancelaciones_bp = Blueprint("spark_cancelaciones", __name__)
 
@@ -32,198 +28,174 @@ def _cache_key(gym_id) -> str:
     return f"cancelaciones_gym{gym_id}"
 
 
-# ─── Logica del modelo ────────────────────────────────────────────────────────
+# ── Lógica del modelo ─────────────────────────────────────────────────────────
 
-def _ejecutar_cancelaciones(spark, gym_id=None) -> dict:
-    from pyspark.sql import functions as F
-    from pyspark.sql.types import IntegerType, DoubleType
-    from pyspark.ml.classification import RandomForestClassifier
-    from pyspark.ml.feature import VectorAssembler
-    from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
-    from app.routes.ia.spark_config import leer_coleccion
-    from datetime import datetime, timezone
+def _ejecutar_cancelaciones(gym_id=None) -> dict:
+    """
+    Entrena RandomForestClassifier y predice riesgo de cancelación para
+    todos los miembros del gimnasio.
+    """
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import roc_auc_score, accuracy_score
 
-    ahora = datetime.now(timezone.utc)
+    db   = get_mongo_db()
+    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
+    hace60 = ahora - timedelta(days=60)
 
-    # ── 1. Cargar colecciones desde MongoDB ───────────────────────────────────
-    df_miembros = leer_coleccion(spark, "miembros").select(
-        F.col("_id").alias("id_miembro"),
-        F.col("id_gimnasio_pg").cast("integer"),
-        F.col("nombre"),
-        F.col("fecha_registro"),
-    )
+    # 1. Miembros del gimnasio
+    query_m = {}
     if gym_id is not None:
-        df_miembros = df_miembros.filter(F.col("id_gimnasio_pg") == int(gym_id))
+        query_m["id_gimnasio_pg"] = int(gym_id)
+    miembros = list(db.miembros.find(query_m, {"_id": 1, "nombre": 1, "fecha_registro": 1}))
 
-    df_asistencias = leer_coleccion(spark, "asistencias").select(
-        F.col("id_miembro"),
-        F.to_timestamp(F.col("fecha")).alias("fecha_asist"),
-    )
-    if gym_id is not None:
-        df_asistencias = df_asistencias.filter(F.col("id_gimnasio") == int(gym_id))
+    if len(miembros) < 5:
+        return {"error": "Datos insuficientes para entrenar el modelo",
+                "total_miembros": len(miembros)}
 
-    df_pagos = leer_coleccion(spark, "pagos").select(
-        F.col("id_miembro"),
-        F.to_timestamp(F.col("fecha_pago")).alias("fecha_pago"),
-    )
-    if gym_id is not None:
-        df_pagos = df_pagos.filter(F.col("id_gimnasio") == int(gym_id))
+    member_oids = [m["_id"] for m in miembros]
+    member_map  = {str(m["_id"]): m for m in miembros}
 
-    df_membresías = leer_coleccion(spark, "miembro_membresia").select(
-        F.col("id_miembro"),
-        F.col("estado").alias("estado_mm"),
-        F.col("fecha_fin"),
-    )
+    # 2. Última asistencia y conteo en últimos 60 días por miembro
+    asist_pipe = [
+        {"$match": {"id_miembro": {"$in": member_oids}}},
+        {"$group": {
+            "_id":              "$id_miembro",
+            "ultima":           {"$max": "$fecha"},
+            "ult60":            {"$sum": {"$cond": [{"$gte": ["$fecha", hace60]}, 1, 0]}},
+        }},
+    ]
+    asist_map = {str(r["_id"]): r for r in db.asistencias.aggregate(asist_pipe)}
 
-    # ── 2. Feature engineering ────────────────────────────────────────────────
-    # Ultima asistencia por miembro
-    ultima_asist = df_asistencias.groupBy("id_miembro").agg(
-        F.max("fecha_asist").alias("ultima_asistencia"),
-        F.count(F.when(F.col("fecha_asist") >= F.lit(ahora).cast("timestamp") - F.expr("INTERVAL 60 DAYS"), 1)).alias("num_asistencias_ult60"),
-    )
+    # 3. Total pagos por miembro
+    pagos_pipe = [
+        {"$match": {"id_miembro": {"$in": member_oids}}},
+        {"$group": {"_id": "$id_miembro", "total": {"$sum": 1}}},
+    ]
+    pagos_map = {str(r["_id"]): r["total"] for r in db.pagos.aggregate(pagos_pipe)}
 
-    # Total de pagos por miembro
-    total_pagos = df_pagos.groupBy("id_miembro").agg(
-        F.count("*").alias("total_pagos"),
-    )
+    # 4. Membresía activa por miembro
+    mm_pipe = [
+        {"$match": {"id_miembro": {"$in": member_oids}}},
+        {"$group": {
+            "_id":    "$id_miembro",
+            "activa": {"$max": {"$cond": [{"$eq": ["$estado", "Activa"]}, 1, 0]}},
+        }},
+    ]
+    mm_map = {str(r["_id"]): r["activa"] for r in db.miembro_membresia.aggregate(mm_pipe)}
 
-    # Membresia activa
-    mm_activa = df_membresías.groupBy("id_miembro").agg(
-        F.max(F.when(F.col("estado_mm") == "Activa", 1).otherwise(0)).alias("tiene_membresia_activa"),
-    )
+    # 5. Construir feature matrix
+    def _parse_dt(val):
+        if val is None: return None
+        if isinstance(val, datetime): return val.replace(tzinfo=None)
+        if isinstance(val, str):
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                try: return datetime.strptime(val[:len(fmt)], fmt)
+                except ValueError: continue
+        return None
 
-    # Meses activo desde registro
-    df_m = df_miembros.withColumn(
-        "meses_activo",
-        F.round(
-            F.datediff(F.lit(ahora).cast("date"), F.to_date(F.to_timestamp(F.col("fecha_registro")))) / 30.0,
-            1
-        ).cast(DoubleType()),
-    )
+    rows = []
+    for m in miembros:
+        mid = str(m["_id"])
+        asist   = asist_map.get(mid, {})
+        ultima  = _parse_dt(asist.get("ultima"))
+        ult60   = float(asist.get("ult60", 0))
+        pagos   = float(pagos_map.get(mid, 0))
+        activa  = float(mm_map.get(mid, 0))
+        reg_dt  = _parse_dt(m.get("fecha_registro"))
+        meses   = max(1.0, (ahora - reg_dt).days / 30.0) if reg_dt else 1.0
+        dias_sin = (ahora - ultima).days if ultima else 60.0
 
-    # Join de features
-    df_feat = (
-        df_m
-        .join(ultima_asist, on="id_miembro", how="left")
-        .join(total_pagos, on="id_miembro", how="left")
-        .join(mm_activa, on="id_miembro", how="left")
-        .withColumn(
-            "dias_sin_asistir",
-            F.datediff(
-                F.lit(ahora).cast("date"),
-                F.to_date(F.col("ultima_asistencia")),
-            ).cast(DoubleType()),
-        )
-        .fillna({
-            "dias_sin_asistir":       60.0,
-            "num_asistencias_ult60":  0.0,
-            "total_pagos":            0.0,
-            "meses_activo":           1.0,
-            "tiene_membresia_activa": 0,
+        label = 1.0 if (dias_sin > 21 or activa == 0) else 0.0
+        rows.append({
+            "id_miembro":  mid,
+            "nombre":      m.get("nombre", ""),
+            "dias_sin_asistir": dias_sin,
+            "num_asistencias_ult60": ult60,
+            "total_pagos": pagos,
+            "meses_activo": meses,
+            "tiene_membresia_activa": activa,
+            "label": label,
         })
-        .withColumn("num_asistencias_ult60", F.col("num_asistencias_ult60").cast(DoubleType()))
-        .withColumn("total_pagos",           F.col("total_pagos").cast(DoubleType()))
-        .withColumn("tiene_membresia_activa",F.col("tiene_membresia_activa").cast(DoubleType()))
-    )
 
-    # ── 3. Label: en_riesgo = 1 si inactivo mas de 21 dias o sin membresia ───
-    df_feat = df_feat.withColumn(
-        "label",
-        F.when(
-            (F.col("dias_sin_asistir") > 21) | (F.col("tiene_membresia_activa") == 0),
-            1.0,
-        ).otherwise(0.0),
-    )
+    if len(rows) < 10:
+        return {"error": "Datos insuficientes para entrenar el modelo",
+                "total_miembros": len(rows)}
 
     feature_cols = [
         "dias_sin_asistir", "num_asistencias_ult60",
         "total_pagos", "meses_activo", "tiene_membresia_activa",
     ]
+    X = np.array([[r[c] for c in feature_cols] for r in rows])
+    y = np.array([r["label"] for r in rows])
 
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="keep")
-    df_asm    = assembler.transform(df_feat).select("id_miembro", "nombre", "features", "label",
-                                                     "dias_sin_asistir", "tiene_membresia_activa")
+    # 6. Train/test split 80/20
+    rng   = np.random.default_rng(42)
+    idx   = rng.permutation(len(X))
+    split = max(1, int(len(X) * 0.8))
+    X_tr, X_te = X[idx[:split]], X[idx[split:]]
+    y_tr, y_te = y[idx[:split]], y[idx[split:]]
 
-    # Necesitamos al menos 10 filas para train/test split
-    total_filas = df_asm.count()
-    if total_filas < 10:
-        return {"error": "Datos insuficientes para entrenar el modelo", "total_miembros": total_filas}
-
-    # ── 4. Entrenar Random Forest ─────────────────────────────────────────────
-    train, test = df_asm.randomSplit([0.8, 0.2], seed=42)
-
+    # 7. Random Forest
     rf = RandomForestClassifier(
-        featuresCol="features", labelCol="label",
-        numTrees=50, maxDepth=5, seed=42,
-        featureSubsetStrategy="auto",
-    )
-    modelo = rf.fit(train)
+        n_estimators=50, max_depth=5, random_state=42, class_weight="balanced"
+    ).fit(X_tr, y_tr)
 
-    # ── 5. Evaluacion ─────────────────────────────────────────────────────────
-    predicciones_test = modelo.transform(test)
-    bin_eval   = BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC")
-    multi_eval = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction",
-                                                    metricName="accuracy")
-    auc      = bin_eval.evaluate(predicciones_test)
-    accuracy = multi_eval.evaluate(predicciones_test)
+    # 8. Evaluación
+    y_pred = rf.predict(X_te) if len(X_te) > 0 else rf.predict(X_tr)
+    y_ref  = y_te if len(X_te) > 0 else y_tr
+    y_prob = rf.predict_proba(X_te)[:, 1] if len(X_te) > 0 else rf.predict_proba(X_tr)[:, 1]
 
-    # ── 6. Prediccion sobre todos los miembros ────────────────────────────────
-    predicciones_all = modelo.transform(df_asm)
+    acc = round(float(accuracy_score(y_ref, y_pred)), 4)
+    try:
+        auc = round(float(roc_auc_score(y_ref, y_prob)), 4)
+    except Exception:
+        auc = 0.0
 
-    # Extraer probabilidad de clase 1
-    get_prob = F.udf(lambda v: float(v[1]) if v is not None else 0.0, DoubleType())
-    pred_rows = (
-        predicciones_all
-        .withColumn("probabilidad", get_prob(F.col("probability")))
-        .select("id_miembro", "nombre", "dias_sin_asistir",
-                "tiene_membresia_activa", "prediction", "probabilidad")
-        .orderBy(F.col("probabilidad").desc())
-        .limit(200)
-        .collect()
-    )
-
+    # 9. Predicción sobre todos los miembros
+    probs_all = rf.predict_proba(X)[:, 1]
     predicciones = []
-    for row in pred_rows:
-        prob   = row["probabilidad"]
+    for i, r in enumerate(rows):
+        prob   = float(probs_all[i])
         riesgo = "alto" if prob >= 0.65 else "medio" if prob >= 0.35 else "bajo"
         predicciones.append({
-            "id_miembro":         str(row["id_miembro"]),
-            "nombre":             row["nombre"] or "",
-            "dias_sin_asistir":   int(row["dias_sin_asistir"] or 0),
-            "membresia_activa":   bool(row["tiene_membresia_activa"]),
-            "probabilidad":       round(prob, 4),
-            "riesgo":             riesgo,
+            "id_miembro":        r["id_miembro"],
+            "nombre":            r["nombre"],
+            "dias_sin_asistir":  int(r["dias_sin_asistir"]),
+            "membresia_activa":  bool(r["tiene_membresia_activa"]),
+            "probabilidad":      round(prob, 4),
+            "riesgo":            riesgo,
         })
+    predicciones.sort(key=lambda x: x["probabilidad"], reverse=True)
+    predicciones = predicciones[:200]
 
-    # ── 7. Importancia de features ────────────────────────────────────────────
-    importancias = [
+    # 10. Importancia de features
+    importancias = sorted([
         {"feature": col, "importancia": round(float(imp), 4)}
-        for col, imp in zip(feature_cols, modelo.featureImportances.toArray())
-    ]
-    importancias.sort(key=lambda x: x["importancia"], reverse=True)
+        for col, imp in zip(feature_cols, rf.feature_importances_)
+    ], key=lambda x: x["importancia"], reverse=True)
 
-    # ── 8. Resumen de riesgo ──────────────────────────────────────────────────
     alto   = sum(1 for p in predicciones if p["riesgo"] == "alto")
     medio  = sum(1 for p in predicciones if p["riesgo"] == "medio")
     activos = len(predicciones) - alto - medio
 
     return {
-        "algoritmo":             "Random Forest Classifier",
-        "descripcion":           "Prediccion de riesgo de cancelacion de membresia",
-        "metricas":              {"accuracy": round(accuracy, 4), "auc_roc": round(auc, 4)},
-        "importancia_features":  importancias,
-        "predicciones":          predicciones,
+        "algoritmo":            "Random Forest Classifier",
+        "descripcion":          "Predicción de riesgo de cancelación de membresía",
+        "metricas":             {"accuracy": acc, "auc_roc": auc},
+        "importancia_features": importancias,
+        "predicciones":         predicciones,
         "resumen": {
-            "total":       len(predicciones),
-            "riesgo_alto": alto,
+            "total":        len(predicciones),
+            "riesgo_alto":  alto,
             "riesgo_medio": medio,
-            "activos":     activos,
+            "activos":      activos,
         },
         "ejecutado_en": datetime.now().isoformat(),
     }
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones", methods=["GET"])
 @jwt_required()
@@ -237,15 +209,13 @@ def cancelaciones_analytics():
             cached["desde_cache"] = True
             return jsonify(cached), 200
 
-        spark   = get_spark()
-        payload = _ejecutar_cancelaciones(spark, gym_id)
+        payload = _ejecutar_cancelaciones(gym_id)
         payload["desde_cache"] = False
         cache_set(key, payload)
         return jsonify(payload), 200
 
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -254,13 +224,11 @@ def cancelaciones_analytics():
 def cancelaciones_train():
     try:
         gym_id  = get_jwt().get("id_gimnasio")
-        spark   = get_spark()
-        payload = _ejecutar_cancelaciones(spark, gym_id)
+        payload = _ejecutar_cancelaciones(gym_id)
         payload["desde_cache"] = False
         cache_set(_cache_key(gym_id), payload)
         return jsonify({**payload, "reentrenado": True}), 200
 
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500

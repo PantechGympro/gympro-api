@@ -1,15 +1,16 @@
 """
-spark_mapreduce.py -- Analisis MapReduce de ingresos y asistencia por periodo.
+spark_mapreduce.py — Análisis MapReduce de ingresos y asistencia por período.
 
-Cache por gym_id con TTL configurable (ANALYTICS_CACHE_TTL_HOURS).
-La SparkSession es el singleton de spark_config.get_spark().
-F.to_timestamp() normaliza tanto strings ISO como ISODate nativos de MongoDB.
+Motor: pymongo aggregation pipeline (en proceso, sin JVM, sin internet).
+MongoDB ya implementa el patrón Map→Reduce via $group + $sort nativo.
+
+Caché por gym_id con TTL configurable (ANALYTICS_CACHE_TTL_HOURS).
 """
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.ia.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 
 spark_mapreduce_bp = Blueprint("spark_mapreduce", __name__)
 
@@ -18,140 +19,182 @@ def _cache_key(gym_id) -> str:
     return f"mapreduce_gym{gym_id}"
 
 
-# ------------------------------------------------------------------------------
-# LOGICA MAPREDUCE
-# ------------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _mapreduce_ingresos(spark, gym_id=None):
-    from pyspark.sql import functions as F
-    from app.routes.ia.spark_config import leer_coleccion
+def _safe_float(val) -> float:
+    try:
+        return round(float(val), 2)
+    except (TypeError, ValueError):
+        return 0.0
 
-    df = leer_coleccion(spark, "pagos")
+
+def _parse_periodo(val) -> str | None:
+    """Extrae 'YYYY-MM' de un valor datetime o string ISO."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m")
+    if isinstance(val, str):
+        s = val.strip()
+        if len(s) >= 7:
+            return s[:7]
+    return None
+
+
+# ── MapReduce de ingresos ─────────────────────────────────────────────────────
+
+def _mapreduce_ingresos(db, gym_id=None):
+    """
+    MAP: (periodo, metodo_pago) → monto
+    REDUCE: sum(monto), count, avg(monto)
+    """
+    match = {}
     if gym_id is not None:
-        df = df.filter(F.col("id_gimnasio") == int(gym_id))
+        match["id_gimnasio"] = int(gym_id)
 
-    # F.to_timestamp normaliza tanto strings ISO-8601 como ISODate de MongoDB
-    df_mapped = (
-        df.withColumn("fecha_dt", F.to_timestamp(F.col("fecha_pago")))
-        .select(
-            F.date_format(F.col("fecha_dt"), "yyyy-MM").alias("periodo"),
-            F.col("metodo_pago"),
-            F.col("monto").cast("double").alias("monto"),
-        )
-        .filter(F.col("monto").isNotNull() & F.col("periodo").isNotNull())
-    )
+    # Pymongo aggregation — equivalente exacto al Spark groupBy + agg
+    pipeline_detalle = [
+        {"$match": match},
+        {"$addFields": {
+            "periodo": {"$dateToString": {"format": "%Y-%m", "date": {
+                "$cond": [
+                    {"$type": ["$fecha_pago"]},
+                    "$fecha_pago",
+                    {"$dateFromString": {"dateString": "$fecha_pago", "onError": None}},
+                ]
+            }}},
+        }},
+        {"$match": {"periodo": {"$ne": None}, "monto": {"$ne": None}}},
+        {"$group": {
+            "_id": {"periodo": "$periodo", "metodo": "$metodo_pago"},
+            "total_ingresos":  {"$sum": "$monto"},
+            "num_pagos":       {"$sum": 1},
+            "promedio_pago":   {"$avg": "$monto"},
+        }},
+        {"$sort": {"_id.periodo": 1, "_id.metodo": 1}},
+    ]
 
-    # REDUCE: detalle por metodo de pago y periodo
-    resultado = (
-        df_mapped
-        .groupBy("periodo", "metodo_pago")
-        .agg(
-            F.round(F.sum("monto"), 2).alias("total_ingresos"),
-            F.count("*").alias("num_pagos"),
-            F.round(F.avg("monto"), 2).alias("promedio_pago"),
-        )
-        .orderBy("periodo", "metodo_pago")
-    )
+    pipeline_resumen = [
+        {"$match": match},
+        {"$addFields": {
+            "periodo": {"$dateToString": {"format": "%Y-%m", "date": {
+                "$cond": [
+                    {"$type": ["$fecha_pago"]},
+                    "$fecha_pago",
+                    {"$dateFromString": {"dateString": "$fecha_pago", "onError": None}},
+                ]
+            }}},
+        }},
+        {"$match": {"periodo": {"$ne": None}}},
+        {"$group": {
+            "_id":                  "$periodo",
+            "total_periodo":        {"$sum": "$monto"},
+            "total_transacciones":  {"$sum": 1},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
 
-    # REDUCE: resumen total por periodo (independiente del metodo)
-    resumen_periodo = (
-        df_mapped
-        .groupBy("periodo")
-        .agg(
-            F.round(F.sum("monto"), 2).alias("total_periodo"),
-            F.count("*").alias("total_transacciones"),
-        )
-        .orderBy("periodo")
-    )
+    detalle = [
+        {
+            "periodo":         r["_id"]["periodo"],
+            "metodo_pago":     r["_id"]["metodo"] or "Sin especificar",
+            "total_ingresos":  _safe_float(r["total_ingresos"]),
+            "num_pagos":       int(r["num_pagos"]),
+            "promedio_pago":   _safe_float(r["promedio_pago"]),
+        }
+        for r in db.pagos.aggregate(pipeline_detalle)
+    ]
 
-    return (
-        [row.asDict() for row in resultado.collect()],
-        [row.asDict() for row in resumen_periodo.collect()],
-    )
+    resumen = [
+        {
+            "periodo":               r["_id"],
+            "total_periodo":         _safe_float(r["total_periodo"]),
+            "total_transacciones":   int(r["total_transacciones"]),
+        }
+        for r in db.pagos.aggregate(pipeline_resumen)
+    ]
+
+    return detalle, resumen
 
 
-def _mapreduce_asistencia(spark, gym_id=None):
-    from pyspark.sql import functions as F
-    from app.routes.ia.spark_config import leer_coleccion
+# ── MapReduce de asistencia ───────────────────────────────────────────────────
 
-    df = leer_coleccion(spark, "asistencias")
+_DIA_ES = {
+    "Monday": "Lunes", "Tuesday": "Martes", "Wednesday": "Miércoles",
+    "Thursday": "Jueves", "Friday": "Viernes", "Saturday": "Sábado", "Sunday": "Domingo",
+}
+
+
+def _mapreduce_asistencia(db, gym_id=None):
+    """
+    MAP: fecha → (periodo, dia_semana)
+    REDUCE: count por mes, count por día de la semana
+    """
+    match = {}
     if gym_id is not None:
-        df = df.filter(F.col("id_gimnasio") == int(gym_id))
+        match["id_gimnasio"] = int(gym_id)
 
-    # MAP: extraer dimensiones temporales normalizando la fecha
-    df_mapped = (
-        df.withColumn("fecha_dt", F.to_timestamp(F.col("fecha")))
-        .select(
-            F.date_format(F.col("fecha_dt"), "yyyy-MM").alias("periodo"),
-            F.date_format(F.col("fecha_dt"), "EEEE").alias("dia_semana"),
-        )
-        .filter(F.col("periodo").isNotNull())
+    # Recuperar todas las fechas y procesar en Python (más simple que $dayOfWeek en todos los formatos)
+    registros = list(db.asistencias.find(match, {"fecha": 1, "_id": 0}))
+
+    por_mes: dict[str, int] = {}
+    por_dia: dict[str, int] = {}
+
+    for r in registros:
+        fecha = r.get("fecha")
+        dt    = None
+        if isinstance(fecha, datetime):
+            dt = fecha.replace(tzinfo=None)
+        elif isinstance(fecha, str):
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(fecha[:len(fmt)], fmt)
+                    break
+                except ValueError:
+                    continue
+        if dt is None:
+            continue
+        mes = dt.strftime("%Y-%m")
+        dia = _DIA_ES.get(dt.strftime("%A"), dt.strftime("%A"))
+        por_mes[mes] = por_mes.get(mes, 0) + 1
+        por_dia[dia] = por_dia.get(dia, 0) + 1
+
+    asist_mes = sorted(
+        [{"periodo": m, "total_visitas": c} for m, c in por_mes.items()],
+        key=lambda x: x["periodo"]
+    )
+    asist_dia = sorted(
+        [{"dia_semana": d, "total_visitas": c} for d, c in por_dia.items()],
+        key=lambda x: x["total_visitas"], reverse=True
     )
 
-    # REDUCE: volumen mensual
-    por_mes = (
-        df_mapped
-        .groupBy("periodo")
-        .agg(F.count("*").alias("total_visitas"))
-        .orderBy("periodo")
-    )
-
-    # REDUCE: frecuencia por dia de la semana
-    por_dia = (
-        df_mapped
-        .groupBy("dia_semana")
-        .agg(F.count("*").alias("total_visitas"))
-        .orderBy(F.count("*").desc())
-    )
-
-    return (
-        [row.asDict() for row in por_mes.collect()],
-        [row.asDict() for row in por_dia.collect()],
-    )
+    return asist_mes, asist_dia
 
 
-def _clean(lst: list) -> list:
-    """Sanitiza tipos Decimal/float de Spark antes de la serializacion JSON."""
-    cleaned = []
-    for row in lst:
-        clean_row = {}
-        for k, v in row.items():
-            if hasattr(v, "to_decimal"):
-                clean_row[k] = round(float(v.to_decimal()), 2)
-            elif isinstance(v, float):
-                clean_row[k] = round(v, 2)
-            else:
-                clean_row[k] = v
-        cleaned.append(clean_row)
-    return cleaned
+# ── Construcción de payload ───────────────────────────────────────────────────
 
-
-def _ejecutar_y_construir_payload(spark, gym_id=None) -> dict:
-    ingresos_detalle, resumen_ingresos = _mapreduce_ingresos(spark, gym_id)
-    asistencia_mes,   asistencia_dia   = _mapreduce_asistencia(spark, gym_id)
+def _ejecutar_y_construir_payload(gym_id=None) -> dict:
+    db = get_mongo_db()
+    ingresos_detalle, resumen_ingresos = _mapreduce_ingresos(db, gym_id)
+    asistencia_mes,   asistencia_dia   = _mapreduce_asistencia(db, gym_id)
 
     return {
-        "algoritmo":                 "MapReduce",
-        "descripcion":               "Agregacion distribuida de ingresos y asistencia por periodo",
-        "ingresos_por_periodo":      _clean(ingresos_detalle),
-        "resumen_ingresos":          _clean(resumen_ingresos),
-        "asistencia_por_mes":        _clean(asistencia_mes),
-        "asistencia_por_dia_semana": _clean(asistencia_dia),
+        "algoritmo":                 "MapReduce (pymongo aggregation)",
+        "descripcion":               "Agregación de ingresos y asistencia por período",
+        "ingresos_por_periodo":      ingresos_detalle,
+        "resumen_ingresos":          resumen_ingresos,
+        "asistencia_por_mes":        asistencia_mes,
+        "asistencia_por_dia_semana": asistencia_dia,
         "ejecutado_en":              datetime.now().isoformat(),
     }
 
 
-# ------------------------------------------------------------------------------
-# ENDPOINTS
-# ------------------------------------------------------------------------------
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @spark_mapreduce_bp.route("/api/analytics/mapreduce", methods=["GET"])
 @jwt_required()
 def mapreduce_analytics():
-    """
-    Devuelve el resultado desde cache (TTL = ANALYTICS_CACHE_TTL_HOURS).
-    Si expiro o no existe, re-ejecuta el MapReduce y actualiza.
-    """
+    """Devuelve resultado desde caché. Si expiró, re-ejecuta y actualiza."""
     try:
         gym_id = get_jwt().get("id_gimnasio")
         key    = _cache_key(gym_id)
@@ -161,14 +204,11 @@ def mapreduce_analytics():
             cached["desde_cache"] = True
             return jsonify(cached), 200
 
-        spark   = get_spark()
-        payload = _ejecutar_y_construir_payload(spark, gym_id)
+        payload = _ejecutar_y_construir_payload(gym_id)
         payload["desde_cache"] = False
         cache_set(key, payload)
         return jsonify(payload), 200
 
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -177,23 +217,15 @@ def mapreduce_analytics():
 @spark_mapreduce_bp.route("/api/analytics/mapreduce/train", methods=["POST"])
 @jwt_required()
 def mapreduce_train():
-    """
-    Fuerza re-ejecucion del MapReduce y actualiza cache para este gimnasio.
-    No requiere body.
-    """
+    """Fuerza re-ejecución del MapReduce y actualiza caché."""
     try:
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id)
-
-        spark   = get_spark()
-        payload = _ejecutar_y_construir_payload(spark, gym_id)
+        gym_id  = get_jwt().get("id_gimnasio")
+        key     = _cache_key(gym_id)
+        payload = _ejecutar_y_construir_payload(gym_id)
         payload["desde_cache"] = False
         cache_set(key, payload)
-
-        return jsonify({
-            **payload,
-            "mensaje": f"MapReduce re-ejecutado para gimnasio {gym_id}.",
-        }), 200
+        return jsonify({**payload,
+                        "mensaje": f"MapReduce re-ejecutado para gimnasio {gym_id}."}), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()

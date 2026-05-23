@@ -80,30 +80,28 @@ def _hoy() -> str:
 # ─── Obtener datos de analytics (cache o re-ejecucion) ───────────────────────
 
 def _get_mapreduce_data(gym_id):
-    from app.routes.ia.spark_config import cache_get, cache_set, get_spark
-    from app.routes.spark_mapreduce import _cache_key, _ejecutar_y_construir_payload
+    from app.routes.ia.spark_config import cache_get, cache_set
+    from app.routes.ia.spark_mapreduce import _cache_key, _ejecutar_y_construir_payload
 
     key    = _cache_key(gym_id)
     cached = cache_get(key)
     if cached:
         return cached
-    spark   = get_spark()
-    payload = _ejecutar_y_construir_payload(spark, gym_id)
+    payload = _ejecutar_y_construir_payload(gym_id)
     cache_set(key, payload)
     return payload
 
 
 def _get_kmeans_data(gym_id, k=3):
-    from app.routes.ia.spark_config import cache_get, cache_set, get_spark
-    from app.routes.spark_kmeans import _cache_key, _ejecutar_kmeans, _build_payload
+    from app.routes.ia.spark_config import cache_get, cache_set
+    from app.routes.ia.spark_kmeans import _cache_key, _ejecutar_kmeans, _build_payload
 
     key    = _cache_key(gym_id, k)
     cached = cache_get(key)
     if cached:
         return cached
-    spark  = get_spark()
-    resumen, asig, centroides, sil = _ejecutar_kmeans(spark, k=k, gym_id=gym_id)
-    payload = _build_payload(k, 20, resumen, asig, centroides, sil)
+    resumen, asig, centroides, sil = _ejecutar_kmeans(k=k, gym_id=gym_id)
+    payload = _build_payload(k, 300, resumen, asig, centroides, sil)
     cache_set(key, payload)
     return payload
 

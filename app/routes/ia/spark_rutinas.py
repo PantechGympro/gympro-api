@@ -1,36 +1,34 @@
 """
-spark_rutinas.py -- Recomendaciones de rutina personalizadas.
+spark_rutinas.py — Recomendaciones de rutina personalizadas.
 
-Sprint 4 / US20: filtrado colaborativo basado en el perfil del miembro.
+Motor: scikit-learn NearestNeighbors (filtrado colaborativo, en proceso, sin JVM).
 
 Algoritmo:
-  1. Representar cada miembro como vector de features: IMC, objetivo (encoded),
-     grupos_musculares_preferidos (frecuencia), dias_activo.
-  2. Normalizar con StandardScaler y calcular similitud coseno con Spark.
-  3. Para el miembro consultado, encontrar los N vecinos mas similares.
-  4. Devolver las rutinas mas frecuentes entre esos vecinos como recomendaciones.
+  1. Representar cada miembro como vector: IMC, objetivo_encoded, total_asistencias.
+  2. StandardScaler + NearestNeighbors (cosine distance).
+  3. Para el miembro consultado, encontrar los N vecinos más similares.
+  4. Devolver las rutinas más frecuentes entre esos vecinos.
 
 Endpoints:
-  GET  /api/analytics/rutinas/recomendaciones?id_miembro=<hex>  -- recomendaciones por miembro
-  GET  /api/analytics/rutinas/populares                          -- rutinas mas populares del gym
+  GET /api/analytics/rutinas/recomendaciones?id_miembro=<hex>
+  GET /api/analytics/rutinas/populares
 """
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.ia.spark_config import get_spark, cache_get, cache_set
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 
 spark_rutinas_bp = Blueprint("spark_rutinas", __name__)
 
-# Mapeo de objetivos a entero para vectorizacion
 _OBJETIVO_MAP = {
-    "Perdida de peso":          0,
-    "Ganancia muscular":        1,
-    "Definicion":               2,
-    "Resistencia":              3,
-    "Rehabilitacion":           4,
-    "Acondicionamiento general":5,
-    "Fuerza maxima":            6,
+    "Perdida de peso":           0,
+    "Ganancia muscular":         1,
+    "Definicion":                2,
+    "Resistencia":               3,
+    "Rehabilitacion":            4,
+    "Acondicionamiento general": 5,
+    "Fuerza maxima":             6,
 }
 
 
@@ -42,21 +40,19 @@ def _cache_key_rec(id_miembro):
     return f"rutinas_rec_{id_miembro}"
 
 
-# ─── Rutinas populares del gimnasio ──────────────────────────────────────────
+# ── Rutinas populares del gimnasio (sin ML, solo aggregation) ─────────────────
 
 def _rutinas_populares(gym_id=None) -> list:
-    from app.routes.ia.spark_config import get_mongo_db
     db    = get_mongo_db()
     match = {} if gym_id is None else {"id_gimnasio": int(gym_id)}
-
     pipeline = [
         {"$match": match},
         {"$group": {
-            "_id":      "$nombre",
-            "veces":    {"$sum": 1},
-            "categoria":{"$first": "$categoria"},
-            "dificultad":{"$first":"$dificultad"},
-            "duracion": {"$first": "$duracion_minutos"},
+            "_id":       "$nombre",
+            "veces":     {"$sum": 1},
+            "categoria": {"$first": "$categoria"},
+            "dificultad":{"$first": "$dificultad"},
+            "duracion":  {"$first": "$duracion_minutos"},
         }},
         {"$sort": {"veces": -1}},
         {"$limit": 10},
@@ -64,112 +60,108 @@ def _rutinas_populares(gym_id=None) -> list:
     return list(db.rutinas.aggregate(pipeline))
 
 
-# ─── Recomendaciones por similitud de perfil ─────────────────────────────────
+# ── Recomendaciones por similitud de perfil ───────────────────────────────────
 
-def _recomendaciones_para_miembro(spark, id_miembro_hex: str, gym_id=None, top_n: int = 5) -> dict:
-    from pyspark.sql import functions as F
-    from pyspark.sql.types import DoubleType, IntegerType
-    from pyspark.ml.feature import VectorAssembler, StandardScaler
-    from pyspark.ml.functions import vector_to_array
-    from app.routes.ia.spark_config import leer_coleccion, get_mongo_db
+def _recomendaciones_para_miembro(id_miembro_hex: str, gym_id=None, top_n: int = 5) -> dict:
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.neighbors import NearestNeighbors
     from bson import ObjectId
 
     db = get_mongo_db()
 
-    # ── Validar miembro ───────────────────────────────────────────────────────
+    # Validar miembro
     try:
         oid = ObjectId(id_miembro_hex)
     except Exception:
-        return {"error": "id_miembro invalido"}
+        return {"error": "id_miembro inválido"}
 
-    miembro_doc = db.miembros.find_one({"_id": oid}, {"nombre":1,"objetivo":1,"peso_inicial":1,"estatura":1})
+    miembro_doc = db.miembros.find_one(
+        {"_id": oid},
+        {"nombre": 1, "objetivo": 1, "peso_inicial": 1, "estatura": 1, "id_gimnasio_pg": 1}
+    )
     if not miembro_doc:
         return {"error": "Miembro no encontrado"}
 
-    # ── Cargar datos desde Spark ───────────────────────────────────────────────
-    df_miembros = leer_coleccion(spark, "miembros").select(
-        F.col("_id").alias("id_miembro"),
-        F.col("id_gimnasio_pg").cast("integer"),
-        F.col("objetivo"),
-        F.col("peso_inicial").cast(DoubleType()),
-        F.col("estatura").cast(DoubleType()),
-    )
+    # Cargar todos los miembros del gimnasio para construir el espacio de similitud
+    query_m = {}
     if gym_id is not None:
-        df_miembros = df_miembros.filter(F.col("id_gimnasio_pg") == int(gym_id))
+        query_m["id_gimnasio_pg"] = int(gym_id)
+    miembros = list(db.miembros.find(query_m, {
+        "_id": 1, "objetivo": 1, "peso_inicial": 1, "estatura": 1,
+    }))
 
-    # Numero de asistencias por miembro (proxy de actividad)
-    df_asist = leer_coleccion(spark, "asistencias").groupBy("id_miembro").agg(
-        F.count("*").cast(DoubleType()).alias("total_asistencias"),
-    )
+    # Total asistencias por miembro
+    member_oids = [m["_id"] for m in miembros]
+    asist_pipe = [
+        {"$match": {"id_miembro": {"$in": member_oids}}},
+        {"$group": {"_id": "$id_miembro", "total": {"$sum": 1}}},
+    ]
+    asist_map = {str(r["_id"]): float(r["total"]) for r in db.asistencias.aggregate(asist_pipe)}
 
-    # Encode objetivo como entero
-    mapping_expr = F.create_map(
-        *[item for pair in [(F.lit(k), F.lit(v)) for k, v in _OBJETIVO_MAP.items()] for item in pair]
-    )
-    df_feat = (
-        df_miembros
-        .join(df_asist, on="id_miembro", how="left")
-        .fillna({"total_asistencias": 0.0, "peso_inicial": 70.0, "estatura": 1.70})
-        .withColumn(
-            "imc",
-            F.when(F.col("estatura") > 0,
-                   F.col("peso_inicial") / (F.col("estatura") * F.col("estatura"))
-            ).otherwise(F.lit(24.0)).cast(DoubleType()),
-        )
-        .withColumn("objetivo_enc", (mapping_expr[F.col("objetivo")]).cast(DoubleType()))
-        .fillna({"objetivo_enc": 0.0})
-    )
+    # Construir feature matrix
+    records = []
+    for m in miembros:
+        try:
+            peso     = float(m.get("peso_inicial") or 70.0)
+            estatura = float(m.get("estatura") or 1.70)
+            if estatura <= 0: estatura = 1.70
+        except (TypeError, ValueError):
+            continue
+        imc     = peso / (estatura ** 2)
+        obj_enc = float(_OBJETIVO_MAP.get(m.get("objetivo", ""), 0))
+        asist   = asist_map.get(str(m["_id"]), 0.0)
+        records.append({
+            "id": str(m["_id"]),
+            "imc": imc, "objetivo_enc": obj_enc, "asistencias": asist,
+        })
 
-    feature_cols = ["imc", "objetivo_enc", "total_asistencias"]
-    assembler    = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="keep")
-    scaler_model = StandardScaler(inputCol="features", outputCol="features_scaled",
-                                   withStd=True, withMean=True)
-
-    df_asm    = assembler.transform(df_feat)
-    df_scaled = scaler_model.fit(df_asm).transform(df_asm)
-
-    # ── Similitud coseno con el miembro target ───────────────────────────────
-    target_id   = id_miembro_hex
-    target_row  = df_scaled.filter(F.col("id_miembro").cast("string") == target_id).first()
-
-    if target_row is None:
-        # Miembro no tiene asistencias; usar populares como fallback
+    if len(records) < 2:
+        # Fallback: rutinas populares
         populares = _rutinas_populares(gym_id)
         return {
-            "id_miembro":       id_miembro_hex,
-            "nombre":           miembro_doc.get("nombre",""),
-            "modo":             "popular_fallback",
-            "recomendaciones":  [
-                {"nombre": r["_id"], "categoria": r.get("categoria",""), "veces": r["veces"]}
-                for r in populares[:5]
+            "id_miembro": id_miembro_hex,
+            "nombre":     miembro_doc.get("nombre", ""),
+            "modo":       "popular_fallback",
+            "recomendaciones": [
+                {"nombre": r["_id"], "categoria": r.get("categoria", ""), "veces": r["veces"]}
+                for r in populares[:top_n]
             ],
         }
 
-    target_vec = target_row["features_scaled"].toArray()
-    target_norm = float((target_vec ** 2).sum() ** 0.5) or 1.0
+    X = np.array([[r["imc"], r["objetivo_enc"], r["asistencias"]] for r in records])
+    ids = [r["id"] for r in records]
 
-    # Convertir features_scaled a array para calcular similitud
-    df_arr = df_scaled.withColumn("vec_arr", vector_to_array("features_scaled"))
-    rows   = df_arr.filter(F.col("id_miembro").cast("string") != target_id).collect()
+    # Escalar + NearestNeighbors con distancia coseno
+    scaler = StandardScaler()
+    X_sc   = scaler.fit_transform(X)
 
-    similitudes = []
-    for row in rows:
-        vec = row["vec_arr"]
-        if not vec:
-            continue
-        import math
-        dot  = sum(a*b for a, b in zip(target_vec, vec))
-        norm = math.sqrt(sum(v*v for v in vec)) or 1.0
-        sim  = dot / (target_norm * norm)
-        similitudes.append((str(row["id_miembro"]), sim))
+    target_idx = next((i for i, r in enumerate(records) if r["id"] == id_miembro_hex), None)
+    if target_idx is None:
+        # Miembro no tiene datos suficientes — fallback a populares
+        populares = _rutinas_populares(gym_id)
+        return {
+            "id_miembro": id_miembro_hex,
+            "nombre":     miembro_doc.get("nombre", ""),
+            "modo":       "popular_fallback",
+            "recomendaciones": [
+                {"nombre": r["_id"], "categoria": r.get("categoria", ""), "veces": r["veces"]}
+                for r in populares[:top_n]
+            ],
+        }
 
-    similitudes.sort(key=lambda x: x[1], reverse=True)
-    vecinos_ids = [s[0] for s in similitudes[:15]]
+    n_neighbors = min(16, len(records))
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric="cosine", algorithm="brute")
+    nn.fit(X_sc)
+    _, indices = nn.kneighbors(X_sc[target_idx].reshape(1, -1))
 
-    # ── Rutinas de los vecinos ────────────────────────────────────────────────
+    # Excluir el propio miembro y tomar hasta 15 vecinos
+    vecinos_ids_hex = [ids[i] for i in indices[0] if ids[i] != id_miembro_hex][:15]
+
+    # Rutinas más frecuentes entre esos vecinos
     from bson import ObjectId as OID
     try:
-        oids_vecinos = [OID(v) for v in vecinos_ids]
+        oids_vecinos = [OID(v) for v in vecinos_ids_hex]
     except Exception:
         oids_vecinos = []
 
@@ -187,27 +179,34 @@ def _recomendaciones_para_miembro(spark, id_miembro_hex: str, gym_id=None, top_n
     ]
     rutinas_rec = list(db.rutinas.aggregate(pipeline))
 
+    # Si no hay rutinas de los vecinos, usar las populares del gym
+    if not rutinas_rec:
+        rutinas_rec = _rutinas_populares(gym_id)[:top_n]
+        modo = "popular_fallback"
+    else:
+        modo = "collaborative_filtering"
+
     return {
         "id_miembro":      id_miembro_hex,
-        "nombre":          miembro_doc.get("nombre",""),
-        "objetivo":        miembro_doc.get("objetivo",""),
-        "modo":            "collaborative_filtering",
-        "vecinos_usados":  len(vecinos_ids),
+        "nombre":          miembro_doc.get("nombre", ""),
+        "objetivo":        miembro_doc.get("objetivo", ""),
+        "modo":            modo,
+        "vecinos_usados":  len(vecinos_ids_hex),
         "recomendaciones": [
             {
                 "nombre":     r["_id"],
-                "categoria":  r.get("categoria",""),
-                "dificultad": r.get("dificultad",""),
-                "duracion":   r.get("duracion",""),
+                "categoria":  r.get("categoria", ""),
+                "dificultad": r.get("dificultad", ""),
+                "duracion":   r.get("duracion", ""),
                 "frecuencia": r["veces"],
             }
             for r in rutinas_rec
         ],
-        "ejecutado_en":    datetime.now().isoformat(),
+        "ejecutado_en": datetime.now().isoformat(),
     }
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @spark_rutinas_bp.route("/api/analytics/rutinas/populares", methods=["GET"])
 @jwt_required()
@@ -222,14 +221,15 @@ def rutinas_populares():
 
         rutinas = _rutinas_populares(gym_id)
         result  = [
-            {"nombre": r["_id"], "categoria": r.get("categoria",""),
-             "dificultad": r.get("dificultad",""), "veces": r["veces"]}
+            {"nombre": r["_id"], "categoria": r.get("categoria", ""),
+             "dificultad": r.get("dificultad", ""), "veces": r["veces"]}
             for r in rutinas
         ]
         cache_set(key, result)
         return jsonify({"desde_cache": False, "rutinas": result}), 200
 
     except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -238,7 +238,7 @@ def rutinas_populares():
 def rutinas_recomendaciones():
     id_miembro = request.args.get("id_miembro", "").strip()
     if not id_miembro:
-        return jsonify({"error": "Parametro 'id_miembro' requerido"}), 400
+        return jsonify({"error": "Parámetro 'id_miembro' requerido"}), 400
 
     try:
         gym_id = get_jwt().get("id_gimnasio")
@@ -248,14 +248,12 @@ def rutinas_recomendaciones():
         if cached:
             return jsonify({**cached, "desde_cache": True}), 200
 
-        spark  = get_spark()
-        result = _recomendaciones_para_miembro(spark, id_miembro, gym_id)
+        result = _recomendaciones_para_miembro(id_miembro, gym_id)
         if "error" not in result:
             cache_set(key, result)
         result["desde_cache"] = False
         return jsonify(result), 200
 
-    except RuntimeError as e:
-        return jsonify({"error": str(e), "spark_enabled": False}), 503
     except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
