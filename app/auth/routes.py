@@ -66,6 +66,21 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
 
     primer_login = getattr(usuario, "primer_login", False)
 
+    # Para miembros PG, resolver peso_inicial y perfil_completo desde el doc Mongo
+    # (el perfil físico sigue viviendo en MongoDB — colección miembros)
+    peso_inicial    = None
+    perfil_completo = True
+    if rol_nombre in ("Miembro", "user"):
+        try:
+            mdb         = get_db()
+            miembro_doc = mdb.miembros.find_one({"id_usuario_pg": usuario.id})
+            if miembro_doc:
+                pi           = miembro_doc.get("peso_inicial")
+                peso_inicial = float(pi) if pi else None
+            perfil_completo = peso_inicial is not None
+        except Exception:
+            pass  # si Mongo no está disponible no bloquear el login
+
     return {
         "identity": str(usuario.id),
         "claims": {
@@ -74,8 +89,8 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "id_gimnasio":     usuario.id_gimnasio,
             "plan":            plan,
             "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
-            "perfil_completo": True,
-            "peso_inicial":    None,
+            "perfil_completo": perfil_completo,
+            "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
             "fuente":          "pg",
         },
@@ -87,7 +102,8 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "id_gimnasio":     usuario.id_gimnasio,
             "plan":            plan,
             "access_level":    "premium" if plan in ("pro", "enterprise") else "basico",
-            "perfil_completo": True,
+            "perfil_completo": perfil_completo,
+            "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
         },
     }

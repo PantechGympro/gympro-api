@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from bson.objectid import ObjectId
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import traceback
 
 from app.mongo import get_db
@@ -39,12 +39,15 @@ def get_trainer_dashboard():
         if not usuario:
             return jsonify({"error": "Entrenador no encontrado"}), 404
 
-        # KPIs
-        total_clients = mdb.miembros.count_documents({
-            "id_entrenador_pg": trainer_id,
-            "id_gimnasio_pg":   gym_id,
-            "estado":           "Activo",
-        })
+        # KPIs — clientes PT activos (miembros con solicitud aceptada, sin duplicados)
+        total_clients = len(mdb.pt_solicitudes.distinct(
+            "id_miembro_pg",
+            {
+                "id_entrenador_pg": trainer_id,
+                "id_gimnasio_pg":   gym_id,
+                "estado":           "aceptada",
+            },
+        ))
         sessions_today_list = list(mdb.sesiones.find({
             "id_entrenador_pg": trainer_id,
             "fecha":            {"$gte": today_start, "$lte": today_end},
@@ -106,6 +109,22 @@ def get_trainer_clients():
         status   = request.args.get('status', 'all')
 
         inicio_mes = datetime.now().replace(day=1, hour=0, minute=0, second=0)
+
+        # Auto-migrar: vincular en mdb.miembros todos los clientes con solicitud
+        # aceptada que aún no tengan id_entrenador_pg seteado (fix retroactivo).
+        accepted_pg_ids = mdb.pt_solicitudes.distinct(
+            "id_miembro_pg",
+            {"id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id, "estado": "aceptada"},
+        )
+        if accepted_pg_ids:
+            mdb.miembros.update_many(
+                {
+                    "id_usuario_pg":    {"$in": accepted_pg_ids},
+                    "id_gimnasio_pg":   gym_id,
+                    "id_entrenador_pg": {"$exists": False},
+                },
+                {"$set": {"id_entrenador_pg": trainer_id}},
+            )
 
         # Filtro base: entrenador + gimnasio
         match_base = {
@@ -230,9 +249,11 @@ def get_trainer_profile():
             {"id_entrenador_pg": trainer_id}
         ).sort("fecha", -1).limit(4))
 
-        total_clientes  = mdb.miembros.count_documents(
-            {"id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id}
-        )
+        # Fuente de verdad: pt_solicitudes aceptadas (mdb.miembros puede estar desactualizado)
+        total_clientes = len(mdb.pt_solicitudes.distinct(
+            "id_miembro_pg",
+            {"id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id, "estado": "aceptada"},
+        ))
         total_sesiones  = mdb.sesiones.count_documents(
             {"id_entrenador_pg": trainer_id, "estado": "completed"}
         )
@@ -250,15 +271,20 @@ def get_trainer_profile():
             fecha_creacion = fecha_creacion.replace(tzinfo=None)
         anos_activos = (datetime.now() - fecha_creacion).days // 365 if fecha_creacion else 0
 
+        # Certificaciones: usar texto libre del perfil si existe; colección como fallback
+        certs_texto = (perfil or {}).get("certificaciones_texto")
+        if certs_texto is None:
+            certs_texto = ', '.join([c.get("nombre", "") for c in certificaciones])
+
         profile_data = {
             'name':           usuario.nombre,
             'email':          usuario.email,
-            'phone':          perfil.get("telefono", "")       if perfil else "",
-            'address':        perfil.get("direccion", "")      if perfil else "",
+            'phone':          perfil.get("telefono", "")        if perfil else "",
+            'address':        perfil.get("direccion", "")       if perfil else "",
             'specialization': perfil.get("especializacion", "") if perfil else "",
             'experience':     f"{anos_activos} años",
-            'certifications': ', '.join([c.get("nombre", "") for c in certificaciones]),
-            'bio':            perfil.get("biografia", "")      if perfil else "",
+            'certifications': certs_texto,
+            'bio':            perfil.get("biografia", "")       if perfil else "",
             'stats': {
                 'totalClients':   total_clientes,
                 'totalSessions':  total_sesiones,
@@ -305,10 +331,12 @@ def update_trainer_profile():
 
         # Actualizar perfil extendido en Mongo
         update_perfil = {}
-        if 'phone'          in data: update_perfil['telefono']       = data['phone']
-        if 'address'        in data: update_perfil['direccion']      = data['address']
-        if 'specialization' in data: update_perfil['especializacion']= data['specialization']
-        if 'bio'            in data: update_perfil['biografia']       = data['bio']
+        if 'phone'          in data: update_perfil['telefono']        = data['phone']
+        if 'address'        in data: update_perfil['direccion']       = data['address']
+        if 'specialization' in data: update_perfil['especializacion'] = data['specialization']
+        if 'bio'            in data: update_perfil['biografia']        = data['bio']
+        # certifications se guarda como string libre en el perfil extendido
+        if 'certifications' in data: update_perfil['certificaciones_texto'] = data['certifications']
 
         if update_perfil:
             mdb.perfil_entrenador.update_one(
@@ -1147,6 +1175,265 @@ def determinar_estado_cliente(ultima_sesion, tasa_asistencia):
         return 'active'
     except Exception:
         return 'active'
+
+
+def _ser_doc(doc: dict) -> dict:
+    """Serializa ObjectId y datetime para JSON."""
+    out = {}
+    for k, v in doc.items():
+        if k == "_id":
+            out["id"] = str(v)
+        elif isinstance(v, ObjectId):
+            out[k] = str(v)
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SOLICITUDES DE ENTRENAMIENTO PERSONAL (PT) — VISTA ENTRENADOR
+# ═══════════════════════════════════════════════════════════════
+
+@trainer_bp.route('/pt-requests', methods=['GET'])
+@jwt_required()
+@require_tenant
+def listar_solicitudes_pt():
+    """Lista todas las solicitudes PT dirigidas a este entrenador."""
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+    estado     = request.args.get('estado', 'all')   # pendiente | aceptada | rechazada | all
+
+    filtro = {"id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id}
+    if estado != 'all':
+        filtro["estado"] = estado
+
+    docs = list(mdb.pt_solicitudes.find(filtro).sort("fecha_solicitud", -1))
+    return jsonify({"solicitudes": [_ser_doc(d) for d in docs]}), 200
+
+
+@trainer_bp.route('/pt-requests/<sol_id>', methods=['PATCH'])
+@jwt_required()
+@require_tenant
+def responder_solicitud_pt(sol_id):
+    """
+    Acepta o rechaza una solicitud PT.
+    Body: { accion: 'aceptar'|'rechazar', notas_entrenador: str }
+    """
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    data       = request.get_json() or {}
+    accion     = data.get('accion')
+
+    if accion not in ('aceptar', 'rechazar'):
+        return jsonify({"error": "accion debe ser 'aceptar' o 'rechazar'"}), 400
+
+    try:
+        oid = ObjectId(sol_id)
+    except Exception:
+        return jsonify({"error": "ID inválido"}), 400
+
+    nuevo_estado = "aceptada" if accion == "aceptar" else "rechazada"
+    gym_id       = g.tenant_id
+
+    # Recuperar la solicitud antes de actualizar para obtener id_miembro_pg
+    solicitud = mdb.pt_solicitudes.find_one(
+        {"_id": oid, "id_entrenador_pg": trainer_id, "estado": "pendiente"}
+    )
+    if not solicitud:
+        return jsonify({"error": "Solicitud no encontrada o ya respondida"}), 404
+
+    mdb.pt_solicitudes.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "estado":           nuevo_estado,
+                "notas_entrenador": data.get("notas_entrenador", ""),
+                "fecha_respuesta":  datetime.now(timezone.utc),
+            }
+        },
+    )
+
+    # Si se acepta: vincular el miembro con el entrenador en mdb.miembros
+    if accion == "aceptar":
+        id_miembro_pg = solicitud.get("id_miembro_pg")
+        if id_miembro_pg:
+            mdb.miembros.update_one(
+                {"id_usuario_pg": id_miembro_pg, "id_gimnasio_pg": gym_id},
+                {"$set": {"id_entrenador_pg": trainer_id}},
+            )
+
+    return jsonify({"message": f"Solicitud {nuevo_estado}"}), 200
+
+
+# ═══════════════════════════════════════════════════════════════
+#  CHAT ENTRENADOR ↔ MIEMBRO
+# ═══════════════════════════════════════════════════════════════
+
+@trainer_bp.route('/chat/<int:miembro_pg_id>', methods=['GET'])
+@jwt_required()
+@require_tenant
+def chat_trainer_historial(miembro_pg_id):
+    """Historial de mensajes con un miembro específico."""
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+
+    msgs = list(mdb.mensajes_chat.find({
+        "id_miembro_pg":    miembro_pg_id,
+        "id_entrenador_pg": trainer_id,
+        "id_gimnasio_pg":   gym_id,
+    }).sort("fecha", 1).limit(100))
+
+    # Marcar mensajes del miembro como leídos
+    mdb.mensajes_chat.update_many(
+        {
+            "id_miembro_pg":    miembro_pg_id,
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "remitente":        "miembro",
+            "leido":            False,
+        },
+        {"$set": {"leido": True}},
+    )
+
+    return jsonify({"mensajes": [_ser_doc(m) for m in msgs]}), 200
+
+
+@trainer_bp.route('/chat/<int:miembro_pg_id>', methods=['POST'])
+@jwt_required()
+@require_tenant
+def chat_trainer_enviar(miembro_pg_id):
+    """Envía un mensaje al miembro."""
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+    data       = request.get_json() or {}
+    texto      = (data.get("texto") or "").strip()
+
+    if not texto:
+        return jsonify({"error": "Mensaje vacío"}), 400
+    if len(texto) > 1000:
+        return jsonify({"error": "Mensaje demasiado largo"}), 400
+
+    doc = {
+        "id_miembro_pg":    miembro_pg_id,
+        "id_entrenador_pg": trainer_id,
+        "id_gimnasio_pg":   gym_id,
+        "remitente":        "entrenador",
+        "texto":            texto,
+        "fecha":            datetime.now(timezone.utc),
+        "leido":            False,
+    }
+    result = mdb.mensajes_chat.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    return jsonify({"mensaje": _ser_doc(doc)}), 201
+
+
+@trainer_bp.route('/chat/unread-summary', methods=['GET'])
+@jwt_required()
+@require_tenant
+def chat_unread_summary():
+    """Badge: total mensajes sin leer + lista de miembros con mensajes nuevos."""
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+
+    pipeline = [
+        {
+            "$match": {
+                "id_entrenador_pg": trainer_id,
+                "id_gimnasio_pg":   gym_id,
+                "remitente":        "miembro",
+                "leido":            False,
+            }
+        },
+        {
+            "$group": {
+                "_id":   "$id_miembro_pg",
+                "count": {"$sum": 1},
+            }
+        },
+    ]
+    result = list(mdb.mensajes_chat.aggregate(pipeline))
+    total  = sum(r["count"] for r in result)
+
+    # Enriquecer con nombre del miembro
+    miembro_ids = [r["_id"] for r in result]
+    usuarios    = {u.id: u.nombre for u in Usuario.query.filter(Usuario.id.in_(miembro_ids)).all()} if miembro_ids else {}
+
+    resumen = [
+        {
+            "id_miembro_pg": r["_id"],
+            "nombre":        usuarios.get(r["_id"], f"Miembro #{r['_id']}"),
+            "unread":        r["count"],
+        }
+        for r in result
+    ]
+
+    return jsonify({"total_unread": total, "por_miembro": resumen}), 200
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ASIGNAR RUTINA DEL CATÁLOGO A UN MIEMBRO (vista enriquecida)
+# ═══════════════════════════════════════════════════════════════
+
+@trainer_bp.route('/assign-routine', methods=['POST'])
+@jwt_required()
+@require_tenant
+def asignar_rutina_miembro():
+    """
+    Asigna una rutina del catálogo del entrenador a un miembro específico
+    y la registra en rutinas_asignadas (visible para el miembro).
+    Body: { id_rutina, id_miembro_pg, notas_entrenador? }
+    """
+    mdb        = get_db()
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+    data       = request.get_json() or {}
+
+    id_rutina_str  = data.get("id_rutina")
+    id_miembro_pg  = data.get("id_miembro_pg")
+
+    if not id_rutina_str or not id_miembro_pg:
+        return jsonify({"error": "id_rutina e id_miembro_pg son requeridos"}), 400
+
+    try:
+        rutina_oid = ObjectId(id_rutina_str)
+    except Exception:
+        return jsonify({"error": "id_rutina inválido"}), 400
+
+    rutina = mdb.rutinas.find_one({"_id": rutina_oid, "id_entrenador_pg": trainer_id})
+    if not rutina:
+        return jsonify({"error": "Rutina no encontrada en tu catálogo"}), 404
+
+    # Resolver nombre del entrenador
+    trainer_pg  = Usuario.query.get(trainer_id)
+    nombre_ent  = trainer_pg.nombre if trainer_pg else "Entrenador"
+
+    doc = {
+        "id_miembro_pg":    int(id_miembro_pg),
+        "id_entrenador_pg": trainer_id,
+        "id_gimnasio_pg":   gym_id,
+        "id_rutina":        rutina_oid,
+        "nombre":           rutina.get("nombre", ""),
+        "descripcion":      rutina.get("descripcion", ""),
+        "categoria":        rutina.get("categoria", "General"),
+        "dificultad":       rutina.get("dificultad", "Intermedio"),
+        "duracion_minutos": rutina.get("duracion_minutos", 60),
+        "nombre_entrenador":nombre_ent,
+        "notas_entrenador": data.get("notas_entrenador", ""),
+        "activa":           True,
+        "fecha_asignacion": datetime.now(timezone.utc),
+    }
+    result = mdb.rutinas_asignadas.insert_one(doc)
+
+    return jsonify({
+        "message":    "Rutina asignada al miembro",
+        "id":         str(result.inserted_id),
+    }), 201
 
 
 def _pct_growth(current, previous):

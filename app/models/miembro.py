@@ -143,9 +143,9 @@ class Miembro:
         from app.mongo import get_db
         db = get_db()
         
-        # Calcular progreso
-        progreso_cursor = db.progreso_fisico.find({"id_miembro": self._id}).sort("fecha_registro", -1).limit(1)
-        progreso_reciente = list(progreso_cursor)[0] if list(progreso_cursor) else None
+        # Calcular progreso — materializar el cursor una sola vez
+        _tmp_progreso = list(db.progreso_fisico.find({"id_miembro": self._id}).sort("fecha_registro", -1).limit(1))
+        progreso_reciente = _tmp_progreso[0] if _tmp_progreso else None
         
         progreso_porcentaje = 0
         if progreso_reciente and self.peso_inicial:

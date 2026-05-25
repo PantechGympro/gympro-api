@@ -10,6 +10,10 @@ from app.mongo import get_db
 from app.models.user import User
 from app.models.miembro import Miembro
 from app.utils.tenant import get_tenant_filter, require_tenant
+# PG — fuente de verdad desde Sprint 2
+from app.extensions import db as pg_db
+from app.models.pg.usuario import Usuario as UsuarioPG
+from app.models.pg.rol import Rol as RolPG
 
 miembros_bp = Blueprint("miembros", __name__)
 
@@ -81,23 +85,28 @@ def crear_miembro():
     if not nombre or not email:
         return jsonify({"error": "Nombre y Email son obligatorios"}), 400
 
+    # Verificar duplicado en PG y en Mongo
+    if UsuarioPG.query.filter_by(email=email.strip().lower()).first():
+        return jsonify({"error": "El email ya está registrado"}), 400
     if User.find_by_email(email):
         return jsonify({"error": "El email ya está registrado"}), 400
 
     try:
-        # Buscar el ID del rol Miembro dinámicamente
-        rol_doc = db.roles.find_one({"nombre": "Miembro"})
-        id_rol  = rol_doc["_id"] if rol_doc else ObjectId()
+        # 1. Crear Usuario en PostgreSQL (fuente de verdad desde Sprint 2)
+        rol_pg = RolPG.query.filter_by(nombre="Miembro").first()
+        if not rol_pg:
+            return jsonify({"error": "Rol 'Miembro' no encontrado en base de datos"}), 500
 
-        # 1. Crear Usuario (Mongo legacy)
-        nuevo_usuario = User(
-            nombre=nombre,
-            email=email,
-            id_role=id_rol,
-            activo=True
+        pg_usuario = UsuarioPG(
+            nombre      = nombre,
+            email       = email.strip().lower(),
+            id_rol      = rol_pg.id,
+            id_gimnasio = gym_id,
+            activo      = True,
         )
-        nuevo_usuario.set_password(password if password else "gym123")
-        user_id = nuevo_usuario.save()
+        pg_usuario.set_password(password if password else "gym123")
+        pg_db.session.add(pg_usuario)
+        pg_db.session.flush()          # obtener el id sin commit aún
 
         # 2. Procesar imagen
         filename_bd = None
@@ -109,27 +118,29 @@ def crear_miembro():
             file.save(os.path.join(upload_folder, unique_filename))
             filename_bd = unique_filename
 
-        # 3. Crear Miembro con gym_id desnormalizado
+        # 3. Crear documento Miembro en MongoDB con referencia al usuario PG
         nuevo_miembro = Miembro(
-            id_usuario      = user_id,
-            nombre          = nombre,          # desnormalizado para búsquedas
-            email           = email,           # desnormalizado
-            id_gimnasio_pg  = gym_id,          # tenant — campo crítico de aislamiento
-            telefono        = data.get("telefono"),
-            sexo            = data.get("sexo"),
-            peso_inicial    = data.get("peso_inicial"),
-            estatura        = data.get("estatura"),
-            fecha_registro  = datetime.now(),
-            estado          = "Activo",
-            foto_perfil     = filename_bd,
+            id_usuario_pg  = pg_usuario.id,    # FK al usuario PG — permite el lookup en endpoints
+            nombre         = nombre,            # desnormalizado para búsquedas/listados
+            email          = email.strip().lower(),
+            id_gimnasio_pg = gym_id,            # tenant — aislamiento estricto
+            telefono       = data.get("telefono"),
+            sexo           = data.get("sexo"),
+            peso_inicial   = data.get("peso_inicial"),
+            estatura       = data.get("estatura"),
+            fecha_registro = datetime.now(),
+            estado         = "Activo",
+            foto_perfil    = filename_bd,
         )
-
         miembro_id        = nuevo_miembro.save()
         nuevo_miembro._id = miembro_id
+
+        pg_db.session.commit()
 
         return jsonify(nuevo_miembro.to_dict_full()), 201
 
     except Exception as e:
+        pg_db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 # ==============================================================================
@@ -147,41 +158,54 @@ def actualizar_miembro(id):
     if miembro.id_gimnasio_pg != gym_id:
         return jsonify({"error": "No autorizado"}), 403
 
-    usuario = User.find_by_id(miembro.id_usuario) if miembro.id_usuario else None
+    # Resolver usuario: PG (nuevo) o Mongo legacy (pre-Sprint 2)
+    usuario_pg    = UsuarioPG.query.get(miembro.id_usuario_pg) if miembro.id_usuario_pg else None
+    usuario_mongo = User.find_by_id(miembro.id_usuario) if miembro.id_usuario else None
 
     data = request.form
     file = request.files.get('foto')
 
     try:
         nuevo_nombre = data.get('nombre') or None
-        nuevo_email  = data.get('email')  or None
+        nuevo_email  = (data.get('email') or "").strip().lower() or None
 
-        # Actualizar User de Mongo si existe
-        if usuario:
+        # Actualizar usuario en PG si existe
+        if usuario_pg:
             if nuevo_nombre:
-                usuario.nombre = nuevo_nombre
+                usuario_pg.nombre = nuevo_nombre
+            if nuevo_email:
+                conflicto = UsuarioPG.query.filter_by(email=nuevo_email).first()
+                if conflicto and conflicto.id != usuario_pg.id:
+                    return jsonify({"error": "El email ya está en uso por otro usuario"}), 400
+                usuario_pg.email = nuevo_email
+            pg_db.session.commit()
+
+        # Actualizar usuario en Mongo si existe (legacy)
+        elif usuario_mongo:
+            if nuevo_nombre:
+                usuario_mongo.nombre = nuevo_nombre
             if nuevo_email:
                 existente = User.find_by_email(nuevo_email)
-                if existente and existente._id != usuario._id:
+                if existente and existente._id != usuario_mongo._id:
                     return jsonify({"error": "El email ya está en uso por otro usuario"}), 400
-                usuario.email = nuevo_email
-            usuario.save()
+                usuario_mongo.email = nuevo_email
+            usuario_mongo.save()
 
-        # Siempre actualizar campos desnormalizados en Miembro (búsqueda + to_dict)
+        # Actualizar campos desnormalizados en Miembro (búsquedas + to_dict)
         if nuevo_nombre:
             miembro.nombre = nuevo_nombre
         if nuevo_email:
             miembro.email = nuevo_email
 
-        if data.get('telefono'): miembro.telefono = data.get('telefono')
-        if data.get('sexo'): miembro.sexo = data.get('sexo')
+        if data.get('telefono'):     miembro.telefono     = data.get('telefono')
+        if data.get('sexo'):         miembro.sexo         = data.get('sexo')
         if data.get('peso_inicial'): miembro.peso_inicial = data.get('peso_inicial')
-        if data.get('estatura'): miembro.estatura = data.get('estatura')
+        if data.get('estatura'):     miembro.estatura     = data.get('estatura')
 
         if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
+            filename        = secure_filename(file.filename)
             unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            upload_folder = os.path.join(current_app.root_path, 'static/uploads')
+            upload_folder   = os.path.join(current_app.root_path, 'static/uploads')
             os.makedirs(upload_folder, exist_ok=True)
             file.save(os.path.join(upload_folder, unique_filename))
             miembro.foto_perfil = unique_filename
@@ -190,6 +214,7 @@ def actualizar_miembro(id):
         return jsonify(miembro.to_dict_full()), 200
 
     except Exception as e:
+        pg_db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 # ==============================================================================
@@ -207,14 +232,20 @@ def eliminar_miembro(id):
         if miembro.id_gimnasio_pg != gym_id:
             return jsonify({"error": "No autorizado"}), 403
 
-        usuario = User.find_by_id(miembro.id_usuario)
-
         miembro.estado = "Inactivo"
         miembro.save()
-        
-        if usuario:
-            usuario.activo = False
-            usuario.save()
+
+        # Desactivar en PG (nuevo) o Mongo (legacy)
+        if miembro.id_usuario_pg:
+            u_pg = UsuarioPG.query.get(miembro.id_usuario_pg)
+            if u_pg:
+                u_pg.activo = False
+                pg_db.session.commit()
+        elif miembro.id_usuario:
+            u_mongo = User.find_by_id(miembro.id_usuario)
+            if u_mongo:
+                u_mongo.activo = False
+                u_mongo.save()
 
         return jsonify({"message": "Miembro desactivado correctamente"}), 200
 
@@ -236,14 +267,20 @@ def reactivar_miembro(id):
         if miembro.id_gimnasio_pg != gym_id:
             return jsonify({"error": "No autorizado"}), 403
 
-        usuario = User.find_by_id(miembro.id_usuario)
-
         miembro.estado = "Activo"
         miembro.save()
-        
-        if usuario:
-            usuario.activo = True
-            usuario.save()
+
+        # Reactivar en PG (nuevo) o Mongo (legacy)
+        if miembro.id_usuario_pg:
+            u_pg = UsuarioPG.query.get(miembro.id_usuario_pg)
+            if u_pg:
+                u_pg.activo = True
+                pg_db.session.commit()
+        elif miembro.id_usuario:
+            u_mongo = User.find_by_id(miembro.id_usuario)
+            if u_mongo:
+                u_mongo.activo = True
+                u_mongo.save()
 
         return jsonify({"message": "Miembro reactivado correctamente"}), 200
 

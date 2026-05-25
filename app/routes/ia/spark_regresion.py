@@ -199,26 +199,54 @@ def _build_global_payload(metricas: dict, coeficientes: dict, tendencia: list) -
 # ── Predicción individual (sin re-entrenar) ───────────────────────────────────
 
 def _resolver_id_miembro_mongo(id_entrada: str):
-    """Resuelve id_entrada → hex ObjectId de progreso_fisico.id_miembro."""
+    """
+    Resuelve id_entrada → hex ObjectId de progreso_fisico.id_miembro.
+
+    Acepta tres formas de id_entrada:
+      1. ObjectId hex (24 chars) del propio miembro — path legacy Mongo
+      2. ObjectId hex del usuario Mongo — se resuelve por id_usuario
+      3. Entero PG como string (ej. "42") — se resuelve por id_usuario_pg (Sprint 2+)
+    """
     from bson import ObjectId
     db = get_mongo_db()
+
+    # ── Path 1 y 2: ObjectId válido ──────────────────────────────────────────
     try:
         oid = ObjectId(id_entrada)
+
+        # ¿El id es directamente el _id del miembro y tiene progreso?
+        if db.progreso_fisico.count_documents({"id_miembro": oid}, limit=1):
+            return id_entrada
+
+        # ¿El id apunta al _id de un miembro?
+        miembro = db.miembros.find_one({"_id": oid}, {"_id": 1})
+        if miembro:
+            m_oid = miembro["_id"]
+            if db.progreso_fisico.count_documents({"id_miembro": m_oid}, limit=1):
+                return str(m_oid)
+
+        # ¿El id es el id_usuario (Mongo) de un miembro?
+        miembro = db.miembros.find_one({"id_usuario": oid}, {"_id": 1})
+        if miembro:
+            m_oid = miembro["_id"]
+            if db.progreso_fisico.count_documents({"id_miembro": m_oid}, limit=1):
+                return str(m_oid)
+
     except Exception:
-        return None
+        pass  # No es un ObjectId — continuar al path PG
 
-    if db.progreso_fisico.count_documents({"id_miembro": oid}, limit=1):
-        return id_entrada
-
-    miembro = db.miembros.find_one({"_id": oid}, {"_id": 1})
-    if miembro and db.progreso_fisico.count_documents({"id_miembro": oid}, limit=1):
-        return id_entrada
-
-    miembro = db.miembros.find_one({"id_usuario": oid}, {"_id": 1})
-    if miembro:
-        m_oid = miembro["_id"]
-        if db.progreso_fisico.count_documents({"id_miembro": m_oid}, limit=1):
-            return str(m_oid)
+    # ── Path 3: entero PG (id_usuario_pg) ────────────────────────────────────
+    try:
+        pg_id   = int(id_entrada)
+        miembro = db.miembros.find_one({"id_usuario_pg": pg_id}, {"_id": 1})
+        if miembro:
+            m_oid = miembro["_id"]
+            if db.progreso_fisico.count_documents({"id_miembro": m_oid}, limit=1):
+                return str(m_oid)
+            # El miembro existe pero aún no tiene registros de progreso
+            return str(m_oid)   # devolver el id para que el endpoint retorne el error apropiado
+    except (ValueError, TypeError):
+        pass
 
     return None
 
@@ -373,7 +401,6 @@ def predecir_peso_miembro(id_entrada: str):
 
         coeficientes = cached["coeficientes"]
         medias       = cached.get("_medias", {"cintura": 80.0, "grasa": 22.0})
-
         historial, predicciones = _predecir_con_coeficientes(
             id_miembro_real, dias_futuro, coeficientes, medias
         )

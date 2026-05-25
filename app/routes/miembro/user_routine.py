@@ -123,13 +123,18 @@ def create_routine():
         if not data.get('dias') or len(data['dias']) == 0:
             return jsonify({"error": "Debes agregar al menos un día"}), 400
         
-        # Crear rutina
+        # Crear rutina — persistir todos los campos que expone _build_routine_dict
         nueva_rutina = {
-            "id_miembro": miembro["_id"],
-            "nombre": data['nombre'],
-            "activa": True,
-            "fecha_creacion": datetime.now(),
-            "fecha_actualizacion": datetime.now()
+            "id_miembro":          miembro["_id"],
+            "nombre":              data['nombre'],
+            "categoria":           data.get('categoria', 'General'),
+            "dificultad":          data.get('dificultad', 'Intermedio'),
+            "duracion_minutos":    int(data['duracion_minutos']) if data.get('duracion_minutos') else 60,
+            "descripcion":         data.get('descripcion', ''),
+            "objetivo":            data.get('objetivo', ''),
+            "activa":              True,
+            "fecha_creacion":      datetime.now(),
+            "fecha_actualizacion": datetime.now(),
         }
         rutina_id = db.rutinas.insert_one(nueva_rutina).inserted_id
         nueva_rutina["_id"] = rutina_id
@@ -194,17 +199,16 @@ def update_routine(id):
         
         data = request.json
         
-        # Actualizar nombre
-        if data.get('nombre'):
-            db.rutinas.update_one(
-                {"_id": rutina_id},
-                {"$set": {
-                    "nombre": data['nombre'],
-                    "fecha_actualizacion": datetime.now()
-                }}
-            )
-            # Refrescar el documento para armar el diccionario final
-            rutina_doc["nombre"] = data['nombre']
+        # Actualizar campos de metadata de la rutina
+        update_fields = {"fecha_actualizacion": datetime.now()}
+        for campo in ('nombre', 'categoria', 'dificultad', 'descripcion', 'objetivo'):
+            if data.get(campo) is not None:
+                update_fields[campo] = data[campo]
+                rutina_doc[campo]    = data[campo]   # refrescar doc local para _build_routine_dict
+        if data.get('duracion_minutos') is not None:
+            update_fields['duracion_minutos'] = int(data['duracion_minutos'])
+            rutina_doc['duracion_minutos']    = update_fields['duracion_minutos']
+        db.rutinas.update_one({"_id": rutina_id}, {"$set": update_fields})
         
         # Eliminar días y ejercicios existentes para reemplazarlos
         dias_existentes = list(db.rutina_dias.find({"id_rutina": rutina_id}))
@@ -333,7 +337,7 @@ def duplicate_routine(id):
             nuevo_dia["id_rutina"] = nuevo_id_rutina
             
             nuevo_id_dia = db.rutina_dias.insert_one(nuevo_dia).inserted_id
-            
+
             ejercicios_a_insertar = []
             for ej in ejercicios_originales:
                 nuevo_ej = ej.copy()

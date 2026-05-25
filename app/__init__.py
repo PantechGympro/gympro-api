@@ -30,6 +30,7 @@ from app.routes.miembro.user_health       import user_health_bp
 from app.routes.miembro.user_body_progress import user_body_progress_bp
 from app.routes.miembro.user_membership   import user_membership_bp
 from app.routes.miembro.user_routine      import user_routines_bp
+from app.routes.miembro.training          import training_bp
 # Entrenador
 from app.routes.entrenador.trainer_routes import trainer_bp
 # IA & Analytics
@@ -98,6 +99,7 @@ def create_app():
     app.register_blueprint(spark_kmeans_bp)
     app.register_blueprint(spark_regresion_bp)
     app.register_blueprint(user_routines_bp,       url_prefix="/api/user")
+    app.register_blueprint(training_bp,            url_prefix="/api/user/training")
     app.register_blueprint(miembro_membresias_bp,  url_prefix="/api")
     app.register_blueprint(billing_bp)
     app.register_blueprint(billing_stripe_bp)
