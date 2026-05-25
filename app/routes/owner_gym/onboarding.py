@@ -311,9 +311,9 @@ def complete_setup():
     nueva_pass    = (data.get("nueva_password") or "").strip()
     gym_info      = data.get("gym", {})
 
-    if not nueva_pass:
-        return jsonify({"msg": "nueva_password es requerida"}), 400
-    if len(nueva_pass) < 8:
+    # nueva_password es opcional: el admin pudo haber establecido su contraseña
+    # directamente en el formulario de registro del gimnasio.
+    if nueva_pass and len(nueva_pass) < 8:
         return jsonify({"msg": "La contraseña debe tener al menos 8 caracteres"}), 400
 
     usuario = Usuario.query.get(int(user_id))
@@ -323,8 +323,9 @@ def complete_setup():
     gym = Gimnasio.query.get(id_gimnasio) if id_gimnasio else None
 
     try:
-        # 1. Cambiar contraseña
-        usuario.set_password(nueva_pass)
+        # 1. Cambiar contraseña (solo si se envió)
+        if nueva_pass:
+            usuario.set_password(nueva_pass)
         usuario.primer_login = False
 
         # 2. Actualizar configuración del gimnasio
