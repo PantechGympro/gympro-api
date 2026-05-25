@@ -331,24 +331,91 @@ def get_payments():
 
     db     = get_db()
     gym_id = g.tenant_id
-    status = request.args.get("estado")   # pendiente | completado | fallido
-    limit  = min(int(request.args.get("limit", 50)), 200)
+    status = request.args.get("estado")          # completado | pendiente | fallido
+    q      = request.args.get("q", "").strip()   # búsqueda por concepto
+    limit  = min(int(request.args.get("limit", 15)), 200)
+
+    page  = max(1, int(request.args.get("page", 1)))
+    skip  = (page - 1) * limit
+
+    # Normalización de valores heredados del modelo (guarda "Pagado" en lugar de "completado")
+    _STATUS_NORM = {
+        "pagado":     "completado",
+        "Pagado":     "completado",
+        "completado": "completado",
+        "pendiente":  "pendiente",
+        "Pendiente":  "pendiente",
+        "fallido":    "fallido",
+        "Fallido":    "fallido",
+    }
+    # El filtro de estado debe buscar tanto el valor normalizado como el legacy
+    _STATUS_REVERSE = {
+        "completado": ["completado", "Pagado", "pagado"],
+        "pendiente":  ["pendiente",  "Pendiente"],
+        "fallido":    ["fallido",    "Fallido"],
+    }
 
     query = {"id_gimnasio": gym_id}
     if status and status != "todos":
-        query["estado"] = status
+        variants = _STATUS_REVERSE.get(status, [status])
+        query["estado"] = {"$in": variants} if len(variants) > 1 else variants[0]
+    if q:
+        # Buscar por concepto O por nombre de miembro (lookup inverso)
+        miembro_ids = [
+            m["_id"] for m in db.miembros.find(
+                {"nombre": {"$regex": q, "$options": "i"}, "id_gimnasio_pg": gym_id},
+                {"_id": 1},
+            )
+        ]
+        q_conditions = [{"concepto": {"$regex": q, "$options": "i"}}]
+        if miembro_ids:
+            q_conditions.append({"id_miembro": {"$in": miembro_ids}})
+        query["$or"] = q_conditions
+
+    total_count = db.pagos.count_documents(query)
 
     pagos = list(
         db.pagos.find(query, {
-            "_id": 1, "nombre_miembro": 1, "monto": 1,
-            "fecha_pago": 1, "estado": 1, "concepto": 1,
-            "metodo_pago": 1,
-        }).sort("fecha_pago", -1).limit(limit)
+            "_id": 1, "id_miembro": 1, "nombre_miembro": 1, "monto": 1,
+            "fecha_pago": 1, "estado": 1, "concepto": 1, "metodo_pago": 1,
+        }).sort("fecha_pago", -1).skip(skip).limit(limit)
     )
 
+    # Batch-lookup: nombre_miembro no se desnormaliza al guardar, se resuelve aquí
+    ids_sin_nombre = set()
+    for p in pagos:
+        if not (p.get("nombre_miembro") or "").strip() and p.get("id_miembro"):
+            try:
+                ids_sin_nombre.add(ObjectId(str(p["id_miembro"])))
+            except Exception:
+                pass
+
+    nombre_cache: dict = {}
+    if ids_sin_nombre:
+        for m in db.miembros.find(
+            {"_id": {"$in": list(ids_sin_nombre)}},
+            {"nombre": 1, "apellido": 1},
+        ):
+            full = f"{m.get('nombre', '')} {m.get('apellido', '')}".strip()
+            nombre_cache[str(m["_id"])] = full or "—"
+
+    result = []
+    for p in pagos:
+        nombre = (p.get("nombre_miembro") or "").strip()
+        if not nombre and p.get("id_miembro"):
+            nombre = nombre_cache.get(str(p["id_miembro"]), "—")
+        d = _serialize(p)
+        d["nombre_miembro"] = nombre or "—"
+        # Normalizar estado al valor canónico del frontend
+        d["estado"] = _STATUS_NORM.get(d.get("estado", ""), d.get("estado", ""))
+        result.append(d)
+
     return jsonify({
-        "pagos": [_serialize(p) for p in pagos],
-        "total": len(pagos),
+        "pagos":       result,
+        "total":       total_count,
+        "page":        page,
+        "limit":       limit,
+        "total_pages": max(1, -(-total_count // limit)),  # ceil division
     }), 200
 
 
