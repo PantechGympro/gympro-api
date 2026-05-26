@@ -358,7 +358,8 @@ def reset_all(mdb):
 
     # Índices únicos — previenen duplicados en re-ejecuciones parciales
     mdb.miembros.create_index("id_usuario_pg", unique=True, sparse=True)
-    mdb.miembro_membresia.create_index("id_miembro", unique=True, sparse=True)
+    # No unique — un miembro puede tener múltiples membresías históricas (renovaciones)
+    mdb.miembro_membresia.create_index("id_miembro", sparse=True)
 
     # Limpiar guard de emails para la nueva ejecución
     _USED_EMAILS.clear()

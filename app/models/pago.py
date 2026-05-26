@@ -51,12 +51,15 @@ class Pago:
         db = get_db()
         # Guardamos en la BD los datos puros (sin el nombre calculado para no duplicar datos)
         data = {
-            "id_miembro": self.id_miembro,
+            "id_miembro":    self.id_miembro,
             "id_entrenador": self.id_entrenador,
-            "monto": self.monto,
-            "metodo_pago": self.metodo_pago,
-            "concepto": self.concepto,
-            "fecha_pago": self.fecha_pago
+            "monto":         self.monto,
+            "metodo_pago":   self.metodo_pago,
+            "concepto":      self.concepto,
+            "fecha_pago":    self.fecha_pago,
+            "id_gimnasio":   self.id_gimnasio,   # tenant — requerido para aislamiento multi-gym
+            "estado":        self.estado,
+            "referencia":    self.referencia,
         }
         
         if self._id:

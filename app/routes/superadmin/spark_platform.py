@@ -102,11 +102,16 @@ def _analytics_plataforma() -> dict:
     # Enriquecer con nombre de gimnasio desde PG
     gym_ids = set(totales_map.keys()) | set(miembros_map.keys())
     try:
-        gym_int_ids = [int(g) for g in gym_ids if g and g.isdigit()]
+        gym_int_ids = [int(g) for g in gym_ids if g and str(g).isdigit()]
         gyms = Gimnasio.query.filter(Gimnasio.id.in_(gym_int_ids)).all()
         gym_name_map = {str(g.id): g.nombre for g in gyms}
-        gym_plan_map = {str(g.id): (g.plan.nombre if hasattr(g, "plan") and g.plan else None) for g in gyms}
-    except Exception:
+        gym_plan_map = {
+            str(g.id): (g.plan.value if hasattr(g.plan, "value") else str(g.plan))
+            for g in gyms
+        }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Error enriqueciendo nombres de gym: %s", e)
         gym_name_map = {}
         gym_plan_map = {}
 

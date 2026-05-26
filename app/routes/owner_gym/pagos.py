@@ -59,7 +59,8 @@ def registrar_pago():
             id_miembro=miembro._id,
             monto=tm.precio,
             metodo_pago=data["metodo_pago"],
-            concepto=f"Pago membresía {tm.nombre}"
+            concepto=f"Pago membresía {tm.nombre}",
+            id_gimnasio=gym_id,
         )
         pago.save()
 
@@ -68,10 +69,17 @@ def registrar_pago():
         duracion = int(tm.duracion_meses or 1)
         fin      = inicio + relativedelta(months=duracion)
 
-        # 7. Crear la relación Miembro-Membresía (id_membresia = entero PG)
+        # 7. Expirar membresía activa anterior (si existe) antes de crear la nueva
+        #    El índice único en id_miembro impediría insertar si no se elimina/actualiza.
+        mdb.miembro_membresia.update_many(
+            {"id_miembro": miembro._id, "estado": "Activa"},
+            {"$set": {"estado": "Expirada"}}
+        )
+
+        # 8. Crear la nueva relación Miembro-Membresía (id_membresia = entero PG)
         mm = MiembroMembresia(
             id_miembro=miembro._id,
-            id_membresia=tm.id,          # entero PG
+            id_membresia=tm.id,
             fecha_inicio=inicio.strftime('%Y-%m-%d'),
             fecha_fin=fin.strftime('%Y-%m-%d'),
             estado="Activa"
