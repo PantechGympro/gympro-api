@@ -40,7 +40,7 @@ def get_user_dashboard():
         }
 
         workout_stats       = _get_workout_stats(mdb, miembro["_id"])
-        today_workout       = _get_today_workout()
+        today_workout       = _get_today_workout(mdb, miembro["_id"])
         weekly_progress     = _get_weekly_progress(mdb, miembro["_id"])
         recent_achievements = _get_recent_achievements(mdb, miembro["_id"])
         membership_info     = _get_active_membership(mdb, miembro["_id"])
@@ -248,46 +248,64 @@ def _calcular_racha(mdb, id_miembro):
         return 0
 
 
-def _get_today_workout():
-    dias = ["Descanso", "Pecho y Tríceps", "Espalda y Bíceps",
-            "Pierna", "Hombro", "Cardio", "Descanso"]
-    rutinas = {
-        "Pecho y Tríceps": [
-            {"name":"Press Banca",       "sets":"4x10","completed":False},
-            {"name":"Press Inclinado",   "sets":"3x12","completed":False},
-            {"name":"Aperturas",         "sets":"3x12","completed":False},
-            {"name":"Fondos",            "sets":"3x15","completed":False},
-            {"name":"Extensiones Tríceps","sets":"4x12","completed":False},
-        ],
-        "Espalda y Bíceps": [
-            {"name":"Dominadas",    "sets":"4x8", "completed":False},
-            {"name":"Remo con Barra","sets":"4x10","completed":False},
-            {"name":"Jalones",      "sets":"3x12","completed":False},
-            {"name":"Curl con Barra","sets":"4x12","completed":False},
-            {"name":"Curl Martillo","sets":"3x12","completed":False},
-        ],
-        "Pierna": [
-            {"name":"Sentadillas",         "sets":"4x12","completed":False},
-            {"name":"Prensa",              "sets":"3x15","completed":False},
-            {"name":"Extensiones",         "sets":"3x12","completed":False},
-            {"name":"Curl Femoral",        "sets":"4x10","completed":False},
-            {"name":"Elevación de Talones","sets":"5x20","completed":False},
-        ],
-        "Hombro": [
-            {"name":"Press Militar",        "sets":"4x10","completed":False},
-            {"name":"Elevaciones Laterales","sets":"4x12","completed":False},
-            {"name":"Elevaciones Frontales","sets":"3x12","completed":False},
-            {"name":"Pájaros",              "sets":"3x15","completed":False},
-            {"name":"Encogimientos",        "sets":"4x12","completed":False},
-        ],
-        "Cardio": [
-            {"name":"Caminadora","sets":"30 min","completed":False},
-            {"name":"Bicicleta", "sets":"20 min","completed":False},
-            {"name":"Elíptica",  "sets":"15 min","completed":False},
-        ],
-    }
-    tipo = dias[datetime.now().weekday()]
-    return {"type": tipo, "exercises": rutinas.get(tipo, [])}
+def _get_today_workout(mdb, id_miembro):
+    """Obtiene la rutina real del miembro para el día de hoy."""
+    DIAS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    dia_hoy = DIAS_ES[datetime.now().weekday()]
+    try:
+        # Buscar la rutina activa del miembro
+        rutina = mdb.rutinas.find_one({
+            "id_miembro": id_miembro,
+            "activa": True
+        })
+        if not rutina:
+            # Fallback: buscar cualquier rutina del miembro
+            rutina = mdb.rutinas.find_one(
+                {"id_miembro": id_miembro},
+                sort=[("_id", -1)]
+            )
+        if not rutina:
+            return {"type": "Sin rutina asignada", "exercises": []}
+
+        # Buscar el día correspondiente a hoy
+        dia_doc = mdb.rutina_dias.find_one({
+            "id_rutina": rutina["_id"],
+            "dia_semana": dia_hoy
+        })
+        if not dia_doc:
+            return {"type": "Descanso", "exercises": []}
+
+        grupo = dia_doc.get("grupo_muscular", "")
+        if grupo == "descanso":
+            return {"type": "Descanso", "exercises": []}
+
+        ejercicios = list(mdb.rutina_ejercicios.find(
+            {"id_rutina_dia": dia_doc["_id"]}
+        ).sort("orden", 1))
+
+        exs = [
+            {
+                "name":      ej.get("nombre_ejercicio", ""),
+                "sets":      f"{ej.get('series', '3')}x{ej.get('repeticiones', '12')}",
+                "completed": False
+            }
+            for ej in ejercicios
+            if ej.get("nombre_ejercicio")
+        ]
+
+        # Nombre legible del grupo muscular
+        GRUPO_LABELS = {
+            "pecho": "Pecho", "espalda": "Espalda", "hombros": "Hombros",
+            "biceps": "Bíceps", "triceps": "Tríceps", "piernas": "Piernas",
+            "gluteos": "Glúteos", "abdomen": "Abdomen / Core",
+            "cardio": "Cardio", "descanso": "Descanso",
+        }
+        tipo = GRUPO_LABELS.get(grupo, grupo.capitalize())
+        return {"type": tipo, "exercises": exs}
+
+    except Exception as e:
+        print(f"Error _get_today_workout: {e}")
+        return {"type": "Descanso", "exercises": []}
 
 
 def _get_weekly_progress(mdb, id_miembro):
