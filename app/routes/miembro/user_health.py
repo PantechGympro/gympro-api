@@ -111,39 +111,69 @@ def get_user_health():
                 "icon": "FiActivity"
             })
 
-        # MEDIDAS
-        if ultimo_progreso:
-            medidas = {
-                "cintura": "Circunferencia de Cintura",
-                "cadera": "Circunferencia de Cadera",
-                "pecho": "Circunferencia de Pecho",
-                "brazo_derecho": "Brazo Derecho",
-                "brazo_izquierdo": "Brazo Izquierdo",
-                "muslo_derecho": "Muslo Derecho",
-                "muslo_izquierdo": "Muslo Izquierdo",
-                "pantorrilla": "Pantorrilla"
-            }
+        # MEDIDAS (buscar en campos directos, dict anidado y medidas_iniciales del miembro)
+        campos_medidas = {
+            "cintura":        "Circunferencia de Cintura",
+            "cadera":         "Circunferencia de Cadera",
+            "pecho":          "Circunferencia de Pecho",
+            "brazo_derecho":  "Brazo Derecho",
+            "brazo_izquierdo":"Brazo Izquierdo",
+            "muslo_derecho":  "Muslo Derecho",
+            "muslo_izquierdo":"Muslo Izquierdo",
+            "pantorrilla":    "Pantorrilla"
+        }
 
-            for campo, nombre in medidas.items():
-                valor = ultimo_progreso.get(campo)
-                if valor:
-                    condiciones.append({
-                        "nombre": nombre,
-                        "valor": f"{float(valor):.1f} cm",
-                        "estado": "normal",
-                        "icon": "FiActivity"
-                    })
+        def _val_medida(campo):
+            """Lee medida desde progreso directo → anidado → medidas_iniciales del miembro."""
+            valor = (ultimo_progreso or {}).get(campo)
+            if not valor:
+                valor = ((ultimo_progreso or {}).get("medidas") or {}).get(campo)
+            if not valor:
+                valor = (miembro.get("medidas_iniciales") or {}).get(campo)
+            return float(valor) if valor else None
+
+        for campo, nombre in campos_medidas.items():
+            v = _val_medida(campo)
+            if v:
+                condiciones.append({
+                    "nombre": nombre,
+                    "valor": f"{v:.1f} cm",
+                    "estado": "normal",
+                    "icon": "FiActivity"
+                })
 
         # Formatear fecha
-        fecha_act = ultimo_progreso.get("fecha_registro") if ultimo_progreso else None
+        fecha_act = (ultimo_progreso or {}).get("fecha_registro")
         str_fecha = fecha_act.strftime('%Y-%m-%d') if isinstance(fecha_act, datetime) else (str(fecha_act) if fecha_act else None)
 
+        # ── Datos del onboarding (condiciones_medicas, alergias, etc.) ─────────
+        conds_medicas = miembro.get("condiciones_medicas", [])
+        if "Ninguna" in conds_medicas:
+            conds_medicas = []
+
+        alergias_raw = miembro.get("alergias", "")
+        alergias_list = [a.strip() for a in alergias_raw.split(",") if a.strip()] if alergias_raw else []
+
+        medicamentos_raw = miembro.get("medicamentos", "")
+        medicamentos_list = [m.strip() for m in medicamentos_raw.split(",") if m.strip()] if medicamentos_raw else []
+
+        lesiones_raw = miembro.get("lesiones_previas", "")
+        lesiones_list = [l.strip() for l in lesiones_raw.split(",") if l.strip()] if lesiones_raw else []
+
         return jsonify({
-            "condiciones": condiciones,
-            "alergias": [],
-            "medicamentos": [],
-            "lesiones": [],
-            "notas": ultimo_progreso.get("notas") if ultimo_progreso else None,
+            "condiciones":          condiciones,
+            "condicionesMedicas":   conds_medicas,
+            "alergias":             alergias_list,
+            "medicamentos":         medicamentos_list,
+            "lesiones":             lesiones_list,
+            "nivelActividad":       miembro.get("nivel_actividad", ""),
+            "objetivo":             miembro.get("objetivo", ""),
+            "nivelExperiencia":     miembro.get("nivel_experiencia", ""),
+            "diasDisponibles":      miembro.get("dias_disponibles", ""),
+            "horasSueno":           miembro.get("horas_sueno", ""),
+            "fuma":                 miembro.get("fuma", False),
+            "alcohol":              miembro.get("alcohol", ""),
+            "notas": (ultimo_progreso or {}).get("notas"),
             "ultimaActualizacion": str_fecha
         }), 200
 

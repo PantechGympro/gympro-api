@@ -74,10 +74,21 @@ def get_user_profile():
             "peso":                f"{peso} kg" if peso else "No registrado",
             "altura":              f"{estatura} m" if estatura else "No registrado",
             "objetivo":            miembro.get("objetivo", "Tonificación muscular"),
-            "nivelExperiencia":    "Intermedio",
+            "nivelExperiencia":    miembro.get("nivel_experiencia", "Intermedio"),
             "fotoPerfil":          miembro.get("foto_perfil"),
             "mesesActivo":         meses_activo,
-            "totalEntrenamientos": total_entrenamientos
+            "totalEntrenamientos": total_entrenamientos,
+            # Campos de onboarding extendido
+            "condicionesMedicas":  miembro.get("condiciones_medicas", []),
+            "medicamentos":        miembro.get("medicamentos", ""),
+            "alergias":            miembro.get("alergias", ""),
+            "lesiones":            miembro.get("lesiones_previas", ""),
+            "nivelActividad":      miembro.get("nivel_actividad", ""),
+            "diasDisponibles":     miembro.get("dias_disponibles", ""),
+            "horasSueno":          miembro.get("horas_sueno", ""),
+            "fuma":                miembro.get("fuma", False),
+            "alcohol":             miembro.get("alcohol", ""),
+            "onboardingCompletado": miembro.get("onboarding_completado", False),
         }), 200
 
     except Exception as e:
@@ -165,6 +176,122 @@ def update_user_profile():
                 "fotoPerfil":foto_final
             }
         }), 200
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@user_profile_bp.route('/api/user/complete-profile', methods=['POST'])
+@jwt_required()
+@require_tenant
+def complete_user_profile():
+    """
+    Onboarding inicial del miembro (wizard 4 pasos).
+    Persiste salud, objetivos, hábitos y medidas en el doc miembro de MongoDB.
+    Al terminar registra la primera entrada en progreso_fisico.
+    """
+    try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.json or {}
+
+        miembro = mdb.miembros.find_one({
+            "id_usuario_pg":  user_pg_id,
+            "id_gimnasio_pg": gym_id
+        })
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        update = {}
+
+        # ── Paso 1: Datos personales ─────────────────────────────────────────
+        if data.get("sexo"):         update["sexo"] = data["sexo"]
+        if data.get("telefono"):     update["telefono"] = data["telefono"]
+        if data.get("fechaNacimiento"):
+            try:
+                update["fecha_nacimiento"] = datetime.strptime(data["fechaNacimiento"], "%Y-%m-%d")
+            except Exception:
+                pass
+        if data.get("estatura"):
+            try:
+                val = float(data["estatura"])
+                update["estatura"] = val / 100 if val > 3 else val  # normalizar a metros
+            except Exception:
+                pass
+        if data.get("contactoEmergenciaNombre"):
+            update["contacto_emergencia_nombre"] = data["contactoEmergenciaNombre"]
+        if data.get("contactoEmergenciaTelefono"):
+            update["contacto_emergencia_telefono"] = data["contactoEmergenciaTelefono"]
+
+        # ── Paso 2: Salud ────────────────────────────────────────────────────
+        if "condicionesMedicas" in data:
+            update["condiciones_medicas"] = data["condicionesMedicas"]   # list[str]
+        if data.get("medicamentos") is not None:
+            update["medicamentos"] = data["medicamentos"]
+        if data.get("alergias") is not None:
+            update["alergias"] = data["alergias"]
+        if data.get("lesiones") is not None:
+            update["lesiones_previas"] = data["lesiones"]
+        if data.get("embarazada") is not None:
+            update["embarazada"] = bool(data["embarazada"])
+        if data.get("notas") is not None:
+            update["notas_medicas"] = data["notas"]
+
+        # ── Paso 3: Objetivos y hábitos ──────────────────────────────────────
+        if data.get("objetivo"):          update["objetivo"]          = data["objetivo"]
+        if data.get("nivelExperiencia"):  update["nivel_experiencia"] = data["nivelExperiencia"]
+        if data.get("diasSemana"):        update["dias_disponibles"]  = data["diasSemana"]
+        if data.get("horasSueno"):        update["horas_sueno"]       = data["horasSueno"]
+        if data.get("nivelActividad"):    update["nivel_actividad"]   = data["nivelActividad"]
+        if data.get("fuma") is not None:  update["fuma"]              = bool(data["fuma"])
+        if data.get("alcohol"):           update["alcohol"]           = data["alcohol"]
+
+        # ── Paso 4: Medidas corporales ───────────────────────────────────────
+        if data.get("peso"):
+            try:
+                update["peso_inicial"] = float(data["peso"])
+            except Exception:
+                pass
+
+        campos_medidas = {
+            "pecho":          "pecho",
+            "cintura":        "cintura",
+            "cadera":         "cadera",
+            "brazoDerecho":   "brazo_derecho",
+            "brazoIzquierdo": "brazo_izquierdo",
+            "musloDerecho":   "muslo_derecho",
+            "musloIzquierdo": "muslo_izquierdo",
+            "pantorrilla":    "pantorrilla",
+        }
+        medidas_final = {}
+        for campo_js, campo_db in campos_medidas.items():
+            if data.get(campo_js):
+                try:
+                    medidas_final[campo_db] = float(data[campo_js])
+                except Exception:
+                    pass
+
+        if medidas_final:
+            update["medidas_iniciales"] = medidas_final
+            # Crear primera entrada en progreso_fisico
+            mdb.progreso_fisico.insert_one({
+                "id_miembro":     miembro["_id"],
+                "id_gimnasio_pg": gym_id,
+                "fecha_registro": datetime.utcnow(),
+                "peso":           update.get("peso_inicial"),
+                "medidas":        medidas_final,
+                "tipo":           "inicial",
+                "notas":          "Registro inicial de onboarding",
+            })
+
+        update["onboarding_completado"] = True
+        update["fecha_onboarding"]      = datetime.utcnow()
+
+        mdb.miembros.update_one({"_id": miembro["_id"]}, {"$set": update})
+
+        return jsonify({"message": "Perfil completado exitosamente", "ok": True}), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()

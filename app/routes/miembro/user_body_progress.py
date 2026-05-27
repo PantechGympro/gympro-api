@@ -63,11 +63,19 @@ def get_body_progress():
         musculo_meta = round(100 - grasa_meta - 15, 1)
         
         # 🆕 EXTRAER MEDIDAS CORPORALES DEL ÚLTIMO PROGRESO
+        # Onboarding stores measurements in nested `medidas` dict; later entries use direct fields.
         def _get_medida(progreso, campo):
-            """Extrae una medida del progreso (diccionario), retorna 0 si no existe"""
+            """Extrae una medida: busca primero en campo directo, luego en 'medidas' anidado."""
             if not progreso:
                 return 0
             valor = progreso.get(campo)
+            if not valor:
+                nested = progreso.get("medidas") or {}
+                valor  = nested.get(campo)
+            # fallback: initial measurements stored in miembro.medidas_iniciales
+            if not valor:
+                ini = miembro.get("medidas_iniciales") or {}
+                valor = ini.get(campo)
             return float(valor) if valor else 0
             
         body_metrics = {
