@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from app.mongo import get_db
 from app.utils.tenant import require_tenant
 from app.models.pg.usuario import Usuario
+from app.models.pg.ejercicio import Ejercicio
 
 training_bp = Blueprint("member_training", __name__)
 
@@ -289,20 +290,34 @@ def rutinas_asignadas():
                 ejercicios = list(db.rutina_ejercicios.find(
                     {"id_rutina_dia": d["_id"]}
                 ).sort("orden", 1))
+                # Enriquecer con catálogo PG (imagenes, video, instrucciones)
+                _nombres = [e.get("nombre_ejercicio","").strip().lower() for e in ejercicios]
+                _pg_map = {e.nombre.strip().lower(): e
+                           for e in Ejercicio.query.filter_by(id_gimnasio=gym_id, activo=True).all()
+                           if e.nombre.strip().lower() in _nombres} if _nombres else {}
+                ej_list = []
+                for e in ejercicios:
+                    key = e.get("nombre_ejercicio","").strip().lower()
+                    pg  = _pg_map.get(key)
+                    imgs = [img for img in (e.get("imagenes") or []) if img]
+                    if not imgs and pg: imgs = pg.imagenes or []
+                    vid  = e.get("video") or (pg.video if pg else None)
+                    inst = e.get("instrucciones") or (pg.descripcion if pg else "") or ""
+                    ej_list.append({
+                        "nombre":          e.get("nombre_ejercicio", ""),
+                        "series":          e.get("series", "3"),
+                        "reps":            e.get("repeticiones", "12"),
+                        "peso":            e.get("peso", ""),
+                        "notas":           e.get("notas", ""),
+                        "instrucciones":   inst,
+                        "imagenes":        imgs,
+                        "video":           vid,
+                    })
                 dias.append({
                     "id":          str(d["_id"]),
                     "dia":         d.get("dia_semana", ""),
                     "grupo":       d.get("grupo_muscular", ""),
-                    "ejercicios":  [
-                        {
-                            "nombre": e.get("nombre_ejercicio", ""),
-                            "series": e.get("series", "3"),
-                            "reps":   e.get("repeticiones", "12"),
-                            "peso":   e.get("peso", ""),
-                            "notas":  e.get("notas", ""),
-                        }
-                        for e in ejercicios
-                    ],
+                    "ejercicios":  ej_list,
                 })
 
         resultado.append({

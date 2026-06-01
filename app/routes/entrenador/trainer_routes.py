@@ -586,10 +586,11 @@ def get_trainer_members():
 
             nombre = pg_nombre or m.get("nombre") or f"Miembro {m['_id']}"
             members.append({
-                "id_miembro":   str(m["_id"]),
-                "nombre":       nombre,
-                "email":        m.get("email", ""),
-                "is_my_client": m.get("id_entrenador_pg") == trainer_id,
+                "id_miembro":    str(m["_id"]),
+                "id_miembro_pg": int(uid) if uid is not None else None,
+                "nombre":        nombre,
+                "email":         m.get("email", ""),
+                "is_my_client":  m.get("id_entrenador_pg") == trainer_id,
             })
 
         # Ordenar: primero los propios, luego el resto; ambos grupos por nombre
@@ -613,6 +614,7 @@ def get_routines():
     try:
         mdb        = get_db()
         trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
         category   = request.args.get('category', 'all')
         search     = request.args.get('search', '').strip()
 
@@ -629,17 +631,31 @@ def get_routines():
             exercise_list  = []
             total_ejercicios = 0
 
+            # Precargar catálogo PG para enriquecer media (1 query por rutina)
+            _ejercicios_pg = {e.nombre.strip().lower(): e
+                              for e in Ejercicio.query.filter_by(id_gimnasio=gym_id, activo=True).all()}
+
             for dia in dias:
                 ejercicios = list(mdb.rutina_ejercicios.find({"id_rutina_dia": dia["_id"]}).sort("orden", 1))
                 total_ejercicios += len(ejercicios)
                 for ej in ejercicios:
+                    nombre_ej = ej.get("nombre_ejercicio", "")
+                    pg_ej = _ejercicios_pg.get(nombre_ej.strip().lower())
+                    # Priorizar media del catálogo PG sobre lo guardado en Mongo
+                    imagenes = [img for img in (ej.get("imagenes") or []) if img]
+                    if not imagenes and pg_ej:
+                        imagenes = pg_ej.imagenes or []
+                    video = ej.get("video") or (pg_ej.video if pg_ej else None)
+                    instrucciones = ej.get("instrucciones") or (pg_ej.descripcion if pg_ej else "") or ""
                     exercise_list.append({
-                        'name':     ej.get("nombre_ejercicio", ""),
-                        'sets':     f"{ej.get('series', '')}x{ej.get('repeticiones', '')}",
-                        'rest':     ej.get("notas") or '60s',
-                        'day':      dia.get("dia_semana") or '',
-                        'peso':     ej.get("peso") or '',
-                        'imagenes': ej.get("imagenes") or [],
+                        'name':          nombre_ej,
+                        'sets':          f"{ej.get('series', '')}x{ej.get('repeticiones', '')}",
+                        'rest':          ej.get("notas") or '60s',
+                        'day':           dia.get("dia_semana") or '',
+                        'peso':          ej.get("peso") or '',
+                        'imagenes':      imagenes,
+                        'video':         video,
+                        'instrucciones': instrucciones,
                     })
 
             result.append({
@@ -719,8 +735,9 @@ def create_routine():
                     "repeticiones":     str(ej.get('reps', '12')),
                     "peso":             ej.get('peso', ''),
                     "notas":            ej.get('notes', ''),
-                    # Hasta 3 imágenes base64 de cómo ejecutar el ejercicio
                     "imagenes":         [img for img in ej.get('imagenes', []) if img][:3],
+                    "video":            ej.get('video') or None,
+                    "instrucciones":    ej.get('notes', '') or "",
                     "orden":            order_e
                 }
                 for order_e, ej in enumerate(day_data.get('exercises', []))
