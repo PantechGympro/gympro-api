@@ -44,6 +44,9 @@ class Usuario(db.Model):
     # Onboarding: True = primer login, debe completar configuración del gimnasio
     primer_login = db.Column(db.Boolean, default=False, nullable=False, server_default="false")
 
+    # Foto de perfil almacenada como data URL base64 (nullable)
+    foto_perfil  = db.Column(db.Text, nullable=True)
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def set_password(self, password: str) -> None:
@@ -58,6 +61,7 @@ class Usuario(db.Model):
         return f"<Usuario {self.email}>"
 
     def to_dict(self):
+        fp = self.foto_perfil
         return {
             "id":          self.id,
             "nombre":      self.nombre,
@@ -67,4 +71,6 @@ class Usuario(db.Model):
             "rol":         self.rol.nombre if self.rol else None,
             "id_gimnasio": self.id_gimnasio,
             "created_at":  self.created_at.isoformat() if self.created_at else None,
+            # Solo exponer si es base64 valida
+            "foto_perfil": fp if (fp and fp.startswith("data:image")) else None,
         }

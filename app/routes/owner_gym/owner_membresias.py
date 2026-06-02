@@ -31,10 +31,13 @@ owner_membresias_bp = Blueprint("owner_membresias", __name__)
 def listar_membresias():
     gym_id       = g.tenant_id
     solo_activos = request.args.get("activos", "false").lower() == "true"
+    filtro_tipo  = request.args.get("tipo", "").lower().strip()
 
     q = TipoMembresia.query.filter_by(id_gimnasio=gym_id)
     if solo_activos:
         q = q.filter_by(activo=True)
+    if filtro_tipo in {"estandar", "promocion"}:
+        q = q.filter_by(tipo=filtro_tipo)
 
     items = q.order_by(TipoMembresia.precio).all()
     return jsonify([m.to_dict() for m in items]), 200
@@ -57,15 +60,20 @@ def crear_membresia():
             "descripcion":    "Acceso completo + clases grupales"
         }
     """
+    TIPOS_VALIDOS = {"estandar", "promocion"}
+
     gym_id = g.tenant_id
     data   = request.get_json() or {}
 
     nombre         = (data.get("nombre") or "").strip()
     duracion_meses = data.get("duracion_meses")
     precio         = data.get("precio")
+    tipo           = (data.get("tipo") or "estandar").lower().strip()
 
     if not nombre:
         return jsonify({"msg": "El campo 'nombre' es requerido"}), 400
+    if tipo not in TIPOS_VALIDOS:
+        return jsonify({"msg": f"tipo debe ser uno de: {', '.join(TIPOS_VALIDOS)}"}), 400
     try:
         duracion_meses = int(duracion_meses)
         precio         = float(precio)
@@ -80,6 +88,7 @@ def crear_membresia():
     nueva = TipoMembresia(
         id_gimnasio    = gym_id,
         nombre         = nombre,
+        tipo           = tipo,
         duracion_meses = duracion_meses,
         precio         = precio,
         descripcion    = (data.get("descripcion") or "").strip() or None,
@@ -125,6 +134,12 @@ def editar_membresia(mem_id: int):
             mem.precio = float(data["precio"])
         except (ValueError, TypeError):
             return jsonify({"msg": "precio debe ser un número"}), 400
+
+    if "tipo" in data:
+        t = (data["tipo"] or "estandar").lower().strip()
+        if t not in {"estandar", "promocion"}:
+            return jsonify({"msg": "tipo debe ser 'estandar' o 'promocion'"}), 400
+        mem.tipo = t
 
     if "descripcion" in data:
         mem.descripcion = (data["descripcion"] or "").strip() or None

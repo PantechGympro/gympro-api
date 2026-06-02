@@ -1,5 +1,5 @@
 """
-owner_gym/owner_trainers.py — Gestión de entrenadores y recepcionistas del gimnasio.
+owner_gym/owner_trainers.py - Gestión de entrenadores y recepcionistas del gimnasio.
 
 Endpoints:
     GET  /api/owner_gym/staff               Lista todos (entrenadores + recepcionistas)
@@ -20,7 +20,12 @@ from app.utils.security import require_role
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
-_STAFF_ROLES = ("Entrenador", "Recepcionista")
+_STAFF_ROLES         = ("Entrenador", "Recepcionista")
+_VALID_FOTO_PREFIXES = ("data:image/jpeg;base64,", "data:image/png;base64,",
+                        "data:image/webp;base64,", "data:image/gif;base64,")
+
+def _valid_foto(value):
+    return value if (isinstance(value, str) and value.startswith(_VALID_FOTO_PREFIXES)) else None
 
 
 def _staff_filter(gym_id):
@@ -30,9 +35,9 @@ def _staff_filter(gym_id):
     return role_ids
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # GET /api/owner_gym/staff
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff", methods=["GET"])
 @jwt_required()
 @require_role("owner_gym")
@@ -70,9 +75,9 @@ def listar_staff():
     return jsonify([u.to_dict() for u in usuarios]), 200
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # GET /api/owner_gym/staff/<id>
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>", methods=["GET"])
 @jwt_required()
 @require_role("owner_gym")
@@ -86,9 +91,9 @@ def get_staff_member(user_id: int):
     return jsonify(usuario.to_dict()), 200
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # POST /api/owner_gym/staff
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff", methods=["POST"])
 @jwt_required()
 @require_role("owner_gym")
@@ -130,6 +135,7 @@ def crear_staff():
         id_rol      = rol_obj.id,
         id_gimnasio = gym_id,
         activo      = True,
+        foto_perfil = _valid_foto(data.get("foto_base64")),
     )
     nuevo.set_password(password)
     db.session.add(nuevo)
@@ -138,9 +144,9 @@ def crear_staff():
     return jsonify({"msg": "Usuario creado", **nuevo.to_dict()}), 201
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # PUT /api/owner_gym/staff/<id>
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>", methods=["PUT"])
 @jwt_required()
 @require_role("owner_gym")
@@ -182,13 +188,17 @@ def actualizar_staff(user_id: int):
             return jsonify({"msg": f"Rol '{rol_name}' no existe en la base de datos"}), 500
         usuario.id_rol = rol_obj.id
 
+    foto_nueva = _valid_foto(data.get("foto_base64"))
+    if foto_nueva:
+        usuario.foto_perfil = foto_nueva
+
     db.session.commit()
     return jsonify({"msg": "Usuario actualizado", **usuario.to_dict()}), 200
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # PATCH /api/owner_gym/staff/<id>/toggle
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>/toggle", methods=["PATCH"])
 @jwt_required()
 @require_role("owner_gym")

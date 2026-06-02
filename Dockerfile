@@ -78,9 +78,14 @@ COPY --chown=gymuser:gymuser . .
 # Dar permisos de ejecución al entrypoint
 RUN chmod +x /app/entrypoint.sh
 
-# Crear directorio de storage para backups y transferir ownership a gymuser
-# Debe hacerse antes de USER gymuser ya que /app pertenece a root
-RUN mkdir -p /app/storage/backups && chown -R gymuser:gymuser /app/storage
+# Crear directorios de storage y uploads; ownership a gymuser ANTES de USER gymuser.
+# Los named volumes Docker se inicializan copiando el directorio de la imagen
+# (incluyendo ownership). Si se crea después de USER gymuser, el volume root puede
+# bloquear la escritura.
+RUN mkdir -p /app/storage/backups \
+ && mkdir -p /app/app/static/uploads \
+ && chown -R gymuser:gymuser /app/storage \
+ && chown -R gymuser:gymuser /app/app/static/uploads
 
 USER gymuser
 

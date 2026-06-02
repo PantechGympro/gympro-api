@@ -22,6 +22,8 @@ class TipoMembresia(db.Model):
         index=True,
     )
     nombre          = db.Column(db.String(100), nullable=False)
+    # estandar | promocion
+    tipo            = db.Column(db.String(20), nullable=False, server_default="estandar")
     duracion_meses  = db.Column(db.Integer, nullable=False, default=1)
     precio          = db.Column(db.Numeric(10, 2), nullable=False)
     descripcion     = db.Column(db.Text, nullable=True)
@@ -47,6 +49,7 @@ class TipoMembresia(db.Model):
             "id":             self.id,
             "id_gimnasio":    self.id_gimnasio,
             "nombre":         self.nombre,
+            "tipo":           self.tipo or "estandar",
             "duracion_meses": self.duracion_meses,
             "precio":         float(self.precio),
             "descripcion":    self.descripcion,

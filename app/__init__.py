@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, send_from_directory
 import os
 from .config import Config
 from .extensions import db, migrate, jwt, mail, limiter
@@ -118,6 +118,14 @@ def create_app():
     app.register_blueprint(usuarios_admin_bp,      url_prefix="/api/superadmin")
     app.register_blueprint(backups_admin_bp,       url_prefix="/api/superadmin")
     app.register_blueprint(spark_platform_bp,      url_prefix="/api/superadmin")
+
+    # ── Ruta para servir fotos de perfil subidas ─────────────────────────────
+    # Usa /app/storage/uploads/ (bind-mounted desde el host) para garantizar
+    # persistencia entre rebuilds sin depender de named volumes ni permisos.
+    @app.route("/api/uploads/<path:filename>")
+    def serve_upload(filename):
+        upload_dir = "/app/storage/uploads"
+        return send_from_directory(upload_dir, filename)
 
     init_scheduler(app)
     return app

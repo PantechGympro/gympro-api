@@ -1,10 +1,8 @@
-import os
-from flask import Blueprint, request, jsonify, current_app, g
-from werkzeug.utils import secure_filename
+import re
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from datetime import datetime
 from bson.objectid import ObjectId
-import re
 
 from app.mongo import get_db
 from app.models.user import User
@@ -17,10 +15,12 @@ from app.models.pg.rol import Rol as RolPG
 
 miembros_bp = Blueprint("miembros", __name__)
 
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+VALID_BASE64_PREFIXES = ("data:image/jpeg;base64,", "data:image/png;base64,",
+                         "data:image/webp;base64,", "data:image/gif;base64,")
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def _valid_foto(value):
+    """Devuelve la cadena base64 si es válida, None en caso contrario."""
+    return value if (isinstance(value, str) and value.startswith(VALID_BASE64_PREFIXES)) else None
 
 # ==============================================================================
 # 1. LISTAR MIEMBROS (CON BUSCADOR + PAGINACIÓN)
@@ -75,62 +75,54 @@ def listar_miembros():
 def crear_miembro():
     db     = get_db()
     gym_id = g.tenant_id
-    data   = request.form
-    file   = request.files.get('foto')
+    data   = request.get_json(silent=True) or {}
 
-    nombre   = data.get('nombre')
-    email    = data.get('email')
-    password = data.get('password')
+    nombre   = data.get('nombre', '').strip()
+    email    = data.get('email', '').strip().lower()
+    password = data.get('password', '').strip()
 
     if not nombre or not email:
         return jsonify({"error": "Nombre y Email son obligatorios"}), 400
 
     # Verificar duplicado en PG y en Mongo
-    if UsuarioPG.query.filter_by(email=email.strip().lower()).first():
+    if UsuarioPG.query.filter_by(email=email).first():
         return jsonify({"error": "El email ya está registrado"}), 400
     if User.find_by_email(email):
         return jsonify({"error": "El email ya está registrado"}), 400
 
     try:
-        # 1. Crear Usuario en PostgreSQL (fuente de verdad desde Sprint 2)
+        # 1. Crear Usuario en PostgreSQL
         rol_pg = RolPG.query.filter_by(nombre="Miembro").first()
         if not rol_pg:
             return jsonify({"error": "Rol 'Miembro' no encontrado en base de datos"}), 500
 
         pg_usuario = UsuarioPG(
             nombre      = nombre,
-            email       = email.strip().lower(),
+            email       = email,
             id_rol      = rol_pg.id,
             id_gimnasio = gym_id,
             activo      = True,
         )
         pg_usuario.set_password(password if password else "gym123")
         pg_db.session.add(pg_usuario)
-        pg_db.session.flush()          # obtener el id sin commit aún
+        pg_db.session.flush()
 
-        # 2. Procesar imagen
-        filename_bd = None
-        if file and allowed_file(file.filename):
-            filename        = secure_filename(file.filename)
-            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            upload_folder   = os.path.join(current_app.root_path, 'static/uploads')
-            os.makedirs(upload_folder, exist_ok=True)
-            file.save(os.path.join(upload_folder, unique_filename))
-            filename_bd = unique_filename
+        # 2. Foto: base64 almacenada directamente en MongoDB (sin filesystem)
+        foto_perfil = _valid_foto(data.get("foto_base64"))
 
-        # 3. Crear documento Miembro en MongoDB con referencia al usuario PG
+        # 3. Crear documento Miembro en MongoDB
         nuevo_miembro = Miembro(
-            id_usuario_pg  = pg_usuario.id,    # FK al usuario PG — permite el lookup en endpoints
-            nombre         = nombre,            # desnormalizado para búsquedas/listados
-            email          = email.strip().lower(),
-            id_gimnasio_pg = gym_id,            # tenant — aislamiento estricto
+            id_usuario_pg  = pg_usuario.id,
+            nombre         = nombre,
+            email          = email,
+            id_gimnasio_pg = gym_id,
             telefono       = data.get("telefono"),
             sexo           = data.get("sexo"),
             peso_inicial   = data.get("peso_inicial"),
             estatura       = data.get("estatura"),
             fecha_registro = datetime.now(),
             estado         = "Activo",
-            foto_perfil    = filename_bd,
+            foto_perfil    = foto_perfil,
         )
         miembro_id        = nuevo_miembro.save()
         nuevo_miembro._id = miembro_id
@@ -162,12 +154,11 @@ def actualizar_miembro(id):
     usuario_pg    = UsuarioPG.query.get(miembro.id_usuario_pg) if miembro.id_usuario_pg else None
     usuario_mongo = User.find_by_id(miembro.id_usuario) if miembro.id_usuario else None
 
-    data = request.form
-    file = request.files.get('foto')
+    data = request.get_json(silent=True) or {}
 
     try:
-        nuevo_nombre = data.get('nombre') or None
-        nuevo_email  = (data.get('email') or "").strip().lower() or None
+        nuevo_nombre = (data.get('nombre') or '').strip() or None
+        nuevo_email  = (data.get('email') or '').strip().lower() or None
 
         # Actualizar usuario en PG si existe
         if usuario_pg:
@@ -191,24 +182,18 @@ def actualizar_miembro(id):
                 usuario_mongo.email = nuevo_email
             usuario_mongo.save()
 
-        # Actualizar campos desnormalizados en Miembro (búsquedas + to_dict)
-        if nuevo_nombre:
-            miembro.nombre = nuevo_nombre
-        if nuevo_email:
-            miembro.email = nuevo_email
+        # Actualizar campos desnormalizados en Miembro
+        if nuevo_nombre:    miembro.nombre       = nuevo_nombre
+        if nuevo_email:     miembro.email        = nuevo_email
+        if data.get('telefono'):     miembro.telefono     = data['telefono']
+        if data.get('sexo'):         miembro.sexo         = data['sexo']
+        if data.get('peso_inicial'): miembro.peso_inicial = data['peso_inicial']
+        if data.get('estatura'):     miembro.estatura     = data['estatura']
 
-        if data.get('telefono'):     miembro.telefono     = data.get('telefono')
-        if data.get('sexo'):         miembro.sexo         = data.get('sexo')
-        if data.get('peso_inicial'): miembro.peso_inicial = data.get('peso_inicial')
-        if data.get('estatura'):     miembro.estatura     = data.get('estatura')
-
-        if file and allowed_file(file.filename):
-            filename        = secure_filename(file.filename)
-            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            upload_folder   = os.path.join(current_app.root_path, 'static/uploads')
-            os.makedirs(upload_folder, exist_ok=True)
-            file.save(os.path.join(upload_folder, unique_filename))
-            miembro.foto_perfil = unique_filename
+        # Foto: sólo actualizar si se envía una base64 válida
+        foto_nueva = _valid_foto(data.get("foto_base64"))
+        if foto_nueva:
+            miembro.foto_perfil = foto_nueva
 
         miembro.save()
         return jsonify(miembro.to_dict_full()), 200

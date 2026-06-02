@@ -36,7 +36,9 @@ class Miembro:
 
     def to_dict(self):
         db = get_db()
-        foto_url = f"/static/uploads/{self.foto_perfil}" if self.foto_perfil else None
+        # Solo retornar foto si es base64 válida; paths legacy del filesystem se ignoran
+        fp = self.foto_perfil
+        foto_url = fp if (fp and fp.startswith("data:image")) else None
 
         # --- Obtener datos del Usuario (multi-path) ---
         # Prioridad 1: campos desnormalizados del Sprint 2 (nombre/email en el doc)
