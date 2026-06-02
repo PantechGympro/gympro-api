@@ -104,16 +104,18 @@ def _analytics_plataforma() -> dict:
     try:
         gym_int_ids = [int(g) for g in gym_ids if g and str(g).isdigit()]
         gyms = Gimnasio.query.filter(Gimnasio.id.in_(gym_int_ids)).all()
-        gym_name_map = {str(g.id): g.nombre for g in gyms}
-        gym_plan_map = {
+        gym_name_map   = {str(g.id): g.nombre for g in gyms}
+        gym_plan_map   = {
             str(g.id): (g.plan.value if hasattr(g.plan, "value") else str(g.plan))
             for g in gyms
         }
+        gym_activo_map = {str(g.id): g.activo for g in gyms}
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning("Error enriqueciendo nombres de gym: %s", e)
-        gym_name_map = {}
-        gym_plan_map = {}
+        gym_name_map   = {}
+        gym_plan_map   = {}
+        gym_activo_map = {}
 
     resumen = []
     for gym_id in sorted(gym_ids):
@@ -123,6 +125,7 @@ def _analytics_plataforma() -> dict:
             "id_gimnasio":         gym_id,
             "gimnasio":            gym_name_map.get(gym_id, f"Gimnasio {gym_id}"),
             "plan":                gym_plan_map.get(gym_id),
+            "activo":              gym_activo_map.get(gym_id),
             "ingresos_totales":    t.get("ingresos_totales", 0.0),
             "total_transacciones": t.get("total_transacciones", 0),
             "ticket_promedio":     t.get("ticket_promedio", 0.0),

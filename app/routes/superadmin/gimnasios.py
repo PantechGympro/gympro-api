@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.usuario import Usuario
+from app.models.pg.rol import Rol
 from app.models.pg.suscripcion import Suscripcion
 from app.models.pg.plan_suscripcion import PlanSuscripcion
 from app.mongo import get_db
@@ -28,47 +29,120 @@ gimnasios_admin_bp = Blueprint("gimnasios_admin", __name__)
 
 def _metricas_mongo(gym_id: int) -> dict:
     """Consulta métricas operativas del gimnasio desde MongoDB."""
-    mdb = get_db()
+    mdb   = get_db()
     ahora = datetime.utcnow()
+
+    hace_30d          = ahora - timedelta(days=30)
+    hace_12m          = ahora - timedelta(days=365)
     mes_actual_inicio = ahora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    filtro = {"id_gimnasio": gym_id}
+    # miembros usa id_gimnasio_pg; asistencias/pagos usan id_gimnasio
+    filtro_m  = {"id_gimnasio_pg": gym_id}
+    filtro_ap = {"id_gimnasio": gym_id}
 
-    total_miembros  = mdb.miembros.count_documents(filtro)
-    activos         = mdb.miembros.count_documents({**filtro, "estado": "Activo"})
-    asistencias_mes = mdb.asistencias.count_documents({
-        **filtro,
-        "$expr": {"$gte": [
-            {"$toDate": "$fecha"},
-            mes_actual_inicio
-        ]}
+    # ── Miembros ──────────────────────────────────────────────────────────
+    total_miembros = mdb.miembros.count_documents(filtro_m)
+    activos        = mdb.miembros.count_documents({**filtro_m, "estado": "Activo"})
+    inactivos      = total_miembros - activos
+
+    nuevos_30d = mdb.miembros.count_documents({
+        **filtro_m,
+        "$expr": {"$gte": [{"$toDate": "$fecha_registro"}, hace_30d]},
+    })
+    nuevos_mes = mdb.miembros.count_documents({
+        **filtro_m,
+        "$expr": {"$gte": [{"$toDate": "$fecha_registro"}, mes_actual_inicio]},
     })
 
-    # Ingresos del mes actual
-    pipeline_ingresos = [
-        {"$match": {
-            **filtro,
-            "$expr": {"$gte": [{"$toDate": "$fecha_pago"}, mes_actual_inicio]}
-        }},
-        {"$group": {"_id": None, "total": {"$sum": "$monto"}}},
-    ]
-    res_ingresos = list(mdb.pagos.aggregate(pipeline_ingresos))
-    ingresos_mes = round(res_ingresos[0]["total"], 2) if res_ingresos else 0.0
+    # ── Asistencias ───────────────────────────────────────────────────────
+    asistencias_30d = mdb.asistencias.count_documents({
+        **filtro_ap,
+        "$expr": {"$gte": [{"$toDate": "$fecha"}, hace_30d]},
+    })
+    asistencias_mes = mdb.asistencias.count_documents({
+        **filtro_ap,
+        "$expr": {"$gte": [{"$toDate": "$fecha"}, mes_actual_inicio]},
+    })
+    asistencias_total = mdb.asistencias.count_documents(filtro_ap)
 
-    # Última asistencia registrada
-    ultima_asist = mdb.asistencias.find_one(filtro, sort=[("fecha", -1)])
+    # Última asistencia
+    ultima_asist     = mdb.asistencias.find_one(filtro_ap, sort=[("fecha", -1)])
     ultima_actividad = None
     if ultima_asist:
-        ultima_actividad = ultima_asist.get("fecha") or ultima_asist.get("created_at")
-        if hasattr(ultima_actividad, "isoformat"):
-            ultima_actividad = ultima_actividad.isoformat()
+        v = ultima_asist.get("fecha") or ultima_asist.get("created_at")
+        ultima_actividad = v.isoformat() if hasattr(v, "isoformat") else str(v) if v else None
+
+    # ── Pagos e ingresos ──────────────────────────────────────────────────
+    def _agg_pagos(extra_match: dict) -> dict:
+        pipeline = [
+            {"$match": {**filtro_ap, **extra_match}},
+            {"$group": {
+                "_id":         None,
+                "total":       {"$sum": "$monto"},
+                "num_pagos":   {"$sum": 1},
+                "ticket_prom": {"$avg": "$monto"},
+            }},
+        ]
+        res = list(mdb.pagos.aggregate(pipeline))
+        if not res:
+            return {"total": 0.0, "num_pagos": 0, "ticket_prom": 0.0}
+        return {
+            "total":       round(float(res[0]["total"] or 0), 2),
+            "num_pagos":   int(res[0]["num_pagos"]),
+            "ticket_prom": round(float(res[0]["ticket_prom"] or 0), 2),
+        }
+
+    pag_mes   = _agg_pagos({"$expr": {"$gte": [{"$toDate": "$fecha_pago"}, mes_actual_inicio]}})
+    pag_30d   = _agg_pagos({"$expr": {"$gte": [{"$toDate": "$fecha_pago"}, hace_30d]}})
+    pag_total = _agg_pagos({})
+
+    # ── Ingresos mensuales últimos 12 meses (sparkline) ───────────────────
+    pipeline_hist = [
+        {"$match": {
+            **filtro_ap,
+            "$expr": {"$gte": [{"$toDate": "$fecha_pago"}, hace_12m]},
+        }},
+        {"$addFields": {
+            "fecha_dt": {"$cond": [
+                {"$eq": [{"$type": "$fecha_pago"}, "date"]},
+                "$fecha_pago",
+                {"$dateFromString": {"dateString": {"$toString": "$fecha_pago"}, "onError": None}},
+            ]},
+        }},
+        {"$match": {"fecha_dt": {"$ne": None}}},
+        {"$group": {
+            "_id":      {"$dateToString": {"format": "%Y-%m", "date": "$fecha_dt"}},
+            "ingresos": {"$sum": "$monto"},
+            "pagos":    {"$sum": 1},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    ingresos_12m = [
+        {"periodo": r["_id"], "ingresos": round(float(r["ingresos"]), 2), "pagos": int(r["pagos"])}
+        for r in mdb.pagos.aggregate(pipeline_hist)
+        if r["_id"]
+    ]
 
     return {
-        "total_miembros":    total_miembros,
-        "miembros_activos":  activos,
-        "asistencias_mes":   asistencias_mes,
-        "ingresos_mes_mxn":  ingresos_mes,
-        "ultima_actividad":  ultima_actividad,
+        # Miembros
+        "total_miembros":      total_miembros,
+        "miembros_activos":    activos,
+        "miembros_inactivos":  inactivos,
+        "nuevos_mes":          nuevos_mes,
+        "nuevos_30d":          nuevos_30d,
+        # Asistencias
+        "asistencias_mes":     asistencias_mes,
+        "asistencias_30d":     asistencias_30d,
+        "asistencias_total":   asistencias_total,
+        "ultima_actividad":    ultima_actividad,
+        # Ingresos
+        "ingresos_mes_mxn":    pag_mes["total"],
+        "ingresos_30d_mxn":    pag_30d["total"],
+        "ingresos_total_mxn":  pag_total["total"],
+        "total_transacciones": pag_total["num_pagos"],
+        "ticket_promedio":     pag_total["ticket_prom"],
+        # Histórico
+        "ingresos_12m":        ingresos_12m,
     }
 
 
@@ -112,6 +186,7 @@ def listar_gimnasios():
     """
     activo_param = request.args.get("activo")
     plan_param   = request.args.get("plan")
+    q_param      = request.args.get("q", "").strip()
     page         = max(1, int(request.args.get("page", 1)))
     per_page     = min(100, int(request.args.get("per_page", 20)))
 
@@ -121,6 +196,11 @@ def listar_gimnasios():
         query = query.filter(Gimnasio.activo == (activo_param.lower() == "true"))
     if plan_param:
         query = query.filter(Gimnasio.plan == plan_param)
+    if q_param:
+        like = f"%{q_param}%"
+        query = query.filter(
+            db.or_(Gimnasio.nombre.ilike(like), Gimnasio.email.ilike(like))
+        )
 
     query = query.order_by(Gimnasio.created_at.desc())
     paginado = query.paginate(page=page, per_page=per_page, error_out=False)
@@ -151,8 +231,17 @@ def detalle_gimnasio(gym_id: int):
     """Devuelve detalle completo de un gimnasio: datos PG + métricas MongoDB."""
     gym = Gimnasio.query.get_or_404(gym_id)
 
-    usuarios = Usuario.query.filter_by(id_gimnasio=gym_id).all()
-    staff    = [
+    ROLES_STAFF = {"Administrador", "Entrenador", "Recepcionista", "admin"}
+    usuarios = (
+        Usuario.query
+        .join(Usuario.rol)
+        .filter(
+            Usuario.id_gimnasio == gym_id,
+            db.func.lower(Rol.nombre).in_([r.lower() for r in ROLES_STAFF]),
+        )
+        .all()
+    )
+    staff = [
         {"id": u.id, "nombre": u.nombre, "email": u.email,
          "rol": u.rol.nombre if u.rol else None, "activo": u.activo}
         for u in usuarios
