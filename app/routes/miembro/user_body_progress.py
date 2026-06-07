@@ -260,4 +260,116 @@ def get_metrics_history():
 def _append_historial_metricas(db, miembro, progreso):
     """
     Snapshot append-only en historial_metricas. No-bloqueante.
-    Inclu
+    Incluye contexto de gimnasio para queries analíticas cross-member.
+    """
+    try:
+        sexo = miembro.get("sexo", "M")
+        db.historial_metricas.insert_one({
+            "id_miembro":      miembro["_id"],
+            "id_gimnasio_pg":  miembro.get("id_gimnasio_pg"),
+            "timestamp":       progreso.get("fecha_registro") or datetime.now(),
+            "genero":          sexo,
+            "peso":            progreso.get("peso"),
+            "bmi":             progreso.get("bmi"),
+            "cintura":         progreso.get("cintura"),
+            "cadera":          progreso.get("cadera"),
+            "pecho":           progreso.get("pecho"),
+            "brazo_derecho":   progreso.get("brazo_derecho"),
+            "brazo_izquierdo": progreso.get("brazo_izquierdo"),
+            "muslo_derecho":   progreso.get("muslo_derecho"),
+            "muslo_izquierdo": progreso.get("muslo_izquierdo"),
+            "pantorrilla":     progreso.get("pantorrilla"),
+        })
+    except Exception as ex:
+        print(f"[historial_metricas] No-bloqueante: {ex}")
+
+
+# ============================================
+# FUNCIONES AUXILIARES
+# ============================================
+
+def _calcular_imc(peso, estatura):
+    try:
+        if estatura > 0 and peso > 0:
+            return peso / (estatura ** 2)
+        return 0
+    except:
+        return 0
+
+def _calcular_grasa_corporal(peso, imc, sexo):
+    try:
+        edad = 30
+        sexo_valor = 1 if sexo == "M" else 0
+        grasa = (1.20 * imc) + (0.23 * edad) - (10.8 * sexo_valor) - 5.4
+        
+        if sexo == "M":
+            return max(5, min(35, round(grasa, 1)))
+        else:
+            return max(10, min(45, round(grasa, 1)))
+    except:
+        return 22 if sexo == "F" else 18
+
+def _calcular_peso_meta(peso_inicial, imc_actual, sexo):
+    if imc_actual >= 18.5 and imc_actual <= 24.9:
+        return peso_inicial
+    elif imc_actual > 24.9:
+        return peso_inicial * 0.90
+    else:
+        return peso_inicial * 1.10
+
+def _calcular_grasa_meta(sexo):
+    if sexo == "M":
+        return 15
+    else:
+        return 23
+
+def _obtener_progreso_mensual_real(db, id_miembro, peso_inicial, peso_meta):
+    try:
+        now = datetime.now()
+        meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+        
+        # Fecha límite: hace 6 meses
+        hace_6_meses = datetime.combine((now - timedelta(days=180)).date(), datetime.min.time())
+        
+        progresos = list(db.progreso_fisico.find({
+            "id_miembro": id_miembro,
+            "fecha_registro": {"$gte": hace_6_meses}
+        }).sort("fecha_registro", 1))
+        
+        if not progresos:
+            return []
+            
+        progreso_por_mes = {}
+        diferencia_total = abs(peso_inicial - peso_meta) if peso_inicial != peso_meta else 1
+        
+        for progreso in progresos:
+            # Obtener el mes de la fecha registrada
+            fecha_reg = progreso.get("fecha_registro")
+            if isinstance(fecha_reg, str):
+                fecha_reg = datetime.strptime(fecha_reg[:10], "%Y-%m-%d")
+                
+            mes_num = fecha_reg.month - 1
+            mes_nombre = meses[mes_num]
+            
+            peso_actual = float(progreso.get("peso", peso_inicial) or peso_inicial)
+            diferencia_actual = abs(peso_inicial - peso_actual)
+            porcentaje = min(100, (diferencia_actual / diferencia_total * 100))
+            
+            progreso_por_mes[mes_nombre] = {
+                "mes": mes_nombre,
+                "porcentaje": max(0, round(porcentaje))
+            }
+            
+        resultado = []
+        for i in range(6):
+            mes_idx = (now.month - 6 + i) % 12
+            mes_nombre = meses[mes_idx]
+            
+            if mes_nombre in progreso_por_mes:
+                resultado.append(progreso_por_mes[mes_nombre])
+                
+        return resultado
+        
+    except Exception as e:
+        print(f"Error en _obtener_progreso_mensual_real: {e}")
+        return []

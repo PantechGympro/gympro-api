@@ -1921,4 +1921,3 @@ def _format_fecha(ts):
             return ts.strftime('%d/%m/%Y')
     except Exception:
         return '-'
-                                  

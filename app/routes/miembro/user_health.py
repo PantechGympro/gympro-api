@@ -233,4 +233,43 @@ def update_user_health():
 
         # ── Snapshot de analytics: historial_metricas ──────────────────────────
         # Colección denormalizada para modelos ML y dashboards de gym.
-        # Incluye contexto 
+        # Incluye contexto de gimnasio y valores calculados para evitar joins.
+        _append_historial_metricas(db, miembro, nuevo_progreso)
+
+        return jsonify({
+            "message": "Datos de salud actualizados correctamente"
+        }), 201
+
+    except Exception as e:
+        print(f"Error en update_user_health: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _append_historial_metricas(db, miembro, progreso):
+    """
+    Escribe un snapshot de métricas en la colección 'historial_metricas'.
+    Esta colección es append-only y está diseñada para analytics / ML.
+    No bloquea si falla — el save principal ya fue exitoso.
+    """
+    try:
+        sexo = miembro.get("sexo", "M")
+        snapshot = {
+            "id_miembro":    miembro["_id"],
+            "id_gimnasio_pg": miembro.get("id_gimnasio_pg"),
+            "timestamp":     progreso.get("fecha_registro") or datetime.now(),
+            "genero":        sexo,
+            # Métricas numéricas — None si no fue registrado en esta sesión
+            "peso":          progreso.get("peso"),
+            "bmi":           progreso.get("bmi"),
+            "cintura":       progreso.get("cintura"),
+            "cadera":        progreso.get("cadera"),
+            "pecho":         progreso.get("pecho"),
+            "brazo_derecho": progreso.get("brazo_derecho"),
+            "brazo_izquierdo": progreso.get("brazo_izquierdo"),
+            "muslo_derecho": progreso.get("muslo_derecho"),
+            "muslo_izquierdo": progreso.get("muslo_izquierdo"),
+            "pantorrilla":   progreso.get("pantorrilla"),
+        }
+        db.historial_metricas.insert_one(snapshot)
+    except Exception as ex:
+        print(f"[historial_metricas] No-bloqueante: {ex}")

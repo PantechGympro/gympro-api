@@ -153,4 +153,5 @@ def obtener_membresia_activa():
         }), 200
 
     except Exception as e:
-        print(f
+        print(f"❌ Error en obtener_membresia_activa: {e}")
+        return jsonify({"error": str(e)}), 500

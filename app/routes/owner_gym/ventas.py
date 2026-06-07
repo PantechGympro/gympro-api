@@ -195,4 +195,22 @@ def listar_ventas():
                 return jsonify({"ventas": [], "total": 0, "pages": 0, "page": page}), 200
 
         total  = db.ventas.count_documents(filtro)
-        cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(
+        cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(per_page)
+        pages  = math.ceil(total / per_page) if total > 0 else 0
+
+        ventas = []
+        for v in cursor:
+            ventas.append({
+                "id":             str(v["_id"]),
+                "total":          v.get("total", 0),
+                "metodo_pago":    v.get("metodo_pago"),
+                "items":          v.get("items", []),
+                "fecha":          v["fecha"].isoformat() if isinstance(v.get("fecha"), datetime) else str(v.get("fecha")),
+                "nombre_miembro": v.get("nombre_miembro", ""),
+            })
+
+        return jsonify({"ventas": ventas, "total": total, "pages": pages, "page": page}), 200
+
+    except Exception as e:
+        print(f"Error en listar_ventas: {e}")
+        return jsonify({"ventas": [], "total": 0}), 500
