@@ -271,10 +271,19 @@ def get_trainer_profile():
             fecha_creacion = fecha_creacion.replace(tzinfo=None)
         anos_activos = (datetime.now() - fecha_creacion).days // 365 if fecha_creacion else 0
 
-        # Certificaciones: usar texto libre del perfil si existe; colección como fallback
-        certs_texto = (perfil or {}).get("certificaciones_texto")
-        if certs_texto is None:
-            certs_texto = ', '.join([c.get("nombre", "") for c in certificaciones])
+        # Certificaciones: devolver como array estructurado
+        certs_list = [
+            {
+                'id':          str(c['_id']),
+                'nombre':      c.get('nombre', ''),
+                'emisor':      c.get('emisor', ''),
+                'anio':        c.get('anio', ''),
+                'url_archivo': c.get('url_archivo', ''),
+            }
+            for c in certificaciones
+        ]
+
+        experience_custom = (perfil or {}).get("experiencia_texto", "")
 
         profile_data = {
             'name':           usuario.nombre,
@@ -282,8 +291,8 @@ def get_trainer_profile():
             'phone':          perfil.get("telefono", "")        if perfil else "",
             'address':        perfil.get("direccion", "")       if perfil else "",
             'specialization': perfil.get("especializacion", "") if perfil else "",
-            'experience':     f"{anos_activos} años",
-            'certifications': certs_texto,
+            'experience':     experience_custom or f"{anos_activos} años",
+            'certifications': certs_list,
             'bio':            perfil.get("biografia", "")       if perfil else "",
             'stats': {
                 'totalClients':   total_clientes,
@@ -331,12 +340,11 @@ def update_trainer_profile():
 
         # Actualizar perfil extendido en Mongo
         update_perfil = {}
-        if 'phone'          in data: update_perfil['telefono']        = data['phone']
-        if 'address'        in data: update_perfil['direccion']       = data['address']
-        if 'specialization' in data: update_perfil['especializacion'] = data['specialization']
-        if 'bio'            in data: update_perfil['biografia']        = data['bio']
-        # certifications se guarda como string libre en el perfil extendido
-        if 'certifications' in data: update_perfil['certificaciones_texto'] = data['certifications']
+        if 'phone'          in data: update_perfil['telefono']          = data['phone']
+        if 'address'        in data: update_perfil['direccion']         = data['address']
+        if 'specialization' in data: update_perfil['especializacion']   = data['specialization']
+        if 'bio'            in data: update_perfil['biografia']         = data['bio']
+        if 'experience'     in data: update_perfil['experiencia_texto'] = data['experience']
 
         if update_perfil:
             mdb.perfil_entrenador.update_one(
@@ -345,6 +353,24 @@ def update_trainer_profile():
                 upsert=True
             )
 
+        # Certificaciones: array de objetos {nombre, emisor, anio, url_archivo}
+        if 'certifications' in data:
+            incoming = data['certifications']  # list of {id?, nombre, emisor, anio, url_archivo}
+            # Remove all existing certs and replace
+            mdb.certificaciones_entrenador.delete_many({"id_entrenador_pg": trainer_id})
+            if incoming:
+                mdb.certificaciones_entrenador.insert_many([
+                    {
+                        "id_entrenador_pg": trainer_id,
+                        "id_gimnasio_pg":   g.tenant_id,
+                        "nombre":           c.get("nombre", "").strip(),
+                        "emisor":           c.get("emisor", "").strip(),
+                        "anio":             str(c.get("anio", "")).strip(),
+                        "url_archivo":      c.get("url_archivo", ""),
+                    }
+                    for c in incoming if c.get("nombre", "").strip()
+                ])
+
         return jsonify({'success': True, 'message': 'Perfil actualizado correctamente'}), 200
 
     except Exception as e:
@@ -352,9 +378,218 @@ def update_trainer_profile():
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 
+@trainer_bp.route('/profile/cert-upload', methods=['POST'])
+@jwt_required()
+@require_tenant
+def upload_cert_file():
+    """Sube el archivo de una certificación; devuelve la URL relativa."""
+    import os, uuid
+    from flask import current_app
+    from werkzeug.utils import secure_filename
+
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'message': 'No se recibió archivo'}), 400
+
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'success': False, 'message': 'Nombre de archivo vacío'}), 400
+
+    ALLOWED = {'pdf', 'jpg', 'jpeg', 'png', 'webp'}
+    ext = file.filename.rsplit('.', 1)[-1].lower()
+    if ext not in ALLOWED:
+        return jsonify({'success': False, 'message': f'Tipo no permitido: {ext}'}), 400
+
+    trainer_id      = int(get_jwt_identity())
+    unique_filename = f"cert_{trainer_id}_{uuid.uuid4().hex[:8]}.{ext}"
+    upload_folder   = os.path.join(current_app.root_path, 'static/uploads/certs')
+    os.makedirs(upload_folder, exist_ok=True)
+    file.save(os.path.join(upload_folder, unique_filename))
+
+    url = f"/static/uploads/certs/{unique_filename}"
+    return jsonify({'success': True, 'url': url}), 200
+
+
 # ═══════════════════════════════════════════════════════════════
 #  RUTAS — AGENDA Y SESIONES
 # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+#  RUTAS — DIETAS (entrenador asigna planes a sus clientes)
+# ═══════════════════════════════════════════════════════════════
+
+def _ser_dieta(doc):
+    doc["id"] = str(doc.pop("_id"))
+    if "id_miembro" in doc: doc["id_miembro"] = str(doc["id_miembro"])
+    if "fecha_creacion" in doc and isinstance(doc["fecha_creacion"], datetime):
+        doc["fecha_creacion"] = doc["fecha_creacion"].strftime("%Y-%m-%d")
+    return doc
+
+
+@trainer_bp.route('/diets', methods=['GET'])
+@jwt_required()
+@require_tenant
+def list_trainer_diets():
+    """Lista todas las dietas creadas por este entrenador."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        dietas = list(mdb.dietas.find({
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "eliminada":        {"$ne": True},
+        }).sort("fecha_creacion", -1))
+
+        return jsonify({"diets": [_ser_dieta(d) for d in dietas]}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@trainer_bp.route('/diets', methods=['POST'])
+@jwt_required()
+@require_tenant
+def create_trainer_diet():
+    """Crea una dieta y opcionalmente la asigna a un cliente."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json() or {}
+
+        if not data.get("nombre", "").strip():
+            return jsonify({"success": False, "message": "El nombre es requerido"}), 400
+
+        id_miembro_pg = data.get("id_miembro_pg")
+        id_miembro_oid = None
+        if id_miembro_pg:
+            miembro = mdb.miembros.find_one({"id_usuario_pg": int(id_miembro_pg), "id_gimnasio_pg": gym_id})
+            if miembro:
+                id_miembro_oid = miembro["_id"]
+
+        nueva = {
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+            "id_miembro":       id_miembro_oid,
+            "nombre":           data["nombre"].strip(),
+            "descripcion":      data.get("descripcion", ""),
+            "calorias_meta":    data.get("calorias_meta"),
+            "comidas":          data.get("comidas", []),
+            "creado_por":       "entrenador",
+            "eliminada":        False,
+            "fecha_creacion":   datetime.now(),
+        }
+        result = mdb.dietas.insert_one(nueva)
+        nueva["_id"] = result.inserted_id
+
+        return jsonify({"success": True, "diet": _ser_dieta(nueva)}), 201
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@trainer_bp.route('/diets/<diet_id>', methods=['PUT'])
+@jwt_required()
+@require_tenant
+def update_trainer_diet(diet_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json() or {}
+
+        dieta = mdb.dietas.find_one({
+            "_id":              ObjectId(diet_id),
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+        })
+        if not dieta:
+            return jsonify({"success": False, "message": "Dieta no encontrada"}), 404
+
+        update = {}
+        for f in ["nombre", "descripcion", "calorias_meta", "comidas"]:
+            if f in data:
+                update[f] = data[f]
+
+        if "id_miembro_pg" in data:
+            if data["id_miembro_pg"]:
+                miembro = mdb.miembros.find_one({"id_usuario_pg": int(data["id_miembro_pg"]), "id_gimnasio_pg": gym_id})
+                update["id_miembro"] = miembro["_id"] if miembro else None
+            else:
+                update["id_miembro"] = None
+
+        if update:
+            mdb.dietas.update_one({"_id": ObjectId(diet_id)}, {"$set": update})
+
+        return jsonify({"success": True, "message": "Dieta actualizada"}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@trainer_bp.route('/diets/<diet_id>', methods=['DELETE'])
+@jwt_required()
+@require_tenant
+def delete_trainer_diet(diet_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        result = mdb.dietas.update_one(
+            {"_id": ObjectId(diet_id), "id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id},
+            {"$set": {"eliminada": True}}
+        )
+        if result.matched_count == 0:
+            return jsonify({"success": False, "message": "Dieta no encontrada"}), 404
+
+        return jsonify({"success": True, "message": "Dieta eliminada"}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@trainer_bp.route('/diets/<diet_id>/assign', methods=['POST'])
+@jwt_required()
+@require_tenant
+def assign_diet_to_member(diet_id):
+    """Reasigna una dieta existente a otro cliente."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json() or {}
+
+        dieta = mdb.dietas.find_one({
+            "_id":              ObjectId(diet_id),
+            "id_entrenador_pg": trainer_id,
+            "id_gimnasio_pg":   gym_id,
+        })
+        if not dieta:
+            return jsonify({"success": False, "message": "Dieta no encontrada"}), 404
+
+        id_miembro_pg = data.get("id_miembro_pg")
+        id_miembro_oid = None
+        if id_miembro_pg:
+            miembro = mdb.miembros.find_one({"id_usuario_pg": int(id_miembro_pg), "id_gimnasio_pg": gym_id})
+            if miembro:
+                id_miembro_oid = miembro["_id"]
+
+        mdb.dietas.update_one(
+            {"_id": ObjectId(diet_id)},
+            {"$set": {"id_miembro": id_miembro_oid}}
+        )
+        return jsonify({"success": True, "message": "Dieta asignada"}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
 
 @trainer_bp.route('/schedule', methods=['GET'])
 @jwt_required()
@@ -749,6 +984,215 @@ def create_routine():
             'success':   True,
             'id_rutina': str(rutina_id),
             'message':   'Rutina creada correctamente'
+        }), 201
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@trainer_bp.route('/routines/<routine_id>', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_routine_detail(routine_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        rutina = mdb.rutinas.find_one({
+            '_id':                ObjectId(routine_id),
+            'id_entrenador_pg':   trainer_id,
+            'id_gimnasio_pg':     gym_id
+        })
+        if not rutina:
+            return jsonify({'success': False, 'message': 'Rutina no encontrada'}), 404
+
+        dias = list(mdb.rutina_dias.find({'id_rutina': ObjectId(routine_id)}).sort('orden', 1))
+        structured_days = []
+        for dia in dias:
+            ejercicios = list(mdb.rutina_ejercicios.find(
+                {'id_rutina_dia': dia['_id']}
+            ).sort('orden', 1))
+            structured_days.append({
+                'day':         dia.get('dia_semana', ''),
+                'muscleGroup': dia.get('grupo_muscular', ''),
+                'exercises': [
+                    {
+                        'name':     ej.get('nombre_ejercicio', ''),
+                        'sets':     ej.get('series', '3'),
+                        'reps':     ej.get('repeticiones', '12'),
+                        'peso':     ej.get('peso', ''),
+                        'notes':    ej.get('notas', ''),
+                        'imagenes': ej.get('imagenes', []),
+                        'video':    ej.get('video', ''),
+                    }
+                    for ej in ejercicios
+                ]
+            })
+
+        return jsonify({
+            'success': True,
+            'routine': {
+                'id':               str(rutina['_id']),
+                'name':             rutina.get('nombre', ''),
+                'category':         rutina.get('categoria', ''),
+                'difficulty':       rutina.get('dificultad', ''),
+                'duration_minutes': rutina.get('duracion_minutos', 60),
+                'description':      rutina.get('descripcion', ''),
+                'objective':        rutina.get('objetivo', ''),
+                'days':             structured_days
+            }
+        }), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@trainer_bp.route('/routines/<routine_id>', methods=['PUT'])
+@jwt_required()
+@require_tenant
+def update_routine(routine_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json()
+
+        rutina = mdb.rutinas.find_one({
+            '_id':              ObjectId(routine_id),
+            'id_entrenador_pg': trainer_id,
+            'id_gimnasio_pg':   gym_id
+        })
+        if not rutina:
+            return jsonify({'success': False, 'message': 'Rutina no encontrada'}), 404
+
+        mdb.rutinas.update_one(
+            {'_id': ObjectId(routine_id)},
+            {'$set': {
+                'nombre':             data.get('name', rutina.get('nombre')).strip(),
+                'categoria':          data.get('category', rutina.get('categoria')),
+                'dificultad':         data.get('difficulty', rutina.get('dificultad')),
+                'duracion_minutos':   int(data.get('duration_minutes', rutina.get('duracion_minutos', 60))),
+                'descripcion':        data.get('description', rutina.get('descripcion', '')),
+                'objetivo':           data.get('objective', rutina.get('objetivo', '')),
+                'fecha_actualizacion': datetime.now()
+            }}
+        )
+
+        # Delete old days + exercises, recreate from submitted data
+        old_dias = list(mdb.rutina_dias.find({'id_rutina': ObjectId(routine_id)}, {'_id': 1}))
+        old_dia_ids = [d['_id'] for d in old_dias]
+        if old_dia_ids:
+            mdb.rutina_ejercicios.delete_many({'id_rutina_dia': {'$in': old_dia_ids}})
+        mdb.rutina_dias.delete_many({'id_rutina': ObjectId(routine_id)})
+
+        for order_d, day_data in enumerate(data.get('days', [])):
+            nuevo_dia = {
+                'id_rutina':      ObjectId(routine_id),
+                'dia_semana':     day_data.get('day'),
+                'grupo_muscular': day_data.get('muscleGroup', ''),
+                'orden':          order_d
+            }
+            dia_id = mdb.rutina_dias.insert_one(nuevo_dia).inserted_id
+
+            ejercicios_insert = [
+                {
+                    'id_rutina_dia':    dia_id,
+                    'nombre_ejercicio': ej.get('name', '').strip(),
+                    'series':           str(ej.get('sets', '3')),
+                    'repeticiones':     str(ej.get('reps', '12')),
+                    'peso':             ej.get('peso', ''),
+                    'notas':            ej.get('notes', ''),
+                    'imagenes':         [img for img in ej.get('imagenes', []) if img][:3],
+                    'video':            ej.get('video') or None,
+                    'instrucciones':    ej.get('notes', '') or '',
+                    'orden':            order_e
+                }
+                for order_e, ej in enumerate(day_data.get('exercises', []))
+            ]
+            if ejercicios_insert:
+                mdb.rutina_ejercicios.insert_many(ejercicios_insert)
+
+        return jsonify({'success': True, 'message': 'Rutina actualizada correctamente'}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@trainer_bp.route('/routines/<routine_id>', methods=['DELETE'])
+@jwt_required()
+@require_tenant
+def delete_routine(routine_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        rutina = mdb.rutinas.find_one({
+            '_id':              ObjectId(routine_id),
+            'id_entrenador_pg': trainer_id,
+            'id_gimnasio_pg':   gym_id
+        })
+        if not rutina:
+            return jsonify({'success': False, 'message': 'Rutina no encontrada'}), 404
+
+        dias = list(mdb.rutina_dias.find({'id_rutina': ObjectId(routine_id)}, {'_id': 1}))
+        dia_ids = [d['_id'] for d in dias]
+        if dia_ids:
+            mdb.rutina_ejercicios.delete_many({'id_rutina_dia': {'$in': dia_ids}})
+        mdb.rutina_dias.delete_many({'id_rutina': ObjectId(routine_id)})
+        mdb.rutinas.delete_one({'_id': ObjectId(routine_id)})
+
+        return jsonify({'success': True, 'message': 'Rutina eliminada correctamente'}), 200
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@trainer_bp.route('/routines/<routine_id>/duplicate', methods=['POST'])
+@jwt_required()
+@require_tenant
+def duplicate_routine(routine_id):
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        rutina = mdb.rutinas.find_one({
+            '_id':              ObjectId(routine_id),
+            'id_entrenador_pg': trainer_id,
+            'id_gimnasio_pg':   gym_id
+        })
+        if not rutina:
+            return jsonify({'success': False, 'message': 'Rutina no encontrada'}), 404
+
+        nueva_rutina = {k: v for k, v in rutina.items() if k != '_id'}
+        nueva_rutina['nombre']              = rutina.get('nombre', '') + ' (copia)'
+        nueva_rutina['fecha_creacion']      = datetime.now()
+        nueva_rutina['fecha_actualizacion'] = datetime.now()
+        nueva_rutina['id_miembro']          = None
+        new_rutina_id = mdb.rutinas.insert_one(nueva_rutina).inserted_id
+
+        dias = list(mdb.rutina_dias.find({'id_rutina': ObjectId(routine_id)}).sort('orden', 1))
+        for dia in dias:
+            nuevo_dia = {k: v for k, v in dia.items() if k != '_id'}
+            nuevo_dia['id_rutina'] = new_rutina_id
+            new_dia_id = mdb.rutina_dias.insert_one(nuevo_dia).inserted_id
+
+            ejercicios = list(mdb.rutina_ejercicios.find({'id_rutina_dia': dia['_id']}).sort('orden', 1))
+            for ej in ejercicios:
+                nuevo_ej = {k: v for k, v in ej.items() if k != '_id'}
+                nuevo_ej['id_rutina_dia'] = new_dia_id
+                mdb.rutina_ejercicios.insert_one(nuevo_ej)
+
+        return jsonify({
+            'success':   True,
+            'id_rutina': str(new_rutina_id),
+            'message':   'Rutina duplicada correctamente'
         }), 201
 
     except Exception as e:
