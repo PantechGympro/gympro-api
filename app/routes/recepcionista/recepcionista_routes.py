@@ -103,10 +103,18 @@ def get_dashboard():
     # ── 4. Membresías por vencer (próximos 7 días) ────────────────────────────
     now = datetime.now(timezone.utc)
     in_7 = now + timedelta(days=7)
-    expiring_soon = db.miembro_membresias.count_documents({
-        "id_gimnasio_pg": gym_id,
-        "estado":         "activa",
-        "fecha_fin":      {"$gte": now, "$lte": in_7},
+    gym_member_oids = [
+        m["_id"] for m in db.miembros.find({"id_gimnasio_pg": gym_id}, {"_id": 1})
+    ]
+    in_7_str = in_7.strftime("%Y-%m-%d")
+    now_str  = now.strftime("%Y-%m-%d")
+    expiring_soon = db.miembro_membresia.count_documents({
+        "id_miembro": {"$in": gym_member_oids},
+        "estado":     "Activa",
+        "$or": [
+            {"fecha_fin": {"$gte": now,     "$lte": in_7}},
+            {"fecha_fin": {"$gte": now_str, "$lte": in_7_str}},
+        ],
     })
 
     # ── 5. Citas hoy ──────────────────────────────────────────────────────────
@@ -162,10 +170,9 @@ def get_checkins():
     result = []
     for a in asistencias:
         m = members_map.get(a["id_miembro"], {})
-        mem = db.miembro_membresias.find_one({
-            "id_miembro_pg": m.get("id_usuario_pg"),
-            "id_gimnasio_pg": gym_id,
-            "estado": "activa",
+        mem = db.miembro_membresia.find_one({
+            "id_miembro": a["id_miembro"],
+            "estado": "Activa",
         })
         mem_status = "Activa"
         if mem:
@@ -278,18 +285,24 @@ def get_members():
 
     result = []
     for m in miembros:
-        mem = db.miembro_membresias.find_one({
-            "id_miembro_pg":  m.get("id_usuario_pg"),
-            "id_gimnasio_pg": gym_id,
-            "estado": "activa",
-        }, {"fecha_fin": 1, "tipo_membresia": 1})
+        mem = db.miembro_membresia.find_one({
+            "id_miembro": m["_id"],
+            "estado": "Activa",
+        }, {"fecha_fin": 1, "tipo_membresia": 1, "id_membresia": 1})
 
         mem_status = "sin_membresia"
         fecha_fin  = None
         tipo       = None
         if mem:
             fecha_fin = mem.get("fecha_fin")
-            tipo      = mem.get("tipo_membresia", "")
+            tipo = mem.get("tipo_membresia", "")
+            if not tipo and mem.get("id_membresia"):
+                try:
+                    from app.models.pg.tipo_membresia import TipoMembresia
+                    tm_obj = TipoMembresia.query.get(int(mem["id_membresia"]))
+                    if tm_obj: tipo = tm_obj.nombre
+                except Exception:
+                    pass
             if fecha_fin:
                 if isinstance(fecha_fin, str):
                     fecha_fin = datetime.fromisoformat(fecha_fin)
@@ -555,6 +568,24 @@ def create_cita():
                 f"Se te asignó una cita con {client_name} "
                 f"el {fecha_fmt} a las {hora_fmt}. "
                 f"Tipo: {data['type']}."
+            ),
+            referencia_tipo="cita",
+            referencia_id=cita_id_str,
+        )
+
+    # ── Notificación de confirmación para el recepcionista ─────────────────
+    rec_id = get_jwt().get("id")
+    if rec_id:
+        crear_notificacion(
+            db=db,
+            id_usuario_pg=int(rec_id),
+            id_gimnasio_pg=gym_id,
+            tipo="cita_nueva",
+            titulo="Cita registrada",
+            mensaje=(
+                f"Cita agendada para {client_name} el {fecha_fmt} a las {hora_fmt}. "
+                f"Tipo: {data['type']}. "
+                + (f"Entrenador: {trainer_name}." if trainer_name else "")
             ),
             referencia_tipo="cita",
             referencia_id=cita_id_str,
