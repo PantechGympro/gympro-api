@@ -401,11 +401,11 @@ def upload_cert_file():
 
     trainer_id      = int(get_jwt_identity())
     unique_filename = f"cert_{trainer_id}_{uuid.uuid4().hex[:8]}.{ext}"
-    upload_folder   = os.path.join(current_app.root_path, 'static/uploads/certs')
+    upload_folder   = "/app/storage/uploads/certs"
     os.makedirs(upload_folder, exist_ok=True)
     file.save(os.path.join(upload_folder, unique_filename))
 
-    url = f"/static/uploads/certs/{unique_filename}"
+    url = f"/api/uploads/certs/{unique_filename}"
     return jsonify({'success': True, 'url': url}), 200
 
 
@@ -1921,3 +1921,4 @@ def _format_fecha(ts):
             return ts.strftime('%d/%m/%Y')
     except Exception:
         return '-'
+                                  

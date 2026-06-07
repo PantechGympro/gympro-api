@@ -159,7 +159,7 @@ def update_user_profile():
         if file and allowed_file(file.filename):
             filename        = secure_filename(file.filename)
             unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            upload_folder   = os.path.join(current_app.root_path, 'static/uploads')
+            upload_folder   = "/app/storage/uploads"
             os.makedirs(upload_folder, exist_ok=True)
             file.save(os.path.join(upload_folder, unique_filename))
             update_miembro['foto_perfil'] = unique_filename
@@ -334,3 +334,4 @@ def upload_profile_photo():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+                               

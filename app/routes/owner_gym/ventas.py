@@ -163,36 +163,36 @@ def _send_ticket_email(email_dest: str, doc: dict, items: list, venta_num: str):
 @jwt_required()
 def listar_ventas():
     """
-    Lista ventas paginadas. Query params: page (default 1), per_page (default 10).
+    Lista ventas paginadas. Si el JWT corresponde a un miembro, solo devuelve sus compras.
+    Query params: page (default 1), per_page (default 10).
     """
     try:
+        from flask_jwt_extended import get_jwt
         db            = get_db()
         tenant_filter = get_tenant_filter()
         page          = request.args.get("page", 1, type=int)
         per_page      = request.args.get("per_page", 10, type=int)
         skip          = (page - 1) * per_page
 
+        claims = get_jwt()
+        role   = (claims.get("role") or "").lower()
+
         filtro = {}
         if tenant_filter:
             filtro["id_gimnasio"] = tenant_filter["id_gimnasio"]
 
+        # Si es miembro, filtrar solo sus compras propias
+        if role in ("user", "miembro"):
+            user_pg_id = int(get_jwt_identity())
+            gym_id = tenant_filter.get("id_gimnasio") if tenant_filter else None
+            query_m = {"id_usuario_pg": user_pg_id}
+            if gym_id:
+                query_m["id_gimnasio_pg"] = gym_id
+            miembro = db.miembros.find_one(query_m)
+            if miembro:
+                filtro["id_miembro"] = miembro["_id"]
+            else:
+                return jsonify({"ventas": [], "total": 0, "pages": 0, "page": page}), 200
+
         total  = db.ventas.count_documents(filtro)
-        cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(per_page)
-        pages  = math.ceil(total / per_page) if total > 0 else 0
-
-        ventas = []
-        for v in cursor:
-            ventas.append({
-                "id":             str(v["_id"]),
-                "total":          v.get("total", 0),
-                "metodo_pago":    v.get("metodo_pago"),
-                "items":          v.get("items", []),
-                "fecha":          v["fecha"].isoformat() if isinstance(v.get("fecha"), datetime) else str(v.get("fecha")),
-                "nombre_miembro": v.get("nombre_miembro", ""),
-            })
-
-        return jsonify({"ventas": ventas, "total": total, "pages": pages, "page": page}), 200
-
-    except Exception as e:
-        print(f"Error en listar_ventas: {e}")
-        return jsonify({"ventas": [], "total": 0}), 500
+        cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(

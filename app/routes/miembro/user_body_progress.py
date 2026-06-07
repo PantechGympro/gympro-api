@@ -177,7 +177,10 @@ def add_body_progress():
             nuevo_progreso["bmi"] = bmi
             
         db.progreso_fisico.insert_one(nuevo_progreso)
-        
+
+        # ── Analytics snapshot ──────────────────────────────────────────────────
+        _append_historial_metricas(db, miembro, nuevo_progreso)
+
         return jsonify({
             "message": "Progreso registrado correctamente",
             "progreso": {
@@ -196,92 +199,65 @@ def add_body_progress():
         return jsonify({"error": str(e)}), 500
 
 
-# ============================================
-# FUNCIONES AUXILIARES
-# ============================================
+# ═══════════════════════════════════════════════════════════════
+# HISTORIAL DE MÉTRICAS — time-series para analytics / ML
+# ═══════════════════════════════════════════════════════════════
 
-def _calcular_imc(peso, estatura):
+@user_body_progress_bp.route('/api/user/metrics/history', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_metrics_history():
+    """
+    Devuelve el historial completo de métricas del miembro ordenado por timestamp.
+    Útil para gráficas de progreso y modelos de predicción.
+    Query params:
+      limit  (default 50)  — máximo de registros a devolver
+      campo  (opcional)    — filtrar un campo específico ('peso', 'cintura', etc.)
+    """
     try:
-        if estatura > 0 and peso > 0:
-            return peso / (estatura ** 2)
-        return 0
-    except:
-        return 0
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
 
-def _calcular_grasa_corporal(peso, imc, sexo):
-    try:
-        edad = 30
-        sexo_valor = 1 if sexo == "M" else 0
-        grasa = (1.20 * imc) + (0.23 * edad) - (10.8 * sexo_valor) - 5.4
-        
-        if sexo == "M":
-            return max(5, min(35, round(grasa, 1)))
-        else:
-            return max(10, min(45, round(grasa, 1)))
-    except:
-        return 22 if sexo == "F" else 18
+        limit = request.args.get("limit", 50, type=int)
+        campo = request.args.get("campo")
 
-def _calcular_peso_meta(peso_inicial, imc_actual, sexo):
-    if imc_actual >= 18.5 and imc_actual <= 24.9:
-        return peso_inicial
-    elif imc_actual > 24.9:
-        return peso_inicial * 0.90
-    else:
-        return peso_inicial * 1.10
+        cursor = db.historial_metricas.find(
+            {"id_miembro": miembro["_id"]}
+        ).sort("timestamp", 1).limit(limit)
 
-def _calcular_grasa_meta(sexo):
-    if sexo == "M":
-        return 15
-    else:
-        return 23
-
-def _obtener_progreso_mensual_real(db, id_miembro, peso_inicial, peso_meta):
-    try:
-        now = datetime.now()
-        meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-        
-        # Fecha límite: hace 6 meses
-        hace_6_meses = datetime.combine((now - timedelta(days=180)).date(), datetime.min.time())
-        
-        progresos = list(db.progreso_fisico.find({
-            "id_miembro": id_miembro,
-            "fecha_registro": {"$gte": hace_6_meses}
-        }).sort("fecha_registro", 1))
-        
-        if not progresos:
-            return []
-            
-        progreso_por_mes = {}
-        diferencia_total = abs(peso_inicial - peso_meta) if peso_inicial != peso_meta else 1
-        
-        for progreso in progresos:
-            # Obtener el mes de la fecha registrada
-            fecha_reg = progreso.get("fecha_registro")
-            if isinstance(fecha_reg, str):
-                fecha_reg = datetime.strptime(fecha_reg[:10], "%Y-%m-%d")
-                
-            mes_num = fecha_reg.month - 1
-            mes_nombre = meses[mes_num]
-            
-            peso_actual = float(progreso.get("peso", peso_inicial) or peso_inicial)
-            diferencia_actual = abs(peso_inicial - peso_actual)
-            porcentaje = min(100, (diferencia_actual / diferencia_total * 100))
-            
-            progreso_por_mes[mes_nombre] = {
-                "mes": mes_nombre,
-                "porcentaje": max(0, round(porcentaje))
+        registros = []
+        for r in cursor:
+            entry = {
+                "timestamp": r["timestamp"].isoformat() if isinstance(r.get("timestamp"), datetime) else str(r.get("timestamp")),
+                "peso":   r.get("peso"),
+                "bmi":    r.get("bmi"),
+                "cintura": r.get("cintura"),
+                "cadera":  r.get("cadera"),
+                "pecho":   r.get("pecho"),
+                "brazo_derecho":   r.get("brazo_derecho"),
+                "brazo_izquierdo": r.get("brazo_izquierdo"),
+                "muslo_derecho":   r.get("muslo_derecho"),
+                "muslo_izquierdo": r.get("muslo_izquierdo"),
+                "pantorrilla":     r.get("pantorrilla"),
             }
-            
-        resultado = []
-        for i in range(6):
-            mes_idx = (now.month - 6 + i) % 12
-            mes_nombre = meses[mes_idx]
-            
-            if mes_nombre in progreso_por_mes:
-                resultado.append(progreso_por_mes[mes_nombre])
-                
-        return resultado
-        
+            if campo:
+                # Devuelve solo el campo solicitado + timestamp
+                registros.append({"timestamp": entry["timestamp"], campo: entry.get(campo)})
+            else:
+                registros.append(entry)
+
+        return jsonify({"history": registros, "count": len(registros)}), 200
+
     except Exception as e:
-        print(f"Error en _obtener_progreso_mensual_real: {e}")
-        return []
+        print(f"Error en get_metrics_history: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _append_historial_metricas(db, miembro, progreso):
+    """
+    Snapshot append-only en historial_metricas. No-bloqueante.
+    Inclu

@@ -231,10 +231,6 @@ def update_user_health():
 
         db.progreso_fisico.insert_one(nuevo_progreso)
 
-        return jsonify({
-            "message": "Datos de salud actualizados correctamente"
-        }), 201
-
-    except Exception as e:
-        print(f"Error en update_user_health: {e}")
-        return jsonify({"error": str(e)}), 500
+        # ── Snapshot de analytics: historial_metricas ──────────────────────────
+        # Colección denormalizada para modelos ML y dashboards de gym.
+        # Incluye contexto 
