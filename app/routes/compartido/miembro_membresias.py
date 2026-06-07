@@ -85,10 +85,11 @@ def obtener_membresia_activa():
     try:
         db = get_db()
         user_id_str = get_jwt_identity()
-        user_id = ObjectId(user_id_str)
+        # JWT identity is the PostgreSQL user id (integer string), not a Mongo ObjectId
+        user_pg_id = int(user_id_str)
 
         # 🔍 Buscar el miembro asociado al usuario
-        miembro = db.miembros.find_one({"id_usuario": user_id})
+        miembro = db.miembros.find_one({"id_usuario_pg": user_pg_id})
         
         if not miembro:
             return jsonify({
@@ -152,5 +153,4 @@ def obtener_membresia_activa():
         }), 200
 
     except Exception as e:
-        print(f"❌ Error en obtener_membresia_activa: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f
