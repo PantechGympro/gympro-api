@@ -225,10 +225,18 @@ def get_ollama_status() -> dict:
 
 # ─── Llamada al LLM ──────────────────────────────────────────────────────────
 
-def call_ollama(system_prompt: str, document_text: str, max_tokens: int = 4096) -> str:
+def call_ollama(
+    system_prompt: str,
+    document_text: str,
+    max_tokens: int = 4096,
+    timeout: int = 270,  # segundos — bajo el límite de gunicorn (300s)
+) -> str:
     """
     Envía el documento al LLM local vía Ollama y devuelve el JSON crudo.
     `format='json'` fuerza salida JSON válido — característica nativa de Ollama.
+
+    `timeout` debe ser menor que el gunicorn --timeout (300s) para que el worker
+    no sea SIGKILLed antes de que requests pueda devolver el TimeoutError controlado.
     """
     payload = {
         "model":  OLLAMA_MODEL,
@@ -244,7 +252,7 @@ def call_ollama(system_prompt: str, document_text: str, max_tokens: int = 4096) 
     resp = _requests.post(
         f"{OLLAMA_BASE}/api/generate",
         json=payload,
-        timeout=180,  # Modelos locales en CPU pueden tardar 60-120s
+        timeout=timeout,
     )
     resp.raise_for_status()
     return resp.json().get("response", "") or ""

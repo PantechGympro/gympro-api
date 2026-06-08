@@ -407,45 +407,48 @@ def import_diet_ai():
       3. Retorna  — JSON estructurado listo para que el entrenador confirme y guarde
 
     El modelo corre completamente en Docker, sin API externa ni costo por token.
+    Cuando se tenga un PDF de referencia se puede añadir un parser determinístico
+    (igual que en import_routines_ai) para evitar el LLM en formatos conocidos.
     """
-    from app.utils.etl_ollama import (  # noqa: PLC0415
-        check_ollama_ready, extract_text, call_ollama
-    )
-
-    ready, msg = check_ollama_ready()
-    if not ready:
-        return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
-
-    archivo = request.files.get("archivo")
-    if not archivo:
-        return jsonify({"error": "No se recibió archivo"}), 400
-
-    nombre_archivo = archivo.filename or ""
-    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
-    if ext not in {"pdf", "xlsx", "xls"}:
-        return jsonify({
-            "error": "Formato no soportado",
-            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
-        }), 400
-
-    # ── Extract ──────────────────────────────────────────────────────────────
     try:
-        contenido = archivo.read()
-        raw_text  = extract_text(contenido, ext)
-    except Exception as e:
-        return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+        from app.utils.etl_ollama import (  # noqa: PLC0415
+            check_ollama_ready, extract_text, call_ollama
+        )
 
-    if not raw_text.strip():
-        return jsonify({
-            "error": "El archivo no contiene texto extraíble",
-            "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
-        }), 422
+        # ── Validar archivo antes de pinear Ollama ────────────────────────────
+        archivo = request.files.get("archivo")
+        if not archivo:
+            return jsonify({"error": "No se recibió archivo"}), 400
 
-    # ── Transform — LLM local ────────────────────────────────────────────────
-    try:
+        nombre_archivo = archivo.filename or ""
+        ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+        if ext not in {"pdf", "xlsx", "xls"}:
+            return jsonify({
+                "error": "Formato no soportado",
+                "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+            }), 400
+
+        # ── Extract ───────────────────────────────────────────────────────────
+        try:
+            contenido = archivo.read()
+            raw_text  = extract_text(contenido, ext)
+        except Exception as e:
+            return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+
+        if not raw_text.strip():
+            return jsonify({
+                "error": "El archivo no contiene texto extraíble",
+                "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
+            }), 422
+
+        # ── Verificar Ollama (solo si el archivo es válido) ───────────────────
+        ready, msg = check_ollama_ready()
+        if not ready:
+            return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
+
+        # ── Transform — LLM local ─────────────────────────────────────────────
         respuesta_raw = call_ollama(_ETL_SYSTEM_PROMPT, raw_text[:4_000])
 
-        # Limpiar bloque markdown si el modelo lo agrega igualmente
         texto = respuesta_raw.strip()
         if texto.startswith("```"):
             lineas = texto.split("\n")
@@ -453,26 +456,32 @@ def import_diet_ai():
         if texto.endswith("```"):
             texto = texto[: texto.rfind("```")].strip()
 
-        plan = json.loads(texto)
+        try:
+            plan = json.loads(texto)
+        except json.JSONDecodeError:
+            return jsonify({
+                "error": "La IA no pudo estructurar el documento",
+                "detalle": (
+                    "El archivo tiene un formato no reconocido. "
+                    "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
+                ),
+            }), 422
+
         if not isinstance(plan, dict):
             return jsonify({
                 "error": "La IA devolvió una respuesta vacía",
-                "detalle": "El modelo no pudo extraer información del documento.",
+                "detalle": (
+                    "El modelo no pudo extraer información del documento. "
+                    "Intenta con un archivo más simple o con menos páginas."
+                ),
             }), 422
+
         return jsonify({
             "success": True,
             "plan":    plan,
             "archivo": nombre_archivo,
         }), 200
 
-    except json.JSONDecodeError:
-        return jsonify({
-            "error": "La IA no pudo estructurar el documento",
-            "detalle": (
-                "El archivo puede tener un formato muy inusual. "
-                "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
-            ),
-        }), 422
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
