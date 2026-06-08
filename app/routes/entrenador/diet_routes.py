@@ -4,7 +4,7 @@ routes/entrenador/diet_routes.py — Módulo completo de Nutrición para entrena
 Endpoints:
   Recetas  — /api/trainer/recipes          CRUD  (biblioteca privada por entrenador)
   Dietas   — /api/trainer/diets            CRUD  (planes multi-semana, multi-día)
-  AI ETL   — /api/trainer/diets/import-ai  POST  (PDF/Excel → plan estructurado vía Claude)
+  AI ETL   — /api/trainer/diets/import-ai  POST  (PDF/Excel → plan estructurado vía Ollama (LLM local))
 
 Colecciones MongoDB:
   mdb.recetas  — biblioteca de recetas del entrenador
@@ -323,6 +323,7 @@ def assign_diet(diet_id):
         return jsonify({"error": str(e)}), 500
 
 
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  AI ETL — Importar plan desde PDF / Excel usando LLM local (Ollama)
 #
@@ -335,13 +336,10 @@ def assign_diet(diet_id):
 #  Ollama corre como servicio Docker en http://ollama:11434
 # ═════════════════════════════════════════════════════════════════════════════
 
-import requests as _requests  # alias para evitar conflicto con flask.request
+# ─── Prompt ETL específico para planes alimenticios ──────────────────────────
+# Las funciones extract_text / check_ollama_ready / call_ollama se importan
+# desde app.utils.etl_ollama (módulo compartido con el ETL de rutinas).
 
-# Configuración desde variables de entorno (con defaults)
-_OLLAMA_BASE  = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL",    "phi3:mini")
-
-# Prompt del sistema — instrucciones de extracción
 _ETL_SYSTEM_PROMPT = """\
 Eres un nutricionista experto en análisis de planes alimenticios.
 Tu tarea es extraer la información de un documento de dieta y devolver
@@ -398,78 +396,6 @@ Reglas importantes:
 - RESPONDE SOLO CON EL JSON, nada más"""
 
 
-def _extract_text(contenido: bytes, ext: str) -> str:
-    """Extract raw text from PDF or Excel bytes."""
-    if ext == "pdf":
-        import pdfplumber  # noqa: PLC0415
-        with pdfplumber.open(io.BytesIO(contenido)) as pdf:
-            return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
-
-    if ext in {"xlsx", "xls"}:
-        import openpyxl  # noqa: PLC0415
-        wb = openpyxl.load_workbook(io.BytesIO(contenido), data_only=True)
-        lines: list[str] = []
-        for ws in wb.worksheets:
-            lines.append(f"[Hoja: {ws.title}]")
-            for row in ws.iter_rows(values_only=True):
-                celdas = [str(c) if c is not None else "" for c in row]
-                if any(c.strip() for c in celdas):
-                    lines.append(" | ".join(celdas))
-        return "\n".join(lines)
-
-    raise ValueError(f"Formato no soportado: .{ext}")
-
-
-def _check_ollama_ready() -> tuple[bool, str]:
-    """Verifica que Ollama esté activo y el modelo disponible."""
-    try:
-        r = _requests.get(f"{_OLLAMA_BASE}/api/tags", timeout=5)
-        r.raise_for_status()
-        modelos = [m["name"] for m in r.json().get("models", [])]
-        modelo_disponible = any(
-            _OLLAMA_MODEL in m or m.startswith(_OLLAMA_MODEL.split(":")[0])
-            for m in modelos
-        )
-        if not modelo_disponible:
-            return False, (
-                f"El modelo '{_OLLAMA_MODEL}' no está descargado. "
-                f"Ejecuta: docker compose exec ollama ollama pull {_OLLAMA_MODEL}"
-            )
-        return True, "ok"
-    except _requests.exceptions.ConnectionError:
-        return False, (
-            "Ollama no está disponible. "
-            "Asegúrate de que el servicio esté corriendo: docker compose up -d ollama"
-        )
-    except Exception as e:
-        return False, f"Error verificando Ollama: {e}"
-
-
-def _call_ollama(prompt_text: str) -> str:
-    """
-    Llama al LLM local vía Ollama API.
-    Usa format='json' para forzar salida JSON válido.
-    """
-    payload = {
-        "model":  _OLLAMA_MODEL,
-        "prompt": f"{_ETL_SYSTEM_PROMPT}\n\nDOCUMENTO A PROCESAR:\n{prompt_text}",
-        "stream": False,
-        "format": "json",           # Fuerza respuesta JSON válido — característica clave de Ollama
-        "options": {
-            "temperature":  0.1,    # Baja temperatura = respuestas deterministas y precisas
-            "num_predict":  4096,   # Tokens máximos de respuesta
-            "top_p":        0.9,
-        },
-    }
-    resp = _requests.post(
-        f"{_OLLAMA_BASE}/api/generate",
-        json=payload,
-        timeout=120,   # Los modelos locales pueden tardar 30-60s en CPUs
-    )
-    resp.raise_for_status()
-    return resp.json().get("response", "")
-
-
 @diet_bp.route("/diets/import-ai", methods=["POST"])
 @jwt_required()
 @require_tenant
@@ -480,4 +406,77 @@ def import_diet_ai():
       2. Transform — envía al LLM local (phi3:mini / llama3.2:3b / mistral:7b)
       3. Retorna  — JSON estructurado listo para que el entrenador confirme y guarde
 
-    El modelo corre completamente en Docker, sin A
+    El modelo corre completamente en Docker, sin API externa ni costo por token.
+    """
+    from app.utils.etl_ollama import (  # noqa: PLC0415
+        check_ollama_ready, extract_text, call_ollama
+    )
+
+    ready, msg = check_ollama_ready()
+    if not ready:
+        return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
+
+    archivo = request.files.get("archivo")
+    if not archivo:
+        return jsonify({"error": "No se recibió archivo"}), 400
+
+    nombre_archivo = archivo.filename or ""
+    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+    if ext not in {"pdf", "xlsx", "xls"}:
+        return jsonify({
+            "error": "Formato no soportado",
+            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+        }), 400
+
+    # ── Extract ──────────────────────────────────────────────────────────────
+    try:
+        contenido = archivo.read()
+        raw_text  = extract_text(contenido, ext)
+    except Exception as e:
+        return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+
+    if not raw_text.strip():
+        return jsonify({
+            "error": "El archivo no contiene texto extraíble",
+            "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
+        }), 422
+
+    # ── Transform — LLM local ────────────────────────────────────────────────
+    try:
+        respuesta_raw = call_ollama(_ETL_SYSTEM_PROMPT, raw_text[:12_000])
+
+        # Limpiar bloque markdown si el modelo lo agrega igualmente
+        texto = respuesta_raw.strip()
+        if texto.startswith("```"):
+            lineas = texto.split("\n")
+            texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
+        if texto.endswith("```"):
+            texto = texto[: texto.rfind("```")].strip()
+
+        plan = json.loads(texto)
+        return jsonify({
+            "success": True,
+            "plan":    plan,
+            "archivo": nombre_archivo,
+        }), 200
+
+    except json.JSONDecodeError:
+        return jsonify({
+            "error": "La IA no pudo estructurar el documento",
+            "detalle": (
+                "El archivo puede tener un formato muy inusual. "
+                "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
+            ),
+        }), 422
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
+
+
+@diet_bp.route("/diets/ai-status", methods=["GET"])
+@jwt_required()
+@require_tenant
+def ollama_status():
+    """Verifica disponibilidad de Ollama y devuelve info del modelo activo."""
+    from app.utils.etl_ollama import get_ollama_status  # noqa: PLC0415
+    return jsonify(get_ollama_status()), 200

@@ -1757,4 +1757,170 @@ def _format_fecha(ts):
             return ts.strftime('%d/%m/%Y')
     except Exception:
         return '-'
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  AI ETL — Importar rutinas y ejercicios desde PDF / Excel (Ollama)
+#
+#  Casos de uso:
+#    1. Entrenador migra su biblioteca de rutinas desde otro sistema
+#    2. Cliente sube historial de entrenamiento de un gimnasio anterior
+#
+#  Flujo:
+#    Extract  — pdfplumber / openpyxl → texto crudo del documento
+#    Transform — Ollama LLM local extrae estructura de rutinas y ejercicios
+#    Retorna  — JSON para previsualizar y confirmar antes de guardar
+# ═════════════════════════════════════════════════════════════════════════════
+
+_ROUTINE_ETL_PROMPT = """
+Eres un experto en entrenamiento físico y planificación de rutinas de gimnasio.
+Tu tarea es extraer la información del documento y devolver ÚNICAMENTE un objeto JSON
+válido, sin explicaciones, sin markdown, sin texto extra.
+
+La estructura JSON que debes devolver es exactamente:
+{
+  "rutinas": [
+    {
+      "name": "nombre de la rutina",
+      "category": "Fuerza|Hipertrofia|Cardio|Funcional|Movilidad|General",
+      "difficulty": "Principiante|Intermedio|Avanzado",
+      "duration_minutes": <número entero o 60>,
+      "description": "descripción breve de la rutina",
+      "days": [
+        {
+          "day": "Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo",
+          "muscleGroup": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Full Body|Cardio",
+          "exercises": [
+            {
+              "name": "nombre del ejercicio",
+              "sets": "3",
+              "reps": "12",
+              "peso": "descripción del peso o intensidad",
+              "notes": "notas técnicas o de ejecución"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "ejercicios": [
+    {
+      "nombre": "nombre del ejercicio",
+      "grupo_muscular": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Glúteos|Cuádriceps|Isquiotibiales|Full Body",
+      "tipo": "Fuerza|Cardio|Flexibilidad|Funcional|Potencia",
+      "series": <número entero o null>,
+      "repeticiones": "descripción de repeticiones",
+      "descripcion": "descripción o instrucciones del ejercicio"
+    }
+  ]
+}
+
+Reglas importantes:
+- Extrae TODAS las rutinas y días que encuentres en el documento
+- Si no hay estructura de días, agrupa los ejercicios en un solo día "Lunes"
+- Para ejercicios sin número de series usa 3 como default
+- Para ejercicios sin repeticiones usa "12" como default
+- El array "ejercicios" debe contener ejercicios únicos del documento para la biblioteca
+- Si no encuentras rutinas estructuradas, devuelve "rutinas": []
+- Si no encuentras ejercicios individuales, devuelve "ejercicios": []
+- RESPONDE SOLO CON EL JSON, nada más"""
+
+
+@trainer_bp.route("/routines/ai-status", methods=["GET"])
+@jwt_required()
+@require_tenant
+def routine_ai_status():
+    """Verifica disponibilidad de Ollama para el ETL de rutinas."""
+    from app.utils.etl_ollama import get_ollama_status  # noqa: PLC0415
+    return jsonify(get_ollama_status()), 200
+
+
+@trainer_bp.route("/routines/import-ai", methods=["POST"])
+@jwt_required()
+@require_tenant
+def import_routines_ai():
+    """
+    ETL con IA local (Ollama):
+      1. Extract  — lee texto del PDF o Excel subido
+      2. Transform — Ollama extrae rutinas y ejercicios estructurados
+      3. Retorna  — JSON para previsualizar y confirmar antes de guardar
+
+    El entrenador puede subir:
+      - Su propia biblioteca de rutinas (migración desde otro sistema)
+      - El historial de entrenamiento de un cliente nuevo
+    """
+    from app.utils.etl_ollama import (  # noqa: PLC0415
+        check_ollama_ready, extract_text, call_ollama
+    )
+
+    ready, msg = check_ollama_ready()
+    if not ready:
+        return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
+
+    archivo = request.files.get("archivo")
+    if not archivo:
+        return jsonify({"error": "No se recibió archivo"}), 400
+
+    nombre_archivo = archivo.filename or ""
+    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+    if ext not in {"pdf", "xlsx", "xls"}:
+        return jsonify({
+            "error": "Formato no soportado",
+            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+        }), 400
+
+    # ── Extract ──────────────────────────────────────────────────────────────
+    try:
+        contenido = archivo.read()
+        raw_text  = extract_text(contenido, ext)
+    except Exception as e:
+        return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+
+    if not raw_text.strip():
+        return jsonify({
+            "error": "El archivo no contiene texto extraíble",
+            "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
+        }), 422
+
+    # ── Transform — LLM local ────────────────────────────────────────────────
+    try:
+        import json as _json  # noqa: PLC0415
+        respuesta_raw = call_ollama(_ROUTINE_ETL_PROMPT, raw_text[:12_000])
+
+        texto = respuesta_raw.strip()
+        if texto.startswith("```"):
+            lineas = texto.split("\n")
+            texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
+        if texto.endswith("```"):
+            texto = texto[: texto.rfind("```")].strip()
+
+        resultado = _json.loads(texto)
+
+        # Normalizar estructura mínima
+        rutinas   = resultado.get("rutinas",   [])
+        ejercicios = resultado.get("ejercicios", [])
+
+        return jsonify({
+            "success":    True,
+            "rutinas":    rutinas,
+            "ejercicios": ejercicios,
+            "archivo":    nombre_archivo,
+            "resumen": {
+                "total_rutinas":    len(rutinas),
+                "total_ejercicios": len(ejercicios),
+                "total_dias": sum(len(r.get("days", [])) for r in rutinas),
+            },
+        }), 200
+
+    except _json.JSONDecodeError:
+        return jsonify({
+            "error": "La IA no pudo estructurar el documento",
+            "detalle": (
+                "El archivo puede tener un formato muy inusual. "
+                "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
+            ),
+        }), 422
+    except Exception as e:
+        import traceback as _tb  # noqa: PLC0415
+        print(_tb.format_exc())
+        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
