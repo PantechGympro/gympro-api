@@ -324,30 +324,46 @@ def assign_diet(diet_id):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  AI ETL — Importar plan desde PDF / Excel
+#  AI ETL — Importar plan desde PDF / Excel usando LLM local (Ollama)
+#
+#  Arquitectura ETL:
+#    Extract  — pdfplumber / openpyxl → texto crudo
+#    Transform — LLM local (phi3:mini, llama3.2:3b, mistral:7b…) vía Ollama
+#    Load      — JSON estructurado → mdb.dietas (MongoDB)
+#
+#  Sin API externa, sin costo, sin internet requerido.
+#  Ollama corre como servicio Docker en http://ollama:11434
 # ═════════════════════════════════════════════════════════════════════════════
 
-_AI_PROMPT = """\
-Eres un nutricionista experto. Lee el documento de plan alimenticio y extrae \
-toda la información estructurada.
+import requests as _requests  # alias para evitar conflicto con flask.request
 
-Devuelve SOLO un objeto JSON válido con esta estructura (sin markdown, sin texto extra):
+# Configuración desde variables de entorno (con defaults)
+_OLLAMA_BASE  = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL",    "phi3:mini")
+
+# Prompt del sistema — instrucciones de extracción
+_ETL_SYSTEM_PROMPT = """\
+Eres un nutricionista experto en análisis de planes alimenticios.
+Tu tarea es extraer la información de un documento de dieta y devolver
+ÚNICAMENTE un objeto JSON válido, sin explicaciones, sin markdown, sin texto extra.
+
+La estructura JSON que debes devolver es exactamente:
 {
   "nombre": "nombre descriptivo del plan",
   "objetivo": "perder_peso|ganar_masa|mantenimiento|definicion|rendimiento",
-  "calorias_meta": <número o null>,
+  "calorias_meta": <número entero o null>,
   "proteinas_meta_g": <número o null>,
   "carbohidratos_meta_g": <número o null>,
   "grasas_meta_g": <número o null>,
-  "duracion_semanas": <número, default 1>,
-  "notas": "observaciones generales",
+  "duracion_semanas": <número entero, mínimo 1>,
+  "notas": "observaciones generales del plan",
   "semanas": [
     {
       "numero": 1,
       "notas": "",
       "dias": [
         {
-          "dia": "lunes|martes|miercoles|jueves|viernes|sabado|domingo",
+          "dia": "lunes",
           "comidas": [
             {
               "nombre": "Desayuno",
@@ -355,7 +371,7 @@ Devuelve SOLO un objeto JSON válido con esta estructura (sin markdown, sin text
               "tiempo_desde_anterior_min": null,
               "items": [
                 {
-                  "nombre_alimento": "nombre del alimento",
+                  "nombre_alimento": "nombre del alimento o receta",
                   "cantidad": "100",
                   "unidad": "g",
                   "calorias": <número o null>,
@@ -372,15 +388,86 @@ Devuelve SOLO un objeto JSON válido con esta estructura (sin markdown, sin text
   ]
 }
 
-Reglas:
-- Si el plan es igual todos los días, crea 7 días (lunes a domingo) con el mismo contenido
-- Si hay días distintos, crea solo los que aparecen
-- Si hay varias semanas diferenciadas, crea múltiples semanas
-- Infiere el objetivo del contexto si no está explícito
-- Si falta un valor numérico usa null
+Reglas importantes:
+- dias válidos: lunes, martes, miercoles, jueves, viernes, sabado, domingo
+- Si el plan es igual cada día, crea los 7 días con el mismo contenido
+- Si hay días distintos, crea solo los que aparecen en el documento
+- Si hay varias semanas diferenciadas, crea múltiples semanas en el array
+- Infiere el objetivo del contexto (perder peso, ganar masa, etc.)
+- Usa null para valores numéricos no especificados
+- RESPONDE SOLO CON EL JSON, nada más"""
 
-DOCUMENTO:
-"""
+
+def _extract_text(contenido: bytes, ext: str) -> str:
+    """Extract raw text from PDF or Excel bytes."""
+    if ext == "pdf":
+        import pdfplumber  # noqa: PLC0415
+        with pdfplumber.open(io.BytesIO(contenido)) as pdf:
+            return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+
+    if ext in {"xlsx", "xls"}:
+        import openpyxl  # noqa: PLC0415
+        wb = openpyxl.load_workbook(io.BytesIO(contenido), data_only=True)
+        lines: list[str] = []
+        for ws in wb.worksheets:
+            lines.append(f"[Hoja: {ws.title}]")
+            for row in ws.iter_rows(values_only=True):
+                celdas = [str(c) if c is not None else "" for c in row]
+                if any(c.strip() for c in celdas):
+                    lines.append(" | ".join(celdas))
+        return "\n".join(lines)
+
+    raise ValueError(f"Formato no soportado: .{ext}")
+
+
+def _check_ollama_ready() -> tuple[bool, str]:
+    """Verifica que Ollama esté activo y el modelo disponible."""
+    try:
+        r = _requests.get(f"{_OLLAMA_BASE}/api/tags", timeout=5)
+        r.raise_for_status()
+        modelos = [m["name"] for m in r.json().get("models", [])]
+        modelo_disponible = any(
+            _OLLAMA_MODEL in m or m.startswith(_OLLAMA_MODEL.split(":")[0])
+            for m in modelos
+        )
+        if not modelo_disponible:
+            return False, (
+                f"El modelo '{_OLLAMA_MODEL}' no está descargado. "
+                f"Ejecuta: docker compose exec ollama ollama pull {_OLLAMA_MODEL}"
+            )
+        return True, "ok"
+    except _requests.exceptions.ConnectionError:
+        return False, (
+            "Ollama no está disponible. "
+            "Asegúrate de que el servicio esté corriendo: docker compose up -d ollama"
+        )
+    except Exception as e:
+        return False, f"Error verificando Ollama: {e}"
+
+
+def _call_ollama(prompt_text: str) -> str:
+    """
+    Llama al LLM local vía Ollama API.
+    Usa format='json' para forzar salida JSON válido.
+    """
+    payload = {
+        "model":  _OLLAMA_MODEL,
+        "prompt": f"{_ETL_SYSTEM_PROMPT}\n\nDOCUMENTO A PROCESAR:\n{prompt_text}",
+        "stream": False,
+        "format": "json",           # Fuerza respuesta JSON válido — característica clave de Ollama
+        "options": {
+            "temperature":  0.1,    # Baja temperatura = respuestas deterministas y precisas
+            "num_predict":  4096,   # Tokens máximos de respuesta
+            "top_p":        0.9,
+        },
+    }
+    resp = _requests.post(
+        f"{_OLLAMA_BASE}/api/generate",
+        json=payload,
+        timeout=120,   # Los modelos locales pueden tardar 30-60s en CPUs
+    )
+    resp.raise_for_status()
+    return resp.json().get("response", "")
 
 
 @diet_bp.route("/diets/import-ai", methods=["POST"])
@@ -388,105 +475,9 @@ DOCUMENTO:
 @require_tenant
 def import_diet_ai():
     """
-    ETL con IA: extrae un plan alimenticio de un PDF o archivo Excel
-    y devuelve la estructura JSON lista para confirmar y guardar.
+    ETL con IA local (Ollama):
+      1. Extract  — lee texto del PDF o Excel subido
+      2. Transform — envía al LLM local (phi3:mini / llama3.2:3b / mistral:7b)
+      3. Retorna  — JSON estructurado listo para que el entrenador confirme y guarde
 
-    Requiere ANTHROPIC_API_KEY en el entorno.
-    """
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return jsonify({
-            "error": "ANTHROPIC_API_KEY no configurada",
-            "detalle": (
-                "Agrega ANTHROPIC_API_KEY=<tu_clave> al archivo api/.env "
-                "y reconstruye el contenedor con: "
-                "docker compose build --no-cache api && docker compose up -d api"
-            ),
-        }), 503
-
-    archivo = request.files.get("archivo")
-    if not archivo:
-        return jsonify({"error": "No se recibió archivo"}), 400
-
-    nombre_archivo = archivo.filename or ""
-    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
-
-    # ── Extracción de texto ──────────────────────────────────────────────────
-    raw_text = ""
-    try:
-        contenido = archivo.read()
-
-        if ext == "pdf":
-            import pdfplumber  # noqa: PLC0415
-            with pdfplumber.open(io.BytesIO(contenido)) as pdf:
-                partes = [p.extract_text() or "" for p in pdf.pages]
-                raw_text = "\n\n".join(partes)
-
-        elif ext in {"xlsx", "xls"}:
-            import openpyxl  # noqa: PLC0415
-            wb = openpyxl.load_workbook(io.BytesIO(contenido), data_only=True)
-            lines: list[str] = []
-            for ws in wb.worksheets:
-                lines.append(f"[Hoja: {ws.title}]")
-                for row in ws.iter_rows(values_only=True):
-                    celdas = [str(c) if c is not None else "" for c in row]
-                    if any(c.strip() for c in celdas):
-                        lines.append(" | ".join(celdas))
-            raw_text = "\n".join(lines)
-
-        else:
-            return jsonify({
-                "error": "Formato no soportado",
-                "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
-            }), 400
-
-    except Exception as e:
-        return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
-
-    if not raw_text.strip():
-        return jsonify({
-            "error": "El archivo no contiene texto extraíble",
-            "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
-        }), 422
-
-    # ── LLM — Claude Haiku ───────────────────────────────────────────────────
-    try:
-        import anthropic  # noqa: PLC0415
-
-        client = anthropic.Anthropic(api_key=api_key)
-        mensaje = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": _AI_PROMPT + raw_text[:10_000],
-            }],
-        )
-
-        texto = mensaje.content[0].text.strip()
-
-        # Limpiar bloque markdown si el modelo lo agrega
-        if texto.startswith("```"):
-            lineas = texto.split("\n")
-            texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
-        if texto.endswith("```"):
-            texto = texto[: texto.rfind("```")].strip()
-
-        plan = json.loads(texto)
-        return jsonify({
-            "success":  True,
-            "plan":     plan,
-            "archivo":  nombre_archivo,
-        }), 200
-
-    except json.JSONDecodeError:
-        return jsonify({
-            "error": "La IA no pudo estructurar el documento",
-            "detalle": (
-                "El archivo puede tener un formato muy inusual. "
-                "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
-            ),
-        }), 422
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
+    El modelo corre completamente en Docker, sin A

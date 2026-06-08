@@ -42,7 +42,9 @@ stripe>=8.0.0,<9.0.0
 reportlab>=4.2.0          # Generacion de PDFs (US18)
 apscheduler>=3.10.0       # Scheduler de notificaciones (US21)
 
-# ── Módulo Nutrición + AI ETL ───────────────────────────────────────────────
-anthropic>=0.30.0         # Claude API — parsing de planes alimenticios (ETL IA)
+# ── Módulo Nutrición + AI ETL (Ollama — LLM local, sin API externa) ─────────
 pdfplumber>=0.11.0        # Extracción de texto desde PDFs para AI ETL
 # openpyxl ya incluido arriba para pandas
+# Ollama corre como servicio Docker separado (http://ollama:11434)
+# No requiere librería Python adicional — se usa requests (stdlib-compatible)
+# request
