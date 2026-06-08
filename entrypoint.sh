@@ -18,7 +18,8 @@ exec /venv/bin/gunicorn \
     --bind 0.0.0.0:5000 \
     --workers 4 \
     --worker-class sync \
-    --timeout 120 \
+    --timeout 300 \
+    --graceful-timeout 30 \
     --keep-alive 5 \
     --access-logfile - \
     --error-logfile - \

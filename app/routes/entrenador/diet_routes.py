@@ -443,7 +443,7 @@ def import_diet_ai():
 
     # ── Transform — LLM local ────────────────────────────────────────────────
     try:
-        respuesta_raw = call_ollama(_ETL_SYSTEM_PROMPT, raw_text[:12_000])
+        respuesta_raw = call_ollama(_ETL_SYSTEM_PROMPT, raw_text[:4_000])
 
         # Limpiar bloque markdown si el modelo lo agrega igualmente
         texto = respuesta_raw.strip()
@@ -454,6 +454,11 @@ def import_diet_ai():
             texto = texto[: texto.rfind("```")].strip()
 
         plan = json.loads(texto)
+        if not isinstance(plan, dict):
+            return jsonify({
+                "error": "La IA devolvió una respuesta vacía",
+                "detalle": "El modelo no pudo extraer información del documento.",
+            }), 422
         return jsonify({
             "success": True,
             "plan":    plan,

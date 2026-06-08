@@ -127,3 +127,7 @@ def create_app():
     @app.route("/api/uploads/<path:filename>")
     def serve_upload(filename):
         upload_dir = "/app/storage/uploads"
+        return send_from_directory(upload_dir, filename)
+
+    init_scheduler(app)
+    return app

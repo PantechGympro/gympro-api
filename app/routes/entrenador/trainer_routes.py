@@ -1840,64 +1840,88 @@ def routine_ai_status():
 @require_tenant
 def import_routines_ai():
     """
-    ETL con IA local (Ollama):
-      1. Extract  — lee texto del PDF o Excel subido
-      2. Transform — Ollama extrae rutinas y ejercicios estructurados
-      3. Retorna  — JSON para previsualizar y confirmar antes de guardar
+    ETL híbrido para importar rutinas desde PDF o Excel.
+
+    Estrategia en dos pasos:
+      1. Parser determinístico — reconoce el formato "Sesión N: Título ⏱ X min"
+         con tabla de ejercicios. Instantáneo, sin dependencias externas.
+      2. Fallback Ollama — si el PDF no sigue la estructura reconocida,
+         se envía al LLM local para extracción flexible.
 
     El entrenador puede subir:
-      - Su propia biblioteca de rutinas (migración desde otro sistema)
-      - El historial de entrenamiento de un cliente nuevo
+      - El historial de entrenamiento de un cliente de otro gimnasio/app
+      - Su propia biblioteca de rutinas en cualquier formato
     """
-    from app.utils.etl_ollama import (  # noqa: PLC0415
-        check_ollama_ready, extract_text, call_ollama
-    )
-
-    ready, msg = check_ollama_ready()
-    if not ready:
-        return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
-
-    archivo = request.files.get("archivo")
-    if not archivo:
-        return jsonify({"error": "No se recibió archivo"}), 400
-
-    nombre_archivo = archivo.filename or ""
-    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
-    if ext not in {"pdf", "xlsx", "xls"}:
-        return jsonify({
-            "error": "Formato no soportado",
-            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
-        }), 400
-
-    # ── Extract ──────────────────────────────────────────────────────────────
+    import json as _json  # noqa: PLC0415
     try:
-        contenido = archivo.read()
-        raw_text  = extract_text(contenido, ext)
-    except Exception as e:
-        return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+        from app.utils.etl_ollama import (  # noqa: PLC0415
+            extract_text, parse_routines_from_text, check_ollama_ready, call_ollama
+        )
 
-    if not raw_text.strip():
-        return jsonify({
-            "error": "El archivo no contiene texto extraíble",
-            "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
-        }), 422
+        archivo = request.files.get("archivo")
+        if not archivo:
+            return jsonify({"error": "No se recibió archivo"}), 400
 
-    # ── Transform — LLM local ────────────────────────────────────────────────
-    try:
-        import json as _json  # noqa: PLC0415
-        respuesta_raw = call_ollama(_ROUTINE_ETL_PROMPT, raw_text[:12_000])
+        nombre_archivo = archivo.filename or ""
+        ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+        if ext not in {"pdf", "xlsx", "xls"}:
+            return jsonify({
+                "error": "Formato no soportado",
+                "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+            }), 400
 
-        texto = respuesta_raw.strip()
-        if texto.startswith("```"):
-            lineas = texto.split("\n")
-            texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
-        if texto.endswith("```"):
-            texto = texto[: texto.rfind("```")].strip()
+        # ── Extract ──────────────────────────────────────────────────────────
+        try:
+            contenido = archivo.read()
+            raw_text  = extract_text(contenido, ext)
+        except Exception as e:
+            return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
 
-        resultado = _json.loads(texto)
+        if not raw_text.strip():
+            return jsonify({
+                "error": "El archivo no contiene texto extraíble",
+                "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
+            }), 422
 
-        # Normalizar estructura mínima
-        rutinas   = resultado.get("rutinas",   [])
+        # ── Transform: parser determinístico (rápido, sin LLM) ───────────────
+        resultado = parse_routines_from_text(raw_text)
+
+        if resultado is None:
+            # ── Fallback: LLM local (Ollama) ─────────────────────────────────
+            ready, msg = check_ollama_ready()
+            if not ready:
+                return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
+
+            respuesta_raw = call_ollama(_ROUTINE_ETL_PROMPT, raw_text[:4_000])
+
+            texto = respuesta_raw.strip()
+            if texto.startswith("```"):
+                lineas = texto.split("\n")
+                texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
+            if texto.endswith("```"):
+                texto = texto[: texto.rfind("```")].strip()
+
+            try:
+                resultado = _json.loads(texto)
+            except _json.JSONDecodeError:
+                return jsonify({
+                    "error": "La IA no pudo estructurar el documento",
+                    "detalle": (
+                        "El archivo tiene un formato no reconocido. "
+                        "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
+                    ),
+                }), 422
+
+            if not isinstance(resultado, dict):
+                return jsonify({
+                    "error": "La IA devolvió una respuesta vacía",
+                    "detalle": (
+                        "El modelo no pudo extraer información del documento. "
+                        "Intenta con un archivo más simple o con menos páginas."
+                    ),
+                }), 422
+
+        rutinas    = resultado.get("rutinas",   [])
         ejercicios = resultado.get("ejercicios", [])
 
         return jsonify({
@@ -1912,15 +1936,6 @@ def import_routines_ai():
             },
         }), 200
 
-    except _json.JSONDecodeError:
-        return jsonify({
-            "error": "La IA no pudo estructurar el documento",
-            "detalle": (
-                "El archivo puede tener un formato muy inusual. "
-                "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
-            ),
-        }), 422
     except Exception as e:
-        import traceback as _tb  # noqa: PLC0415
-        print(_tb.format_exc())
+        print(traceback.format_exc())
         return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
