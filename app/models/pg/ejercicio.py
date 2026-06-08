@@ -61,4 +61,8 @@ class Ejercicio(db.Model):
             "series":         self.series,
             "repeticiones":   self.repeticiones,
             "duracion_min":   self.duracion_min,
-            "imagenes":       self.imagenes or [
+            "imagenes":       self.imagenes or [],
+            "video":          self.video,
+            "activo":         self.activo,
+            "created_at":     self.created_at.isoformat() if self.created_at else None,
+        }

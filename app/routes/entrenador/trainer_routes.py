@@ -1914,3 +1914,19 @@ def _pct_growth(current, previous):
 
 def _format_fecha(ts):
     try:
+        if not ts:
+            return 'Nunca'
+        if isinstance(ts, str):
+            ts = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+        diff = datetime.now() - ts
+        days = diff.days
+        if days == 0:
+            return 'Hoy'
+        elif days == 1:
+            return 'Ayer'
+        elif days < 7:
+            return f'Hace {days} días'
+        else:
+            return ts.strftime('%d/%m/%Y')
+    except Exception:
+        return '-'
