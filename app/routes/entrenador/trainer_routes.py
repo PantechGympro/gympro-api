@@ -1243,12 +1243,13 @@ def assign_routine_to_member(routine_id):
 @jwt_required()
 @require_tenant
 def get_exercises():
-    """Lista todos los ejercicios activos del gimnasio."""
-    gym_id = g.tenant_id
-    search = request.args.get('search', '').strip()
-    grupo  = request.args.get('grupo_muscular', '').strip()
+    """Lista los ejercicios activos creados por el entrenador autenticado."""
+    gym_id      = g.tenant_id
+    trainer_id  = int(get_jwt_identity())
+    search      = request.args.get('search', '').strip()
+    grupo       = request.args.get('grupo_muscular', '').strip()
 
-    q = Ejercicio.query.filter_by(id_gimnasio=gym_id, activo=True)
+    q = Ejercicio.query.filter_by(id_gimnasio=gym_id, id_entrenador=trainer_id, activo=True)
     if search:
         q = q.filter(Ejercicio.nombre.ilike(f'%{search}%'))
     if grupo:
@@ -1262,19 +1263,21 @@ def get_exercises():
 @jwt_required()
 @require_tenant
 def create_exercise():
-    """Crea un ejercicio en la biblioteca del gimnasio."""
-    gym_id = g.tenant_id
-    data   = request.get_json() or {}
-    nombre = (data.get('nombre') or '').strip()
+    """Crea un ejercicio en la biblioteca personal del entrenador."""
+    gym_id      = g.tenant_id
+    trainer_id  = int(get_jwt_identity())
+    data        = request.get_json() or {}
+    nombre      = (data.get('nombre') or '').strip()
 
     if not nombre:
         return jsonify({'error': 'El nombre es requerido'}), 400
-    if Ejercicio.query.filter_by(id_gimnasio=gym_id, nombre=nombre).first():
-        return jsonify({'error': 'Ya existe un ejercicio con ese nombre'}), 409
+    if Ejercicio.query.filter_by(id_gimnasio=gym_id, id_entrenador=trainer_id, nombre=nombre).first():
+        return jsonify({'error': 'Ya tienes un ejercicio con ese nombre'}), 409
 
     raw_imgs = data.get('imagenes') or []
     ej = Ejercicio(
         id_gimnasio    = gym_id,
+        id_entrenador  = trainer_id,
         nombre         = nombre,
         descripcion    = data.get('descripcion') or None,
         grupo_muscular = data.get('grupo_muscular') or None,
@@ -1294,9 +1297,12 @@ def create_exercise():
 @jwt_required()
 @require_tenant
 def update_exercise(exercise_id):
-    """Actualiza un ejercicio de la biblioteca."""
-    gym_id = g.tenant_id
-    ej     = Ejercicio.query.filter_by(id=exercise_id, id_gimnasio=gym_id, activo=True).first()
+    """Actualiza un ejercicio de la biblioteca personal del entrenador."""
+    gym_id     = g.tenant_id
+    trainer_id = int(get_jwt_identity())
+    ej         = Ejercicio.query.filter_by(
+        id=exercise_id, id_gimnasio=gym_id, id_entrenador=trainer_id, activo=True
+    ).first()
     if not ej:
         return jsonify({'error': 'Ejercicio no encontrado'}), 404
 
@@ -1327,9 +1333,12 @@ def update_exercise(exercise_id):
 @jwt_required()
 @require_tenant
 def delete_exercise(exercise_id):
-    """Soft-delete de un ejercicio (activo=False)."""
-    gym_id = g.tenant_id
-    ej     = Ejercicio.query.filter_by(id=exercise_id, id_gimnasio=gym_id).first()
+    """Soft-delete de un ejercicio de la biblioteca personal del entrenador."""
+    gym_id     = g.tenant_id
+    trainer_id = int(get_jwt_identity())
+    ej         = Ejercicio.query.filter_by(
+        id=exercise_id, id_gimnasio=gym_id, id_entrenador=trainer_id
+    ).first()
     if not ej:
         return jsonify({'error': 'Ejercicio no encontrado'}), 404
 
@@ -1905,19 +1914,3 @@ def _pct_growth(current, previous):
 
 def _format_fecha(ts):
     try:
-        if not ts:
-            return 'Nunca'
-        if isinstance(ts, str):
-            ts = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
-        diff = datetime.now() - ts
-        days = diff.days
-        if days == 0:
-            return 'Hoy'
-        elif days == 1:
-            return 'Ayer'
-        elif days < 7:
-            return f'Hace {days} días'
-        else:
-            return ts.strftime('%d/%m/%Y')
-    except Exception:
-        return '-'

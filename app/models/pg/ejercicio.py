@@ -28,6 +28,12 @@ class Ejercicio(db.Model):
     duracion_min    = db.Column(db.Integer, nullable=True)      # para cardio (minutos)
     imagenes        = db.Column(db.JSON,    nullable=True)      # lista de base64 JPEG (max 3)
     video           = db.Column(db.Text,    nullable=True)      # base64 video comprimido (max 15 s)
+    id_entrenador   = db.Column(
+        db.Integer,
+        db.ForeignKey("usuarios.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     activo          = db.Column(db.Boolean, default=True, nullable=False)
     created_at      = db.Column(
         db.DateTime(timezone=True),
@@ -36,7 +42,7 @@ class Ejercicio(db.Model):
     )
 
     __table_args__ = (
-        db.UniqueConstraint("id_gimnasio", "nombre", name="uq_ejercicio_gym_nombre"),
+        db.UniqueConstraint("id_gimnasio", "id_entrenador", "nombre", name="uq_ejercicio_gym_trainer_nombre"),
     )
 
     gimnasio = db.relationship("Gimnasio", backref=db.backref("ejercicios", lazy="dynamic"))
@@ -55,8 +61,4 @@ class Ejercicio(db.Model):
             "series":         self.series,
             "repeticiones":   self.repeticiones,
             "duracion_min":   self.duracion_min,
-            "imagenes":       self.imagenes or [],
-            "video":          self.video,
-            "activo":         self.activo,
-            "created_at":     self.created_at.isoformat() if self.created_at else None,
-        }
+            "imagenes":       self.imagenes or [
