@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from sqlalchemy.pool import NullPool
 
 
@@ -6,6 +7,11 @@ class Config:
     # ── Seguridad ─────────────────────────────────────────────────────────────
     SECRET_KEY     = os.getenv("SECRET_KEY")
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+    # 8 horas — evita expiración accidental durante sesiones largas (e.g. Ollama
+    # puede tardar hasta 5 min por request; el default de 1h es demasiado corto
+    # para flujos de trabajo reales en un turno de entrenador).
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
 
     # DEBUG siempre False en producción; run.py lo sobreescribe en desarrollo.
     # Gunicorn ignora esta variable, pero la dejamos explícita como salvaguarda.
