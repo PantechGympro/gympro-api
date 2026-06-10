@@ -44,6 +44,7 @@ apscheduler>=3.10.0       # Scheduler de notificaciones (US21)
 
 # ── Módulo Nutrición + AI ETL (Ollama — LLM local, sin API externa) ─────────
 pdfplumber>=0.11.0        # Extracción de texto desde PDFs para AI ETL
+Pillow>=10.0.0            # Extracción y conversión de imágenes desde PDFs
 # openpyxl ya incluido arriba para pandas
 # Ollama corre como servicio Docker separado (http://ollama:11434)
 # No requiere librería Python adicional — se usa requests (stdlib-compatible)

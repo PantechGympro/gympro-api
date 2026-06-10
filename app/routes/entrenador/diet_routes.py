@@ -57,7 +57,20 @@ def _ser_dieta(doc: dict) -> dict:
     d["id"] = str(d.pop("_id"))
     if isinstance(d.get("fecha_creacion"), datetime):
         d["fecha_creacion"] = d["fecha_creacion"].strftime("%Y-%m-%d")
+    # ObjectId en id_miembro → string para serialización JSON
+    if hasattr(d.get("id_miembro"), "binary"):  # ObjectId check
+        d["id_miembro"] = str(d["id_miembro"])
     return d
+
+
+def _safe_int(val):
+    """Convierte val a int o None. Acepta '123', 123, None, ''. Rechaza ObjectId hex strings."""
+    if not val:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -171,6 +184,41 @@ def delete_recipe(recipe_id):
         return jsonify({"error": str(e)}), 500
 
 
+@diet_bp.route("/recipes/bulk-delete", methods=["POST"])
+@jwt_required()
+@require_tenant
+def bulk_delete_recipes():
+    """Elimina (soft-delete) múltiples recetas en una sola operación MongoDB."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json(force=True) or {}
+        ids        = data.get("ids", [])
+
+        if not ids or not isinstance(ids, list):
+            return jsonify({"error": "Se requiere lista 'ids'"}), 400
+
+        object_ids = []
+        for raw_id in ids:
+            try:
+                object_ids.append(ObjectId(raw_id))
+            except Exception:
+                pass  # ignorar IDs malformados
+
+        result = mdb.recetas.update_many(
+            {
+                "_id": {"$in": object_ids},
+                "id_entrenador_pg": trainer_id,
+                "id_gimnasio_pg": gym_id,
+            },
+            {"$set": {"activo": False}},
+        )
+        return jsonify({"success": True, "deleted": result.modified_count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  DIETAS — Planes alimenticios v2 (multi-semana, multi-día)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -215,10 +263,24 @@ def create_diet():
         if not nombre:
             return jsonify({"error": "El nombre es obligatorio"}), 400
 
+        id_miembro_pg = _safe_int(data.get("id_miembro_pg"))
+
+        # Resolver ObjectId de MongoDB del miembro para que el portal del miembro
+        # pueda encontrar el plan con su query habitual (id_miembro = ObjectId).
+        id_miembro_oid = None
+        if id_miembro_pg:
+            miembro_doc = mdb.miembros.find_one(
+                {"id_usuario_pg": id_miembro_pg, "id_gimnasio_pg": gym_id},
+                {"_id": 1},
+            )
+            if miembro_doc:
+                id_miembro_oid = miembro_doc["_id"]
+
         doc = {
             "id_entrenador_pg":      trainer_id,
             "id_gimnasio_pg":        gym_id,
-            "id_miembro_pg":         int(data["id_miembro_pg"]) if data.get("id_miembro_pg") else None,
+            "id_miembro_pg":         id_miembro_pg,
+            "id_miembro":            id_miembro_oid,   # ObjectId — usado por portal miembro
             "nombre":                nombre,
             "objetivo":              data.get("objetivo", "mantenimiento"),
             "calorias_meta":         data.get("calorias_meta"),
@@ -263,7 +325,7 @@ def update_diet(diet_id):
         update = {k: data[k] for k in _DIET_FIELDS if k in data}
 
         if "id_miembro_pg" in data:
-            update["id_miembro_pg"] = int(data["id_miembro_pg"]) if data["id_miembro_pg"] else None
+            update["id_miembro_pg"] = _safe_int(data.get("id_miembro_pg"))
         # backward-compat
         if "comidas" in data:
             update["comidas"] = data["comidas"]
@@ -295,6 +357,41 @@ def delete_diet(diet_id):
         return jsonify({"error": str(e)}), 500
 
 
+@diet_bp.route("/diets/bulk-delete", methods=["POST"])
+@jwt_required()
+@require_tenant
+def bulk_delete_diets():
+    """Elimina (soft-delete) múltiples planes en una sola operación MongoDB."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        data       = request.get_json(force=True) or {}
+        ids        = data.get("ids", [])
+
+        if not ids or not isinstance(ids, list):
+            return jsonify({"error": "Se requiere lista 'ids'"}), 400
+
+        object_ids = []
+        for raw_id in ids:
+            try:
+                object_ids.append(ObjectId(raw_id))
+            except Exception:
+                pass
+
+        result = mdb.dietas.update_many(
+            {
+                "_id": {"$in": object_ids},
+                "id_entrenador_pg": trainer_id,
+                "id_gimnasio_pg": gym_id,
+            },
+            {"$set": {"eliminada": True}},
+        )
+        return jsonify({"success": True, "deleted": result.modified_count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @diet_bp.route("/diets/<diet_id>/assign", methods=["POST"])
 @jwt_required()
 @require_tenant
@@ -313,11 +410,15 @@ def assign_diet(diet_id):
         }):
             return jsonify({"error": "Plan no encontrado"}), 404
 
-        id_miembro_pg = int(data["id_miembro_pg"]) if data.get("id_miembro_pg") else None
-        mdb.dietas.update_one(
-            {"_id": ObjectId(diet_id)},
-            {"$set": {"id_miembro_pg": id_miembro_pg}},
-        )
+        id_miembro_pg = _safe_int(data.get("id_miembro_pg"))
+        set_fields = {"id_miembro_pg": id_miembro_pg}
+        if id_miembro_pg:
+            miembro_doc = mdb.miembros.find_one(
+                {"id_usuario_pg": id_miembro_pg, "id_gimnasio_pg": gym_id}, {"_id": 1}
+            )
+            if miembro_doc:
+                set_fields["id_miembro"] = miembro_doc["_id"]
+        mdb.dietas.update_one({"_id": ObjectId(diet_id)}, {"$set": set_fields})
         return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -396,26 +497,37 @@ Reglas importantes:
 - RESPONDE SOLO CON EL JSON, nada más"""
 
 
+@diet_bp.route("/diets/ai-status", methods=["GET"])
+@jwt_required()
+@require_tenant
+def diet_ai_status():
+    """Estado del servicio Ollama (disponibilidad + modelo cargado)."""
+    try:
+        from app.utils.etl_ollama import get_ollama_status  # noqa: PLC0415
+        return jsonify(get_ollama_status()), 200
+    except Exception as e:
+        return jsonify({"available": False, "error": str(e)}), 200
+
+
 @diet_bp.route("/diets/import-ai", methods=["POST"])
 @jwt_required()
 @require_tenant
 def import_diet_ai():
     """
-    ETL con IA local (Ollama):
-      1. Extract  — lee texto del PDF o Excel subido
-      2. Transform — envía al LLM local (phi3:mini / llama3.2:3b / mistral:7b)
-      3. Retorna  — JSON estructurado listo para que el entrenador confirme y guarde
+    ETL en dos fases:
+      1. Parser determinístico (parse_diet_plan_from_pdf) para PDFs tabulares conocidos.
+         Si tiene éxito devuelve { plan, recetas } sin invocar Ollama.
+      2. Fallback LLM local (Ollama) para formatos no estructurados.
+         En este caso devuelve { plan, recetas: [] }.
 
-    El modelo corre completamente en Docker, sin API externa ni costo por token.
-    Cuando se tenga un PDF de referencia se puede añadir un parser determinístico
-    (igual que en import_routines_ai) para evitar el LLM en formatos conocidos.
+    El frontend muestra una vista previa y llama a /confirm-import para persistir.
     """
     try:
         from app.utils.etl_ollama import (  # noqa: PLC0415
-            check_ollama_ready, extract_text, call_ollama
+            check_ollama_ready, extract_text, call_ollama,
+            parse_diet_plan_from_pdf,
         )
 
-        # ── Validar archivo antes de pinear Ollama ────────────────────────────
         archivo = request.files.get("archivo")
         if not archivo:
             return jsonify({"error": "No se recibió archivo"}), 400
@@ -428,10 +540,23 @@ def import_diet_ai():
                 "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
             }), 400
 
-        # ── Extract ───────────────────────────────────────────────────────────
+        contenido = archivo.read()
+
+        # ── Fase 1: parser determinístico (PDF tabular) ───────────────────────
+        if ext == "pdf":
+            resultado = parse_diet_plan_from_pdf(contenido)
+            if resultado:
+                return jsonify({
+                    "success":  True,
+                    "plan":     resultado["plan"],
+                    "recetas":  resultado["recetas"],
+                    "archivo":  nombre_archivo,
+                    "via":      "parser",
+                }), 200
+
+        # ── Fase 2: fallback LLM local ────────────────────────────────────────
         try:
-            contenido = archivo.read()
-            raw_text  = extract_text(contenido, ext)
+            raw_text = extract_text(contenido, ext)
         except Exception as e:
             return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
 
@@ -441,12 +566,10 @@ def import_diet_ai():
                 "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
             }), 422
 
-        # ── Verificar Ollama (solo si el archivo es válido) ───────────────────
         ready, msg = check_ollama_ready()
         if not ready:
             return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
 
-        # ── Transform — LLM local ─────────────────────────────────────────────
         respuesta_raw = call_ollama(_ETL_SYSTEM_PROMPT, raw_text[:4_000])
 
         texto = respuesta_raw.strip()
@@ -460,37 +583,127 @@ def import_diet_ai():
             plan = json.loads(texto)
         except json.JSONDecodeError:
             return jsonify({
-                "error": "La IA no pudo estructurar el documento",
-                "detalle": (
-                    "El archivo tiene un formato no reconocido. "
-                    "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
-                ),
-            }), 422
-
-        if not isinstance(plan, dict):
-            return jsonify({
-                "error": "La IA devolvió una respuesta vacía",
-                "detalle": (
-                    "El modelo no pudo extraer información del documento. "
-                    "Intenta con un archivo más simple o con menos páginas."
-                ),
+                "error": "La IA no pudo estructurar el plan en formato JSON.",
+                "detalle": texto[:300],
             }), 422
 
         return jsonify({
             "success": True,
             "plan":    plan,
-            "archivo": nombre_archivo,
+            "recetas": [],
+            "via":     "llm",
         }), 200
 
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
+    except ImportError as exc:
+        return jsonify({"error": f"Dependencia faltante: {exc}"}), 500
+    except Exception as exc:
+        import traceback
+        return jsonify({"error": str(exc), "trace": traceback.format_exc()[-500:]}), 500
 
 
-@diet_bp.route("/diets/ai-status", methods=["GET"])
+# ─── Confirmar importación: persistir plan + recetas ─────────────────────────
+
+@diet_bp.route("/diets/confirm-import", methods=["POST"])
 @jwt_required()
 @require_tenant
-def ollama_status():
-    """Verifica disponibilidad de Ollama y devuelve info del modelo activo."""
-    from app.utils.etl_ollama import get_ollama_status  # noqa: PLC0415
-    return jsonify(get_ollama_status()), 200
+def confirm_diet_import():
+    """
+    Persiste el plan y las recetas extraídas por el parser/IA.
+
+    Body JSON:
+      plan          dict    Plan v2 completo
+      recetas       list    Recetas a crear en la biblioteca (pueden tener 'imagen' base64)
+      id_miembro_pg int?    ID PostgreSQL del cliente a asignar
+      nombre_plan   str?    Sobrescribe plan.nombre
+      archivo       str?    Nombre del archivo origen (metadata)
+
+    Returns:
+      { success, diet_id, recetas_creadas }
+    """
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+    data       = request.get_json(silent=True) or {}
+
+    plan          = data.get("plan") or {}
+    recetas_in    = data.get("recetas") or []
+    id_miembro_pg = data.get("id_miembro_pg")
+    nombre_plan   = data.get("nombre_plan")
+    archivo       = data.get("archivo")
+
+    if not plan:
+        return jsonify({"error": "Plan vacío"}), 400
+
+    db = get_db()
+
+    # ── 1. Crear / deduplicar recetas ─────────────────────────────────────────
+    recetas_creadas = 0
+    for receta in recetas_in:
+        nombre = (receta.get("nombre") or "").strip()
+        if not nombre:
+            continue
+
+        existing = db.recetas.find_one({
+            "nombre":            nombre,
+            "id_entrenador_pg":  trainer_id,
+            "id_gimnasio_pg":    gym_id,
+        })
+        if existing:
+            continue
+
+        doc = {
+            "nombre":                 nombre,
+            "descripcion":            receta.get("descripcion"),
+            "calorias":               receta.get("calorias"),
+            "proteinas_g":            receta.get("proteinas_g"),
+            "carbohidratos_g":        receta.get("carbohidratos_g"),
+            "grasas_g":               receta.get("grasas_g"),
+            "ingredientes":           receta.get("ingredientes") or [],
+            "instrucciones":          receta.get("instrucciones"),
+            "tiempo_preparacion_min": receta.get("tiempo_preparacion_min"),
+            "imagen":                 receta.get("imagen"),   # base64 data URI
+            "fuente":                 receta.get("fuente", "pdf_import"),
+            "id_entrenador_pg":       trainer_id,
+            "id_gimnasio_pg":         gym_id,
+            "activo":                 True,
+            "created_at":             datetime.now(timezone.utc),
+        }
+        db.recetas.insert_one(doc)
+        recetas_creadas += 1
+
+    # ── 2. Resolver id_miembro (ObjectId) desde pg_id ─────────────────────────
+    id_miembro_oid = None
+    if id_miembro_pg is not None:
+        try:
+            pg_int = int(id_miembro_pg)
+            member = db.users.find_one(
+                {"pg_id": pg_int, "id_gimnasio_pg": gym_id},
+                {"_id": 1},
+            )
+            if member:
+                id_miembro_oid = str(member["_id"])
+        except (ValueError, TypeError):
+            pass
+
+    # ── 3. Guardar plan ───────────────────────────────────────────────────────
+    if nombre_plan:
+        plan["nombre"] = nombre_plan
+
+    plan.update({
+        "id_entrenador_pg": trainer_id,
+        "id_gimnasio_pg":   gym_id,
+        "id_miembro_pg":    int(id_miembro_pg) if id_miembro_pg is not None else None,
+        "id_miembro":       id_miembro_oid,
+        "fuente":           plan.get("fuente", "ia_import"),
+        "archivo_origen":   archivo,
+        "eliminada":        False,
+        "fecha_creacion":   datetime.now(timezone.utc),
+    })
+
+    result  = db.dietas.insert_one(plan)
+    diet_id = str(result.inserted_id)
+
+    return jsonify({
+        "success":         True,
+        "diet_id":         diet_id,
+        "recetas_creadas": recetas_creadas,
+    }), 201

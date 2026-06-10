@@ -195,7 +195,8 @@ def get_trainer_clients():
             estado        = determinar_estado_cliente(None, tasa)
 
             clients_data.append({
-                "id":           str(miembro_id),
+                "id":           str(miembro_id),          # MongoDB ObjectId (para lookups internos)
+                "pg_id":        r.get("id_usuario_pg"),   # PostgreSQL int (para asignaciones de dieta/rutina)
                 # nombre denormalizado en el documento miembro (seed_mongo lo pobla)
                 "name":         r.get("nombre", "Sin nombre"),
                 "goal":         r.get("objetivo"),
