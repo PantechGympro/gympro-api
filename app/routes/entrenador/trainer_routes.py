@@ -1484,6 +1484,10 @@ def _ser_doc(doc: dict) -> dict:
         elif isinstance(v, ObjectId):
             out[k] = str(v)
         elif isinstance(v, datetime):
+            # Mongo devuelve datetimes naive en UTC; marcarlos como UTC para
+            # que el frontend los convierta a la hora local correcta.
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
             out[k] = v.isoformat()
         else:
             out[k] = v
