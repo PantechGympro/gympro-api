@@ -808,6 +808,49 @@ def create_routine():
             if ejercicios_insert:
                 mdb.rutina_ejercicios.insert_many(ejercicios_insert)
 
+        # ── Auto-poblar la biblioteca de ejercicios (PostgreSQL) ──────────────
+        # Garantiza que los ejercicios usados en la rutina (p. ej. importados
+        # por IA) queden disponibles como ejercicios individuales reutilizables.
+        try:
+            existentes = {
+                e.nombre.strip().lower(): e
+                for e in Ejercicio.query.filter_by(
+                    id_gimnasio=gym_id, id_entrenador=trainer_id
+                ).all()
+            }
+            nuevos_ej = {}
+            for day_data in data.get('days', []):
+                grupo = day_data.get('muscleGroup', '') or None
+                for ej in day_data.get('exercises', []):
+                    nombre_ej = (ej.get('name', '') or '').strip()
+                    if not nombre_ej:
+                        continue
+                    clave = nombre_ej.lower()
+                    ya = existentes.get(clave)
+                    if ya is not None:
+                        if not ya.activo:   # reactivar si estaba soft-deleted
+                            ya.activo = True
+                        continue
+                    if clave in nuevos_ej:
+                        continue
+                    sets = str(ej.get('sets', '')).strip()
+                    nuevos_ej[clave] = Ejercicio(
+                        id_gimnasio    = gym_id,
+                        id_entrenador  = trainer_id,
+                        nombre         = nombre_ej,
+                        grupo_muscular = grupo,
+                        tipo           = ej.get('tipo') or 'Fuerza',
+                        series         = int(sets) if sets.isdigit() else None,
+                        repeticiones   = str(ej.get('reps')) if ej.get('reps') else None,
+                    )
+            if nuevos_ej:
+                pg_db.session.add_all(list(nuevos_ej.values()))
+            pg_db.session.commit()
+        except Exception:
+            pg_db.session.rollback()
+            print('[create_routine] No se pudo poblar la biblioteca de ejercicios:')
+            print(traceback.format_exc())
+
         return jsonify({
             'success':   True,
             'id_rutina': str(rutina_id),

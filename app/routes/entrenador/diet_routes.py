@@ -509,6 +509,76 @@ def diet_ai_status():
         return jsonify({"available": False, "error": str(e)}), 200
 
 
+def _derivar_recetas_de_plan(plan: dict) -> list:
+    """
+    Deriva recetas a partir de un plan importado por IA cuando el parser
+    determinístico no extrajo recetas. Crea una receta por cada comida
+    (deduplicada por nombre + ingredientes), sumando los macros de sus items.
+    Garantiza que la importación poble la biblioteca de recetas aunque el
+    documento no tenga el formato tabular que reconoce el parser.
+    """
+    if not isinstance(plan, dict):
+        return []
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    vistas: set = set()
+    recetas: list = []
+
+    for semana in plan.get("semanas", []) or []:
+        dias = semana.get("dias", []) if isinstance(semana, dict) else []
+        for dia in dias or []:
+            comidas = dia.get("comidas", []) if isinstance(dia, dict) else []
+            for comida in comidas or []:
+                if not isinstance(comida, dict):
+                    continue
+                items = comida.get("items", []) or []
+                if not items:
+                    continue
+                nombre = (comida.get("nombre") or "Comida").strip() or "Comida"
+
+                ingredientes, cal, prot, carb, fat = [], 0.0, 0.0, 0.0, 0.0
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    ali = (it.get("nombre_alimento") or "").strip()
+                    if not ali:
+                        continue
+                    cant = str(it.get("cantidad") or "").strip()
+                    uni = (it.get("unidad") or "").strip()
+                    ingredientes.append(" ".join(x for x in [cant, uni, ali] if x).strip())
+                    cal += _num(it.get("calorias"))
+                    prot += _num(it.get("proteinas_g"))
+                    carb += _num(it.get("carbohidratos_g"))
+                    fat += _num(it.get("grasas_g"))
+
+                if not ingredientes:
+                    continue
+
+                firma = (nombre.lower(), tuple(sorted(i.lower() for i in ingredientes)))
+                if firma in vistas:
+                    continue
+                vistas.add(firma)
+
+                recetas.append({
+                    "nombre":          nombre,
+                    "descripcion":     f"Receta extraída del plan importado por IA",
+                    "calorias":        round(cal) or None,
+                    "proteinas_g":     round(prot, 1) or None,
+                    "carbohidratos_g": round(carb, 1) or None,
+                    "grasas_g":        round(fat, 1) or None,
+                    "ingredientes":    ingredientes,
+                    "fuente":          "ia_import",
+                })
+                if len(recetas) >= 40:
+                    return recetas
+    return recetas
+
+
 @diet_bp.route("/diets/import-ai", methods=["POST"])
 @jwt_required()
 @require_tenant
@@ -587,10 +657,13 @@ def import_diet_ai():
                 "detalle": texto[:300],
             }), 422
 
+        # El parser no extrajo recetas; derivarlas del plan para poblar la
+        # biblioteca también cuando la importación pasa por el LLM.
+        recetas_ia = _derivar_recetas_de_plan(plan)
         return jsonify({
             "success": True,
             "plan":    plan,
-            "recetas": [],
+            "recetas": recetas_ia,
             "via":     "llm",
         }), 200
 
@@ -626,6 +699,10 @@ def confirm_diet_import():
 
     plan          = data.get("plan") or {}
     recetas_in    = data.get("recetas") or []
+    # Si el frontend no envió recetas (p. ej. importación vía LLM), derivarlas
+    # del plan para poblar siempre la biblioteca de recetas individuales.
+    if not recetas_in:
+        recetas_in = _derivar_recetas_de_plan(plan)
     id_miembro_pg = data.get("id_miembro_pg")
     nombre_plan   = data.get("nombre_plan")
     archivo       = data.get("archivo")
@@ -648,6 +725,11 @@ def confirm_diet_import():
             "id_gimnasio_pg":    gym_id,
         })
         if existing:
+            # Si la receta existe pero estaba desactivada (soft-delete), reactivarla
+            # para que vuelva a aparecer en la biblioteca en lugar de omitirla.
+            if not existing.get("activo", True):
+                db.recetas.update_one({"_id": existing["_id"]}, {"$set": {"activo": True}})
+                recetas_creadas += 1
             continue
 
         doc = {
