@@ -40,11 +40,9 @@ def _require_receptionist():
 
 
 def _today_range():
-    """Retorna (inicio_día_utc, fin_día_utc) para filtrar asistencias de hoy."""
-    now = datetime.now(timezone.utc)
-    start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-    end   = start + timedelta(days=1)
-    return start, end
+    """Retorna (inicio, fin) del día LOCAL del gimnasio para filtrar asistencias de hoy."""
+    from app.utils.timezone import local_today_bounds_naive
+    return local_today_bounds_naive()
 
 
 def _serialize(doc: dict) -> dict:
@@ -228,8 +226,9 @@ def register_checkin():
     if not miembro:
         return jsonify({"error": "Miembro no encontrado en este gimnasio"}), 404
 
+    from app.utils.timezone import local_now_naive
     start, end = _today_range()
-    now = datetime.now(timezone.utc)
+    now = local_now_naive()
 
     # Evitar checkin duplicado en el mismo día
     existing = db.asistencias.find_one({
@@ -242,7 +241,7 @@ def register_checkin():
 
     db.asistencias.insert_one({
         "id_miembro":   miembro["_id"],
-        "fecha":        datetime(now.year, now.month, now.day, tzinfo=timezone.utc),
+        "fecha":        datetime(now.year, now.month, now.day),
         "hora_entrada": now.strftime("%H:%M:%S"),
         "hora_salida":  None,
         "registrado_por": get_jwt().get("sub"),

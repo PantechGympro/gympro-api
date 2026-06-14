@@ -70,6 +70,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
     # (el perfil físico sigue viviendo en MongoDB — colección miembros)
     peso_inicial    = None
     perfil_completo = True
+    miembro_doc = None
     if rol_nombre in ("Miembro", "user"):
         try:
             mdb         = get_db()
@@ -80,6 +81,12 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             perfil_completo = peso_inicial is not None
         except Exception:
             pass  # si Mongo no está disponible no bloquear el login
+
+    # Foto de perfil: del doc del miembro o del Usuario (staff/owner). Solo base64.
+    foto_login = getattr(usuario, "foto_perfil", None)
+    if miembro_doc and miembro_doc.get("foto_perfil"):
+        foto_login = miembro_doc.get("foto_perfil")
+    foto_login = foto_login if (isinstance(foto_login, str) and foto_login.startswith("data:image")) else None
 
     return {
         "identity": str(usuario.id),
@@ -105,6 +112,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "perfil_completo": perfil_completo,
             "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
+            "foto_perfil":     foto_login,
         },
     }
 

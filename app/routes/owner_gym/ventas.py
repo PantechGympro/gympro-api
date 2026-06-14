@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, g, current_app
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from flask_mail import Message
 from datetime import datetime, timezone
 from bson import ObjectId
@@ -40,14 +40,55 @@ def registrar_venta():
         if metodo not in ("Efectivo", "Tarjeta", "Transferencia"):
             return jsonify({"error": "Método de pago inválido"}), 400
 
+        # ── Resolver comprador ────────────────────────────────────────────────
+        # El historial del miembro (GET /api/ventas) filtra por el ObjectId del
+        # documento miembro. Resolvemos y persistimos AMBOS (ObjectId + PG id)
+        # para que la compra se refleje correctamente.
+        #
+        # Si quien compra es un MIEMBRO, ignoramos el id del body y usamos su
+        # propia identidad del JWT (a prueba de fallos). Para POS de staff
+        # (owner/recepcionista) usamos el id_miembro enviado en el body.
+        role = (get_jwt().get("role") or "").lower()
+        id_miembro_oid = None
+        id_miembro_pg  = None
+        miembro_doc    = None
+
+        if role in ("user", "miembro"):
+            try:
+                id_miembro_pg = int(get_jwt_identity())
+                miembro_doc = db.miembros.find_one({
+                    "id_usuario_pg":  id_miembro_pg,
+                    "id_gimnasio_pg": id_gimnasio,
+                })
+            except (ValueError, TypeError):
+                miembro_doc = None
+        else:
+            id_miembro_raw = data.get("id_miembro")
+            if id_miembro_raw is not None and id_miembro_raw != "":
+                try:
+                    id_miembro_pg = int(id_miembro_raw)
+                    miembro_doc = db.miembros.find_one({"id_usuario_pg": id_miembro_pg})
+                except (ValueError, TypeError):
+                    # Puede venir ya como ObjectId string (POS de admin)
+                    try:
+                        miembro_doc = db.miembros.find_one({"_id": ObjectId(str(id_miembro_raw))})
+                    except Exception:
+                        miembro_doc = None
+
+        if miembro_doc:
+            id_miembro_oid = miembro_doc["_id"]
+            if id_miembro_pg is None:
+                id_miembro_pg = miembro_doc.get("id_usuario_pg")
+
         doc = {
             "items":          items,
             "total":          float(total),
             "metodo_pago":    metodo,
             "fecha":          datetime.now(timezone.utc),
             "id_gimnasio":    id_gimnasio,
-            # Datos opcionales del comprador
-            "id_miembro":     data.get("id_miembro"),
+            # Datos del comprador (ObjectId para que el historial del miembro lo encuentre)
+            "id_miembro":     id_miembro_oid,
+            "id_miembro_pg":  id_miembro_pg,
             "nombre_miembro": data.get("nombre_miembro", ""),
             # Datos de pago según método
             "numero_tarjeta": data.get("numero_tarjeta", ""),
@@ -72,10 +113,9 @@ def registrar_venta():
         venta_num = venta_id[-8:].upper()
 
         # ── Enviar ticket por correo al miembro (no-bloqueante) ───────────────
-        if data.get("id_miembro"):
+        if miembro_doc:
             try:
-                miembro_doc = db.miembros.find_one({"id_usuario_pg": data["id_miembro"]})
-                email_dest  = miembro_doc.get("email") if miembro_doc else None
+                email_dest = miembro_doc.get("email")
                 if email_dest and "@" in email_dest:
                     _send_ticket_email(email_dest, doc, items, venta_num)
             except Exception as e:

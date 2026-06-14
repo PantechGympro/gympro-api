@@ -286,9 +286,11 @@ def get_trainer_profile():
 
         experience_custom = (perfil or {}).get("experiencia_texto", "")
 
+        _fp = getattr(usuario, "foto_perfil", None)
         profile_data = {
             'name':           usuario.nombre,
             'email':          usuario.email,
+            'photo':          _fp if (_fp and _fp.startswith("data:image")) else None,
             'phone':          perfil.get("telefono", "")        if perfil else "",
             'address':        perfil.get("direccion", "")       if perfil else "",
             'specialization': perfil.get("especializacion", "") if perfil else "",

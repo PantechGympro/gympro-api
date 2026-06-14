@@ -33,6 +33,20 @@ from app.mongo import get_db
 
 notificaciones_bp = Blueprint("notificaciones", __name__, url_prefix="/api/notificaciones")
 
+# Endpoint del servicio de push de Expo (no requiere credenciales para envíos básicos).
+_EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+
+def _resolver_usuario(claims) -> int | None:
+    """Obtiene el id de usuario PG desde los claims o el subject del JWT."""
+    id_usuario = claims.get("id")
+    if id_usuario:
+        return int(id_usuario)
+    try:
+        return int(get_jwt_identity())
+    except (TypeError, ValueError):
+        return None
+
 
 def _serialize(doc: dict) -> dict:
     out = {}
@@ -155,6 +169,43 @@ def leer_una(notif_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# POST /api/notificaciones/push-token   — registrar Expo push token
+# ─────────────────────────────────────────────────────────────────────────────
+
+@notificaciones_bp.route("/push-token", methods=["POST"])
+@jwt_required()
+def registrar_push_token():
+    """
+    Registra (upsert) el Expo push token del dispositivo del usuario.
+    Body: { token: "ExponentPushToken[...]", platform: "ios"|"android" }
+    Colección: push_tokens  (deduplicada por token).
+    """
+    id_usuario = _resolver_usuario(get_jwt())
+    if id_usuario is None:
+        return jsonify({"error": "No se pudo identificar al usuario"}), 401
+
+    data  = request.get_json(silent=True) or {}
+    token = (data.get("token") or "").strip()
+    if not token:
+        return jsonify({"error": "token requerido"}), 400
+
+    id_gimnasio = get_jwt().get("id_gimnasio")
+    db = get_db()
+    db.push_tokens.update_one(
+        {"token": token},
+        {"$set": {
+            "id_usuario_pg":  id_usuario,
+            "id_gimnasio_pg": int(id_gimnasio) if id_gimnasio else None,
+            "token":          token,
+            "platform":       data.get("platform"),
+            "actualizado_en": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    return jsonify({"ok": True}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: crear notificación (para uso interno desde otros módulos)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -184,4 +235,54 @@ def crear_notificacion(
         "referencia_id":   referencia_id,
     }
     result = db.notificaciones.insert_one(doc)
+
+    # Disparar push (best-effort, no bloquea la creación de la notificación in-app).
+    _enviar_push(db, id_usuario_pg, titulo, mensaje, data={
+        "tipo":          tipo,
+        "referencia_id": referencia_id,
+    })
+
     return str(result.inserted_id)
+
+
+def _enviar_push(db, id_usuario_pg: int, titulo: str, mensaje: str, data: dict | None = None) -> None:
+    """
+    Envía una notificación push a todos los dispositivos del usuario vía Expo.
+    Silencioso ante cualquier fallo: el push es complementario a la notif. in-app.
+    """
+    try:
+        tokens = [
+            t["token"]
+            for t in db.push_tokens.find({"id_usuario_pg": int(id_usuario_pg)}, {"token": 1})
+            if t.get("token")
+        ]
+        if not tokens:
+            return
+
+        mensajes = [
+            {
+                "to":    tok,
+                "title": titulo,
+                "body":  mensaje,
+                "sound": "default",
+                "data":  data or {},
+            }
+            for tok in tokens
+        ]
+
+        try:
+            import requests  # noqa: PLC0415
+            requests.post(_EXPO_PUSH_URL, json=mensajes, timeout=5)
+        except ImportError:
+            # Fallback sin la librería requests
+            import json as _json
+            import urllib.request as _urlreq  # noqa: PLC0415
+            req = _urlreq.Request(
+                _EXPO_PUSH_URL,
+                data=_json.dumps(mensajes).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            _urlreq.urlopen(req, timeout=5)
+    except Exception as ex:
+        print(f"[push] No-bloqueante: {ex}")

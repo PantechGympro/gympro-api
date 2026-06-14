@@ -77,7 +77,10 @@ def register_checkin():
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
 
-        now         = datetime.now()
+        # Hora local del gimnasio (no UTC del servidor): evita que un check-in
+        # nocturno se registre con la fecha del día siguiente.
+        from app.utils.timezone import local_now_naive
+        now         = local_now_naive()
         hoy_inicio  = datetime.combine(now.date(), datetime.min.time())
         hoy_fin     = hoy_inicio + timedelta(days=1)
 

@@ -6,10 +6,11 @@ Endpoints:
     PUT  /api/owner_gym/perfil        Actualizar datos del gimnasio
 """
 from flask import Blueprint, jsonify, request, g
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
+from app.models.pg.usuario import Usuario
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 
@@ -25,7 +26,17 @@ def get_perfil():
     gym = Gimnasio.query.get(g.tenant_id)
     if not gym:
         return jsonify({"msg": "Gimnasio no encontrado"}), 404
-    return jsonify(gym.to_dict()), 200
+
+    data = gym.to_dict()
+    # Adjuntar la foto de perfil del propietario (Usuario autenticado).
+    try:
+        owner = Usuario.query.get(int(get_jwt_identity()))
+        fp = getattr(owner, "foto_perfil", None) if owner else None
+        data["owner_foto"]   = fp if (fp and fp.startswith("data:image")) else None
+        data["owner_nombre"] = owner.nombre if owner else None
+    except Exception:
+        data["owner_foto"] = None
+    return jsonify(data), 200
 
 
 @owner_profile_bp.route("/perfil", methods=["PUT"])
