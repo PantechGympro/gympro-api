@@ -717,6 +717,7 @@ def get_routines():
                         'sets':          f"{ej.get('series', '')}x{ej.get('repeticiones', '')}",
                         'rest':          ej.get("notas") or '60s',
                         'day':           dia.get("dia_semana") or '',
+                        'muscleGroup':   dia.get("grupo_muscular") or '',
                         'peso':          ej.get("peso") or '',
                         'imagenes':      imagenes,
                         'video':         video,
@@ -1156,19 +1157,27 @@ def assign_routine_to_member(routine_id):
 @jwt_required()
 @require_tenant
 def get_exercises():
-    """Lista los ejercicios activos creados por el entrenador autenticado."""
+    """
+    Lista los ejercicios del entrenador autenticado.
+    Por defecto solo activos; con ?incluir_inactivos=1 también los soft-deleted
+    (para que el entrenador pueda verlos y reactivarlos desde la biblioteca).
+    """
     gym_id      = g.tenant_id
     trainer_id  = int(get_jwt_identity())
     search      = request.args.get('search', '').strip()
     grupo       = request.args.get('grupo_muscular', '').strip()
+    incluir_inactivos = request.args.get('incluir_inactivos', '').lower() in ('1', 'true', 'yes')
 
-    q = Ejercicio.query.filter_by(id_gimnasio=gym_id, id_entrenador=trainer_id, activo=True)
+    q = Ejercicio.query.filter_by(id_gimnasio=gym_id, id_entrenador=trainer_id)
+    if not incluir_inactivos:
+        q = q.filter_by(activo=True)
     if search:
         q = q.filter(Ejercicio.nombre.ilike(f'%{search}%'))
     if grupo:
         q = q.filter_by(grupo_muscular=grupo)
 
-    exercises = q.order_by(Ejercicio.nombre).all()
+    # Inactivos al final, luego por nombre
+    exercises = q.order_by(Ejercicio.activo.desc(), Ejercicio.nombre).all()
     return jsonify({'exercises': [e.to_dict() for e in exercises]}), 200
 
 
@@ -1258,6 +1267,24 @@ def delete_exercise(exercise_id):
     ej.activo = False
     pg_db.session.commit()
     return jsonify({'msg': 'Ejercicio eliminado'}), 200
+
+
+@trainer_bp.route('/exercises/<int:exercise_id>/reactivar', methods=['POST'])
+@jwt_required()
+@require_tenant
+def reactivate_exercise(exercise_id):
+    """Reactiva un ejercicio soft-deleted (activo=False → True)."""
+    gym_id     = g.tenant_id
+    trainer_id = int(get_jwt_identity())
+    ej         = Ejercicio.query.filter_by(
+        id=exercise_id, id_gimnasio=gym_id, id_entrenador=trainer_id
+    ).first()
+    if not ej:
+        return jsonify({'error': 'Ejercicio no encontrado'}), 404
+
+    ej.activo = True
+    pg_db.session.commit()
+    return jsonify(ej.to_dict()), 200
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2034,6 +2061,7 @@ def import_routines_ai():
                 "repeticiones":   e.repeticiones,
                 "grupo_muscular": e.grupo_muscular,
                 "tipo":           e.tipo,
+                "activo":         e.activo,
             }
             for e in Ejercicio.query.filter_by(
                 id_gimnasio=gym_id, id_entrenador=trainer_id
@@ -2053,6 +2081,13 @@ def import_routines_ai():
                 f"{len(dedup['omitidos'])} ejercicio(s) ya existían en tu biblioteca "
                 f"y se omitieron: {muestra}{extra}. Se reutilizarán los ya guardados."
             )
+        if dedup.get("reactivar"):
+            muestra = ", ".join(dedup["reactivar"][:5])
+            extra   = f" y {len(dedup['reactivar']) - 5} más" if len(dedup["reactivar"]) > 5 else ""
+            avisos.append(
+                f"{len(dedup['reactivar'])} ejercicio(s) que habías eliminado se "
+                f"reactivarán al importar: {muestra}{extra}."
+            )
         if dedup["duplicados_archivo"]:
             avisos.append(
                 f"{dedup['duplicados_archivo']} ejercicio(s) venían repetidos dentro "
@@ -2069,10 +2104,11 @@ def import_routines_ai():
             "avisos":             avisos,
             "archivo":            nombre_archivo,
             "resumen": {
-                "total_rutinas":      len(rutinas),
-                "ejercicios_nuevos":  len(dedup["nuevos"]),
-                "ejercicios_omitidos": len(dedup["omitidos"]),
-                "duplicados_archivo": dedup["duplicados_archivo"],
+                "total_rutinas":         len(rutinas),
+                "ejercicios_nuevos":     len(dedup["nuevos"]),
+                "ejercicios_omitidos":   len(dedup["omitidos"]),
+                "ejercicios_reactivados": len(dedup.get("reactivar", [])),
+                "duplicados_archivo":    dedup["duplicados_archivo"],
                 "total_dias": sum(len(r.get("days", [])) for r in rutinas),
             },
         }), 200

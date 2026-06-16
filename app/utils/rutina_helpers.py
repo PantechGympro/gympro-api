@@ -52,22 +52,29 @@ def dedupe_ejercicios(
                      — biblioteca actual del entrenador (proviene de la BD).
 
     Reglas:
-        - Si el ejercicio ya existe en la biblioteca del entrenador → se OMITE
-          (no se reinserta) y se reporta.
+        - Si el ejercicio ya existe y está ACTIVO → se OMITE (se reutiliza) y se reporta.
+        - Si ya existe pero está INACTIVO (soft-deleted, activo=False) → se marca para
+          REACTIVAR (create_routine lo reactiva al guardar la rutina), no se duplica.
         - Si está repetido dentro del mismo archivo → se colapsa a una sola copia.
         - Cada ejercicio de la rutina se anota con `ya_existe` y, si existe, se
           COMPLEMENTAN los campos vacíos (sets/reps) con los datos almacenados.
 
+    Args (cont.):
+        existentes: cada valor puede incluir `activo` (bool) para distinguir
+                    reutilizar (activo) de reactivar (inactivo).
+
     Returns:
         {
-          "nuevos":   [ejercicios que sí se agregarán],
-          "omitidos": [nombres que ya existían (str)],
+          "nuevos":    [ejercicios que sí se agregarán],
+          "omitidos":  [nombres ya existentes y activos (str)],
+          "reactivar": [nombres existentes pero inactivos que volverán (str)],
           "duplicados_archivo": <int>,   # repetidos dentro del mismo archivo
         }
     """
     existentes = existentes or {}
     nuevos: list[dict] = []
     omitidos: list[str] = []
+    reactivar: list[str] = []
     vistos: set[str] = set()
     duplicados_archivo = 0
 
@@ -76,9 +83,14 @@ def dedupe_ejercicios(
         if not nombre:
             continue
         clave = normalizar_nombre(nombre)
-        if clave in existentes:
-            if nombre not in omitidos:
-                omitidos.append(nombre)
+        detalle = existentes.get(clave)
+        if detalle is not None:
+            if detalle.get("activo", True):
+                if nombre not in omitidos:
+                    omitidos.append(nombre)
+            else:
+                if nombre not in reactivar:
+                    reactivar.append(nombre)
             continue
         if clave in vistos:
             duplicados_archivo += 1
@@ -103,6 +115,7 @@ def dedupe_ejercicios(
     return {
         "nuevos": nuevos,
         "omitidos": omitidos,
+        "reactivar": reactivar,
         "duplicados_archivo": duplicados_archivo,
     }
 
