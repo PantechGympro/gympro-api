@@ -258,6 +258,67 @@ def call_ollama(
     return resp.json().get("response", "") or ""
 
 
+# ─── Troceado y parseo robusto para documentos largos ────────────────────────
+
+def chunk_text(text: str, max_chars: int = 3500, max_chunks: int = 8) -> tuple[list[str], bool]:
+    """
+    Divide el texto en bloques de ~max_chars respetando saltos de línea, para
+    no perder ejercicios al enviar documentos largos al LLM (antes se cortaba
+    duro en 4.000 caracteres).
+
+    Returns:
+        (chunks, truncado) — `truncado` es True si el documento superó
+        max_chunks bloques y quedó contenido sin procesar.
+    """
+    lines = text.splitlines()
+    chunks: list[str] = []
+    cur: list[str] = []
+    size = 0
+    truncado = False
+
+    for ln in lines:
+        if size + len(ln) + 1 > max_chars and cur:
+            chunks.append("\n".join(cur))
+            cur, size = [], 0
+            if len(chunks) >= max_chunks:
+                truncado = True   # quedan líneas sin procesar
+                break
+        cur.append(ln)
+        size += len(ln) + 1
+    else:
+        if cur:
+            chunks.append("\n".join(cur))
+
+    return chunks, truncado
+
+
+def parse_llm_json(raw: str) -> dict | None:
+    """
+    Parsea la respuesta del LLM a dict, tolerando fences ```json … ``` y texto
+    sobrante. Devuelve None si no se puede obtener un objeto JSON válido.
+    """
+    import json as _json  # noqa: PLC0415
+    texto = (raw or "").strip()
+    if texto.startswith("```"):
+        lineas = texto.split("\n")
+        texto = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
+    if texto.endswith("```"):
+        texto = texto[: texto.rfind("```")].strip()
+    try:
+        obj = _json.loads(texto)
+    except _json.JSONDecodeError:
+        # Último intento: recortar al primer '{' … último '}'
+        i, j = texto.find("{"), texto.rfind("}")
+        if i != -1 and j != -1 and j > i:
+            try:
+                obj = _json.loads(texto[i : j + 1])
+            except _json.JSONDecodeError:
+                return None
+        else:
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
 # ─── Tabla de macros por ingrediente (por 100 g) ─────────────────────────────
 # (kcal, proteina_g, carb_g, grasa_g)
 

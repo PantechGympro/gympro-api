@@ -1096,12 +1096,52 @@ def assign_routine_to_member(routine_id):
         if not miembro:
             return jsonify({'success': False, 'message': 'Miembro no encontrado'}), 404
 
+        # ── Nivel del cliente → pesos sugeridos (tabla fija) ─────────────────
+        # El entrenador indica el nivel del cliente al asignar la rutina. Con él
+        # se calcula un peso de arranque por ejercicio y se guarda EN LA ASIGNACIÓN
+        # (no en la rutina compartida, para no afectar a otros miembros).
+        from app.utils.rutina_helpers import (  # noqa: PLC0415
+            sugerir_peso, normalizar_nombre, NIVEL_IDX, NIVELES,
+        )
+        nivel = (data.get('nivel') or '').strip()
+        if nivel and normalizar_nombre(nivel) not in NIVEL_IDX:
+            return jsonify({
+                'success': False,
+                'message': f'Nivel inválido. Usa uno de: {", ".join(NIVELES)}',
+            }), 400
+
+        pesos_sugeridos: dict[str, str] = {}
+        if nivel:
+            gym_id = g.tenant_id
+            biblioteca = {
+                normalizar_nombre(e.nombre): e
+                for e in Ejercicio.query.filter_by(
+                    id_gimnasio=gym_id, id_entrenador=trainer_id
+                ).all()
+            }
+            for dia in mdb.rutina_dias.find({"id_rutina": rutina_id_obj}):
+                grupo = dia.get("grupo_muscular")
+                for ex in mdb.rutina_ejercicios.find({"id_rutina_dia": dia["_id"]}):
+                    le   = biblioteca.get(normalizar_nombre(ex.get("nombre_ejercicio", "")))
+                    tipo = le.tipo if le else None
+                    pesos_sugeridos[str(ex["_id"])] = sugerir_peso(nivel, grupo, tipo)
+
+        set_fields = {"fecha_asignacion": datetime.now(), "activa": True, "fecha_fin": None}
+        if nivel:
+            set_fields["nivel"]            = nivel
+            set_fields["pesos_sugeridos"]  = pesos_sugeridos
+
         mdb.miembro_rutina.update_one(
             {"id_miembro": id_miembro, "id_rutina": rutina_id_obj},
-            {"$set": {"fecha_asignacion": datetime.now(), "activa": True, "fecha_fin": None}},
+            {"$set": set_fields},
             upsert=True
         )
-        return jsonify({'success': True, 'message': 'Rutina asignada al miembro'}), 200
+        return jsonify({
+            'success': True,
+            'message': 'Rutina asignada al miembro',
+            'nivel':   nivel or None,
+            'pesos_asignados': len(pesos_sugeridos),
+        }), 200
 
     except Exception as e:
         print(traceback.format_exc())
@@ -1905,7 +1945,8 @@ def import_routines_ai():
     import json as _json  # noqa: PLC0415
     try:
         from app.utils.etl_ollama import (  # noqa: PLC0415
-            extract_text, parse_routines_from_text, check_ollama_ready, call_ollama
+            extract_text, parse_routines_from_text, check_ollama_ready, call_ollama,
+            chunk_text, parse_llm_json,
         )
 
         archivo = request.files.get("archivo")
@@ -1935,25 +1976,32 @@ def import_routines_ai():
 
         # ── Transform: parser determinístico (rápido, sin LLM) ───────────────
         resultado = parse_routines_from_text(raw_text)
+        aviso_truncado: str | None = None
 
         if resultado is None:
-            # ── Fallback: LLM local (Ollama) ─────────────────────────────────
+            # ── Fallback: LLM local (Ollama), por bloques ────────────────────
+            # Antes se cortaba el documento a 4.000 caracteres y se perdían
+            # ejercicios en silencio. Ahora se trocea y se procesa cada bloque,
+            # fusionando los resultados (la deduplicación posterior limpia los
+            # ejercicios repetidos entre bloques).
             ready, msg = check_ollama_ready()
             if not ready:
                 return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
 
-            respuesta_raw = call_ollama(_ROUTINE_ETL_PROMPT, raw_text[:4_000])
+            bloques, truncado = chunk_text(raw_text)
+            combinado: dict = {"rutinas": [], "ejercicios": []}
+            for bloque in bloques:
+                try:
+                    parsed = parse_llm_json(call_ollama(_ROUTINE_ETL_PROMPT, bloque))
+                except Exception:
+                    print(traceback.format_exc())
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                combinado["rutinas"].extend(parsed.get("rutinas") or [])
+                combinado["ejercicios"].extend(parsed.get("ejercicios") or [])
 
-            texto = respuesta_raw.strip()
-            if texto.startswith("```"):
-                lineas = texto.split("\n")
-                texto  = "\n".join(lineas[1:] if len(lineas) > 1 else lineas)
-            if texto.endswith("```"):
-                texto = texto[: texto.rfind("```")].strip()
-
-            try:
-                resultado = _json.loads(texto)
-            except _json.JSONDecodeError:
+            if not combinado["rutinas"] and not combinado["ejercicios"]:
                 return jsonify({
                     "error": "La IA no pudo estructurar el documento",
                     "detalle": (
@@ -1962,30 +2010,74 @@ def import_routines_ai():
                     ),
                 }), 422
 
-            if not isinstance(resultado, dict):
-                return jsonify({
-                    "error": "La IA devolvió una respuesta vacía",
-                    "detalle": (
-                        "El modelo no pudo extraer información del documento. "
-                        "Intenta con un archivo más simple o con menos páginas."
-                    ),
-                }), 422
+            resultado = combinado
+            if truncado:
+                aviso_truncado = (
+                    "El documento es muy largo: se procesó solo la primera parte. "
+                    "Para no perder ejercicios, divídelo en archivos más pequeños."
+                )
 
         rutinas    = resultado.get("rutinas",   [])
         ejercicios = resultado.get("ejercicios", [])
 
+        # ── Deduplicación contra la biblioteca del entrenador ────────────────
+        # Omite ejercicios que ya existen (por entrenador) y los repetidos dentro
+        # del mismo archivo; complementa los días de rutina con datos almacenados.
+        from app.utils.rutina_helpers import (  # noqa: PLC0415
+            dedupe_ejercicios, normalizar_nombre,
+        )
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        existentes = {
+            normalizar_nombre(e.nombre): {
+                "series":         e.series,
+                "repeticiones":   e.repeticiones,
+                "grupo_muscular": e.grupo_muscular,
+                "tipo":           e.tipo,
+            }
+            for e in Ejercicio.query.filter_by(
+                id_gimnasio=gym_id, id_entrenador=trainer_id
+            ).all()
+        }
+        dedup = dedupe_ejercicios(ejercicios, rutinas, existentes)
+        ejercicios = dedup["nuevos"]          # solo los que realmente se agregarán
+
+        # ── Avisos legibles para el usuario ──────────────────────────────────
+        avisos: list[str] = []
+        if aviso_truncado:
+            avisos.append(aviso_truncado)
+        if dedup["omitidos"]:
+            muestra = ", ".join(dedup["omitidos"][:5])
+            extra   = f" y {len(dedup['omitidos']) - 5} más" if len(dedup["omitidos"]) > 5 else ""
+            avisos.append(
+                f"{len(dedup['omitidos'])} ejercicio(s) ya existían en tu biblioteca "
+                f"y se omitieron: {muestra}{extra}. Se reutilizarán los ya guardados."
+            )
+        if dedup["duplicados_archivo"]:
+            avisos.append(
+                f"{dedup['duplicados_archivo']} ejercicio(s) venían repetidos dentro "
+                f"del archivo y se consolidaron en uno solo."
+            )
+        if dedup["nuevos"]:
+            avisos.append(f"{len(dedup['nuevos'])} ejercicio(s) nuevo(s) se agregarán a tu biblioteca.")
+
         return jsonify({
-            "success":    True,
-            "rutinas":    rutinas,
-            "ejercicios": ejercicios,
-            "archivo":    nombre_archivo,
+            "success":            True,
+            "rutinas":            rutinas,
+            "ejercicios":         ejercicios,            # nuevos (deduplicados)
+            "ejercicios_omitidos": dedup["omitidos"],    # ya existían → reutilizar
+            "avisos":             avisos,
+            "archivo":            nombre_archivo,
             "resumen": {
-                "total_rutinas":    len(rutinas),
-                "total_ejercicios": len(ejercicios),
+                "total_rutinas":      len(rutinas),
+                "ejercicios_nuevos":  len(dedup["nuevos"]),
+                "ejercicios_omitidos": len(dedup["omitidos"]),
+                "duplicados_archivo": dedup["duplicados_archivo"],
                 "total_dias": sum(len(r.get("days", [])) for r in rutinas),
             },
         }), 200
 
     except Exception as e:
+        # Cualquier error inesperado del ETL termina aquí (log + 500 controlado)
         print(traceback.format_exc())
         return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500

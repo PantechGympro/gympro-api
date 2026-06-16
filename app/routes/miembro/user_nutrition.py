@@ -187,7 +187,10 @@ def list_recetas():
 
         recetas = list(mdb.recetas.find({
             "id_gimnasio_pg": gym_id,
-            "$or": [{"eliminada": {"$exists": False}}, {"eliminada": False}]
+            "$or": [{"eliminada": {"$exists": False}}, {"eliminada": False}],
+            # Excluir recetas inactivas con esquema de entrenador (campo `activo: false`)
+            # que se filtraban a la vista del miembro como "fantasma".
+            "activo": {"$ne": False},
         }).sort("fecha_creacion", -1))
 
         # Consumos de hoy
