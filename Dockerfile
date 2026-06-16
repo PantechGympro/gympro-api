@@ -29,7 +29,10 @@ RUN pip install --upgrade pip && \
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
 FROM python:3.12-slim-bookworm AS runtime
 
-# Java 17 JRE — requerido por PySpark (Spark corre en la JVM)
+# NOTA: el stack de IA fue migrado de PySpark → scikit-learn (ver spark_config.py),
+#       por lo que ya NO se instala Java/JRE. Eliminarlo reduce la imagen ~200 MB,
+#       acelera el build y baja la superficie de ataque. Ningún módulo de app/
+#       importa pyspark; los scripts en api/spark/ son legacy y no los carga gunicorn.
 # postgresql-client-16 — pg_dump DEBE coincidir con la versión del servidor (postgres:16)
 #   Se instala desde el repo PGDG oficial; el paquete genérico "postgresql-client"
 #   en Debian bookworm instala v15 que rechaza conectarse a servidores v16.
@@ -38,7 +41,6 @@ FROM python:3.12-slim-bookworm AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gnupg \
         curl \
-        openjdk-17-jre-headless \
     # ── Repo PGDG para postgresql-client-16 ──────────────────────────────────
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
        | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
@@ -56,9 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         mongodb-database-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Variables de entorno para Java y Python
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-ENV PATH="$JAVA_HOME/bin:/venv/bin:$PATH"
+# Variables de entorno para Python
+ENV PATH="/venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
