@@ -225,6 +225,64 @@ def get_trainer_clients():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@trainer_bp.route('/clients/<client_id>/history', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_client_history(client_id):
+    """Historial de sesiones recientes del cliente + su objetivo actual."""
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        try:
+            mid = ObjectId(client_id)
+        except Exception:
+            return jsonify({"success": False, "message": "ID de cliente inválido"}), 400
+
+        miembro = mdb.miembros.find_one({"_id": mid})
+        if not miembro:
+            return jsonify({"success": False, "message": "Cliente no encontrado"}), 404
+
+        sesiones = list(
+            mdb.sesiones.find({"id_miembro": mid, "id_entrenador_pg": trainer_id})
+            .sort([("fecha", -1)]).limit(20)
+        )
+        historial = [_sesion_to_dict(mdb, s) for s in sesiones]
+
+        return jsonify({
+            "success":        True,
+            "objetivo":       miembro.get("objetivo") or "",
+            "total_sesiones": len(historial),
+            "historial":      historial,
+        }), 200
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@trainer_bp.route('/clients/<client_id>/goal', methods=['PUT'])
+@jwt_required()
+@require_tenant
+def update_client_goal(client_id):
+    """Actualiza el objetivo del cliente (campo `objetivo` en mdb.miembros)."""
+    try:
+        mdb = get_db()
+        try:
+            mid = ObjectId(client_id)
+        except Exception:
+            return jsonify({"success": False, "message": "ID de cliente inválido"}), 400
+
+        data     = request.get_json() or {}
+        objetivo = (data.get("objetivo") or data.get("goal") or "").strip()
+        res = mdb.miembros.update_one({"_id": mid}, {"$set": {"objetivo": objetivo}})
+        if res.matched_count == 0:
+            return jsonify({"success": False, "message": "Cliente no encontrado"}), 404
+
+        return jsonify({"success": True, "objetivo": objetivo}), 200
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # ═══════════════════════════════════════════════════════════════
 #  RUTAS — PERFIL DEL ENTRENADOR
 # ═══════════════════════════════════════════════════════════════
