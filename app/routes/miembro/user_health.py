@@ -120,7 +120,9 @@ def get_user_health():
             "brazo_izquierdo":"Brazo Izquierdo",
             "muslo_derecho":  "Muslo Derecho",
             "muslo_izquierdo":"Muslo Izquierdo",
-            "pantorrilla":    "Pantorrilla"
+            "pantorrilla_derecha":   "Pantorrilla Derecha",
+            "pantorrilla_izquierda": "Pantorrilla Izquierda",
+            "pantorrilla":    "Pantorrilla",  # legado (registros antiguos con una sola)
         }
 
         def _val_medida(campo):
@@ -219,7 +221,8 @@ def update_user_health():
 
         campos_extra = [
             'pecho', 'brazo_derecho', 'brazo_izquierdo',
-            'muslo_derecho', 'muslo_izquierdo', 'pantorrilla', 'notas'
+            'muslo_derecho', 'muslo_izquierdo',
+            'pantorrilla_derecha', 'pantorrilla_izquierda', 'pantorrilla', 'notas'
         ]
 
         for campo in campos_extra:
@@ -266,7 +269,6 @@ def _append_historial_metricas(db, miembro, progreso):
             "pecho":         progreso.get("pecho"),
             "brazo_derecho": progreso.get("brazo_derecho"),
             "brazo_izquierdo": progreso.get("brazo_izquierdo"),
-            "muslo_derecho": progreso.get("muslo_derecho"),
             "muslo_izquierdo": progreso.get("muslo_izquierdo"),
             "pantorrilla":   progreso.get("pantorrilla"),
         }
