@@ -18,6 +18,7 @@ Endpoints:
 """
 from flask import Blueprint, jsonify, request, current_app, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from werkzeug.utils import secure_filename
 from datetime import datetime
 import threading
 import uuid
@@ -32,7 +33,7 @@ from app.backups.service import (
     load_history,
     save_history,
 )
-from app.backups.restore_service import restore_backup_file
+from app.backups.restore_service import restore_backup_file, RESTORABLE_EXTS
 from app.utils.security import require_role
 from app.routes.ia.spark_config import get_mongo_db
 
@@ -41,6 +42,10 @@ backups_admin_bp = Blueprint("backups_admin", __name__)
 # Clave del documento de configuración de programación en MongoDB
 _SCHEDULE_DOC_ID = "backup_schedule_config"
 _SCHEDULE_COLLECTION = "backups_config"
+
+# Límite de tamaño para restauración por upload externo (dumps grandes).
+# Se aplica por-request, no afecta el MAX_CONTENT_LENGTH global (15 MB).
+_MAX_RESTORE_UPLOAD = 1024 * 1024 * 1024  # 1 GB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,12 +312,16 @@ def download_backup(filename: str):
 @require_role("superadmin")
 def restore_backup():
     """
-    Restaura la base de datos desde un archivo de backup.
+    Restaura la base de datos desde un archivo de backup YA EXISTENTE en el
+    historial de la plataforma.
 
     Body JSON:
         { "filename": "backup_full_20260517_030000.archive" }
 
-    ⚠️  Operación destructiva — sobreescribe la BD activa.
+    Formatos restaurables: .archive (MongoDB), .json (MongoDB), .dump (PostgreSQL).
+
+    ⚠️  Operación sensible — modifica la BD activa. Mongo (.archive) reemplaza
+        colecciones; Postgres (.dump) hace merge no destructivo.
     """
     data = request.get_json() or {}
     if not data.get("filename"):
@@ -322,27 +331,104 @@ def restore_backup():
     file_path = None
 
     for root, _, files in os.walk(BACKUP_DIR):
-        if filename in files and (filename.endswith(".archive") or filename.endswith(".json")):
+        if filename in files and filename.lower().endswith(RESTORABLE_EXTS):
             file_path = os.path.join(root, filename)
             break
 
     if not file_path:
         return jsonify({"msg": "Backup no encontrado o formato inválido."}), 404
 
+    return _ejecutar_restore(file_path, filename, origen="historial")
+
+
+@backups_admin_bp.route("/backups/restore-upload", methods=["POST"])
+@jwt_required()
+@require_role("superadmin")
+def restore_upload():
+    """
+    Restaura desde un archivo EXTERNO subido por el usuario (multipart/form-data).
+
+    Pensado para mover datos entre entornos (p.ej. otra laptop): el superadmin
+    sube su .archive / .json / .dump y se restaura directamente.
+
+    Form-data:
+        file   archivo de backup (.archive | .json | .dump)
+    """
+    # Permitir archivos grandes solo en esta ruta (el límite global de 15 MB es
+    # para fotos de perfil; los dumps pueden ser mucho mayores).
     try:
-        restore_backup_file(file_path)
-        save_history({
-            "date":        datetime.utcnow().isoformat(),
-            "type":        "restore",
-            "status":      "completado",
-            "file":        filename,
-            "disparado_por": get_jwt_identity(),
-        })
+        request.max_content_length = _MAX_RESTORE_UPLOAD
+    except Exception:
+        pass
+
+    if "file" not in request.files:
+        return jsonify({"msg": "No se envió ningún archivo (campo 'file')."}), 400
+
+    upload = request.files["file"]
+    if not upload or not upload.filename:
+        return jsonify({"msg": "Archivo vacío."}), 400
+
+    filename = secure_filename(os.path.basename(upload.filename))
+    if not filename.lower().endswith(RESTORABLE_EXTS):
         return jsonify({
-            "msg":  "Base de datos restaurada correctamente.",
-            "file": filename,
+            "msg": f"Formato inválido. Permitidos: {', '.join(RESTORABLE_EXTS)}",
+        }), 400
+
+    # Guardar en un subdirectorio aislado para no mezclar con los backups locales
+    upload_dir = os.path.join(BACKUP_DIR, "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    stamp     = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(upload_dir, f"{stamp}_{filename}")
+
+    try:
+        upload.save(file_path)
+    except Exception as e:
+        current_app.logger.error(f"[restore upload] Error guardando archivo: {e}")
+        return jsonify({"msg": "No se pudo guardar el archivo subido.", "detalle": str(e)}), 500
+
+    resultado = _ejecutar_restore(file_path, filename, origen="upload")
+
+    # Limpiar el archivo temporal subido (ya restaurado)
+    try:
+        os.remove(file_path)
+    except OSError:
+        pass
+
+    return resultado
+
+
+def _ejecutar_restore(file_path: str, filename: str, origen: str):
+    """Lógica común de restauración + registro en historial."""
+    try:
+        meta = restore_backup_file(file_path)
+
+        entry = {
+            "date":          datetime.utcnow().isoformat(),
+            "type":          "restore",
+            "status":        "completado",
+            "file":          filename,
+            "origen":        origen,           # 'historial' | 'upload'
+            "engine":        meta.get("engine"),
+            "disparado_por": get_jwt_identity(),
+        }
+        if meta.get("warnings"):
+            entry["warnings"] = meta["warnings"]
+        save_history(entry)
+
+        return jsonify({
+            "msg":       "Restauración completada.",
+            "file":      filename,
+            "resultado": meta,
         }), 200
 
     except Exception as e:
-        current_app.logger.error(f"[backup restore] Error: {e}")
+        current_app.logger.error(f"[backup restore] Error ({origen}) {filename}: {e}")
+        save_history({
+            "date":   datetime.utcnow().isoformat(),
+            "type":   "restore",
+            "status": "error",
+            "file":   filename,
+            "origen": origen,
+            "error":  str(e),
+        })
         return jsonify({"msg": "Error al restaurar.", "detalle": str(e)}), 500
