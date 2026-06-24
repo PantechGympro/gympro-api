@@ -1,11 +1,12 @@
 """
 restore_service.py — Restauración de respaldos GymPro.
 
-Soporta los 3 artefactos restaurables que genera el servicio de backup:
+Soporta los artefactos restaurables que genera el servicio de backup:
 
     .archive  → dump nativo de MongoDB (mongodump)  → mongorestore
-    .json     → export JSON de MongoDB (full/incremental) → upsert por _id
+    .json     → export JSON de MongoDB (full/incremental) → upsert/merge
     .dump     → dump custom de PostgreSQL (pg_dump -Fc) → pg_restore
+    .tar.gz   → medios subidos (imágenes/videos)         → extracción a uploads
 
 Las herramientas mongorestore / pg_restore se instalan en el contenedor
 (ver api/Dockerfile: mongodb-database-tools + postgresql-client-16).
@@ -17,16 +18,19 @@ abortar. Para una restauración idéntica al backup, vaciar la BD antes.
 """
 import os
 import subprocess
+import tarfile
 
 from bson import json_util
+from pymongo.errors import DuplicateKeyError, WriteError
 
 from app.mongo import get_db
+from app.backups.service import MEDIA_SOURCES
 
 MONGORESTORE_PATH = "mongorestore"
 PG_RESTORE_PATH   = "pg_restore"
 
 # Extensiones soportadas (usado por las rutas para validar antes de restaurar)
-RESTORABLE_EXTS = (".archive", ".json", ".dump")
+RESTORABLE_EXTS = (".archive", ".json", ".dump", ".tar.gz", ".tgz")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,23 +72,61 @@ def restore_mongo_archive(file_path: str) -> dict:
 def restore_mongo_json(file_path: str) -> dict:
     """
     Restaura un backup JSON (full / incremental / diferencial) generado por
-    nuestro propio export. json_util preserva fechas y ObjectId. Se hace upsert
-    por _id: actualiza si existe, inserta si no (no destructivo).
+    nuestro propio export. json_util preserva fechas y ObjectId.
+
+    Estrategia de merge (integra datos nuevos sin perder los existentes):
+
+      1. Se intenta upsert por _id (camino normal: actualiza si existe, inserta
+         si no). El _id original se preserva para no romper referencias entre
+         colecciones.
+      2. Si choca contra un índice único de negocio (p.ej. otro registro ya
+         tiene ese 'id_usuario_pg' con un _id distinto), NO se descarta: se
+         FUSIONAN los campos sobre el registro existente, identificándolo por
+         esa clave única y conservando su _id.
+      3. Solo si tras eso aún falla, se cuenta como advertencia.
+
+    Esto permite importar un backup de otra máquina y que los registros nuevos
+    se integren con los ya presentes.
     """
     db = get_db()
     with open(file_path, "r", encoding="utf-8") as f:
         data = json_util.loads(f.read())
 
     colecciones = 0
-    documentos  = 0
+    insertados  = 0
+    fusionados  = 0
+    omitidos    = 0
+
     for coll_name, docs in data.items():
         coll = db[coll_name]
         colecciones += 1
         for doc in docs:
-            coll.update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
-            documentos += 1
+            # $set de todos los campos salvo _id (inmutable; se respeta el del
+            # registro destino cuando fusionamos por clave de negocio).
+            payload = {k: v for k, v in doc.items() if k != "_id"}
+            try:
+                coll.update_one({"_id": doc.get("_id")}, {"$set": payload}, upsert=True)
+                insertados += 1
+            except (DuplicateKeyError, WriteError) as exc:
+                # keyValue trae la clave única en conflicto, p.ej. {'id_usuario_pg': 8}
+                key_value = (getattr(exc, "details", None) or {}).get("keyValue")
+                if key_value:
+                    try:
+                        coll.update_one(key_value, {"$set": payload}, upsert=False)
+                        fusionados += 1
+                        continue
+                    except Exception:
+                        pass
+                omitidos += 1
 
-    return {"engine": "mongodb", "mode": "json", "colecciones": colecciones, "documentos": documentos}
+    return {
+        "engine": "mongodb",
+        "mode": "json",
+        "colecciones": colecciones,
+        "insertados": insertados,
+        "fusionados": fusionados,
+        "warnings": omitidos,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +181,7 @@ def restore_pg_dump(file_path: str) -> dict:
             "could not connect" in lower
             or "connection refused" in lower
             or "authentication failed" in lower
-            or "does not exist" in lower and "database" in lower
+            or ("does not exist" in lower and "database" in lower)
         )
         if fallo_conexion:
             raise RuntimeError(f"pg_restore no pudo conectar a Postgres: {stderr_msg}")
@@ -158,6 +200,52 @@ def restore_pg_dump(file_path: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Medios — imágenes / videos (.tar.gz)
+# ─────────────────────────────────────────────────────────────────────────────
+def restore_media_archive(file_path: str) -> dict:
+    """
+    Restaura los medios subidos desde un .tar.gz generado por
+    generate_media_archive. Cada prefijo interno (storage_uploads /
+    static_uploads) se extrae a su directorio destino correspondiente.
+
+    Extracción segura: solo se aceptan archivos bajo los prefijos conocidos y se
+    rechaza cualquier ruta con traversal ('..' o absoluta).
+    """
+    # prefijo interno → directorio destino real
+    destinos = {arc: src for src, arc in MEDIA_SOURCES}
+
+    restaurados = 0
+    omitidos    = 0
+    with tarfile.open(file_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            partes = member.name.replace("\\", "/").split("/", 1)
+            if len(partes) != 2:
+                continue
+            prefijo, rel = partes
+            base = destinos.get(prefijo)
+            if not base or not rel:
+                omitidos += 1
+                continue
+            # Anti path-traversal
+            if rel.startswith("/") or ".." in rel.split("/"):
+                omitidos += 1
+                continue
+
+            dest_path = os.path.join(base, rel)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            with extracted as fsrc, open(dest_path, "wb") as fdst:
+                fdst.write(fsrc.read())
+            restaurados += 1
+
+    return {"engine": "media", "mode": "files", "restaurados": restaurados, "warnings": omitidos}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dispatcher por extensión
 # ─────────────────────────────────────────────────────────────────────────────
 def restore_backup_file(file_path: str) -> dict:
@@ -171,6 +259,8 @@ def restore_backup_file(file_path: str) -> dict:
     lower = file_path.lower()
     if lower.endswith(".archive"):
         return restore_mongo_archive(file_path)
+    if lower.endswith((".tar.gz", ".tgz")):
+        return restore_media_archive(file_path)
     if lower.endswith(".json"):
         return restore_mongo_json(file_path)
     if lower.endswith(".dump"):

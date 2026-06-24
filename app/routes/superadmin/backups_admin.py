@@ -400,7 +400,9 @@ def restore_upload():
 def _ejecutar_restore(file_path: str, filename: str, origen: str):
     """Lógica común de restauración + registro en historial."""
     try:
+        current_app.logger.info(f"[restore] inicio ({origen}) archivo={filename}")
         meta = restore_backup_file(file_path)
+        current_app.logger.info(f"[restore] OK ({origen}) {filename} → {meta}")
 
         entry = {
             "date":          datetime.utcnow().isoformat(),

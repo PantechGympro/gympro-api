@@ -1,6 +1,7 @@
 import os
 import subprocess
 import json
+import tarfile
 import pandas as pd
 from fpdf import FPDF
 from datetime import datetime
@@ -29,6 +30,20 @@ PG_DB       = os.getenv("POSTGRES_DB",       "gymprodb")
 LAST_FULL_BACKUP_FILE = os.path.join(BACKUP_DIR, "last_full_backup.txt")
 LAST_BACKUP_FILE = os.path.join(BACKUP_DIR, "last_backup_any.txt")
 HISTORY_FILE = os.path.join(BACKUP_DIR, "backup_history.json")
+
+# Directorios de medios subidos (imágenes/videos). Se respaldan AMBOS:
+#   - storage/uploads: ubicación activa (bind-mount), donde el código guarda y
+#     sirve las subidas nuevas (fotos de perfil, certificados, etc.).
+#   - app/static/uploads: ubicación legacy con seeds/imágenes históricas.
+# Conservar ambos hace el backup portable entre máquinas sin perder archivos.
+STORAGE_UPLOADS_DIR = os.getenv("UPLOADS_DIR", "/app/storage/uploads")
+STATIC_UPLOADS_DIR  = os.path.join(BASE_DIR, "app", "static", "uploads")
+
+# Prefijos internos dentro del .tar.gz → directorio destino al restaurar.
+MEDIA_SOURCES = (
+    (STORAGE_UPLOADS_DIR, "storage_uploads"),
+    (STATIC_UPLOADS_DIR,  "static_uploads"),
+)
 
 # ================= STATE =================
 
@@ -239,7 +254,42 @@ def generate_full_json(db, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(json_util.dumps(backup_data, indent=2))
 
-# ================= EMAIL =================
+# ================= MEDIOS (imágenes / videos) =================
+
+def _dir_tiene_archivos(path: str) -> bool:
+    """True si el directorio existe y contiene al menos un archivo real (≠ .gitkeep)."""
+    if not os.path.isdir(path):
+        return False
+    for root, _, files in os.walk(path):
+        for f in files:
+            if f != ".gitkeep" and os.path.isfile(os.path.join(root, f)):
+                return True
+    return False
+
+
+def generate_media_archive(output_path: str):
+    """
+    Empaqueta los medios subidos (imágenes/videos) en un .tar.gz.
+
+    Cada directorio fuente se guarda bajo un prefijo conocido (storage_uploads,
+    static_uploads) para poder restaurarlo a su ubicación correcta. Si no hay
+    ningún archivo de medios, no se crea el archivo y se devuelve None.
+    """
+    incluidos = 0
+    with tarfile.open(output_path, "w:gz") as tar:
+        for src, arc in MEDIA_SOURCES:
+            if _dir_tiene_archivos(src):
+                tar.add(src, arcname=arc)
+                incluidos += 1
+
+    if incluidos == 0:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+    return output_path
+
+
+# ================= POSTGRES =================
 
 def run_pg_dump(output_path: str) -> None:
     """
@@ -334,6 +384,7 @@ def run_backup(job_id: str, backup_type: str, app):
             json_file = None
             xlsx      = None
             pdf       = None
+            media     = None
             file_size = 0
 
             if backup_type == "full":
@@ -427,6 +478,14 @@ def run_backup(job_id: str, backup_type: str, app):
             else:
                 raise Exception("Tipo de respaldo no válido")
 
+            # Medios (imágenes/videos subidos) — se incluyen en cualquier tipo de
+            # backup para que el respaldo sea portable entre máquinas. None si no hay.
+            backup_state["current_step"] = "Empaquetando imágenes/videos"
+            backup_state["progress_percentage"] = 85
+            media = generate_media_archive(
+                os.path.join(path, f"backup_media_{timestamp}.tar.gz")
+            )
+
             # Tamaño basado en el archivo principal de Mongo
             main_file = archive if archive else json_file
             if main_file and os.path.exists(main_file):
@@ -438,6 +497,7 @@ def run_backup(job_id: str, backup_type: str, app):
                 "json":     json_file,
                 "excel":    xlsx,
                 "pdf":      pdf,
+                "media":    media,
             }
 
             backup_state["progress_percentage"] = 90
