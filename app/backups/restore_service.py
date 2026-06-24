@@ -17,6 +17,9 @@ ejecuta SIN --clean, por lo que no elimina objetos existentes; los errores de
 abortar. Para una restauración idéntica al backup, vaciar la BD antes.
 """
 import os
+import json
+import shutil
+import tempfile
 import subprocess
 import tarfile
 
@@ -132,14 +135,15 @@ def restore_mongo_json(file_path: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # PostgreSQL — dump custom (.dump)
 # ─────────────────────────────────────────────────────────────────────────────
-def restore_pg_dump(file_path: str) -> dict:
+def restore_pg_dump(file_path: str, clean: bool = False) -> dict:
     """
     Restaura un dump custom de PostgreSQL (pg_dump -Fc) con pg_restore.
 
-    Estrategia NO destructiva (merge): se omite --clean, por lo que no se
-    eliminan objetos existentes. pg_restore NO usa --exit-on-error, así que los
-    errores recuperables (objeto ya existe, PK duplicada) se acumulan como
-    advertencias sin abortar el resto de la restauración.
+    clean=False (default) → merge NO destructivo: se omite --clean, no se
+        eliminan objetos existentes; los errores recuperables se reportan como
+        advertencias sin abortar.
+    clean=True → reemplazo total: añade --clean --if-exists, dejando la BD
+        idéntica al dump (usado en la restauración por bundle / clon completo).
 
     La contraseña se pasa por PGPASSWORD para no depender de .pgpass.
     """
@@ -152,19 +156,23 @@ def restore_pg_dump(file_path: str) -> dict:
     env = os.environ.copy()
     env["PGPASSWORD"] = pg_password
 
+    cmd = [
+        PG_RESTORE_PATH,
+        "-h", pg_host,
+        "-p", pg_port,
+        "-U", pg_user,
+        "-d", pg_db,
+        "--no-owner",
+        "--no-privileges",
+    ]
+    if clean:
+        # Reemplazo total: elimina y recrea objetos antes de restaurar.
+        cmd += ["--clean", "--if-exists"]
+    # sin --exit-on-error: continúa ante objetos ya existentes / inexistentes
+    cmd.append(file_path)
+
     result = subprocess.run(
-        [
-            PG_RESTORE_PATH,
-            "-h", pg_host,
-            "-p", pg_port,
-            "-U", pg_user,
-            "-d", pg_db,
-            "--no-owner",
-            "--no-privileges",
-            # sin --clean: merge no destructivo
-            # sin --exit-on-error: continúa ante objetos ya existentes
-            file_path,
-        ],
+        cmd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -186,17 +194,17 @@ def restore_pg_dump(file_path: str) -> dict:
         if fallo_conexion:
             raise RuntimeError(f"pg_restore no pudo conectar a Postgres: {stderr_msg}")
 
-        # Errores recuperables → advertencia (merge sobre esquema existente)
+        # Errores recuperables → advertencia (objetos ya/no existentes)
         warnings = [l for l in stderr_msg.splitlines() if "error" in l.lower()]
         return {
             "engine": "postgresql",
-            "mode": "merge",
+            "mode": "clean" if clean else "merge",
             "target": pg_db,
             "warnings": len(warnings),
             "detail": stderr_msg[-1500:] if stderr_msg else "",
         }
 
-    return {"engine": "postgresql", "mode": "merge", "target": pg_db, "warnings": 0}
+    return {"engine": "postgresql", "mode": "clean" if clean else "merge", "target": pg_db, "warnings": 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,11 +254,80 @@ def restore_media_archive(file_path: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bundle — paquete único (Mongo + PostgreSQL + medios)
+# ─────────────────────────────────────────────────────────────────────────────
+def _es_bundle(file_path: str) -> bool:
+    """True si el .tar.gz contiene manifest.json (paquete completo GymPro)."""
+    try:
+        with tarfile.open(file_path, "r:gz") as tar:
+            return "manifest.json" in tar.getnames()
+    except Exception:
+        return False
+
+
+def restore_bundle(file_path: str) -> dict:
+    """
+    Restaura un paquete único generado por build_bundle. Reemplazo TOTAL (clon):
+
+        1. PostgreSQL primero (usuarios, gimnasios, finanzas) con --clean.
+        2. MongoDB: .archive con --drop, o .json con merge si es incremental.
+        3. Medios (imágenes/videos) a sus directorios.
+
+    Se extrae a un directorio temporal aislado que se limpia al finalizar.
+    """
+    tmp = tempfile.mkdtemp(prefix="gpbundle_")
+    resultados: dict = {}
+    try:
+        with tarfile.open(file_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                # Extracción segura: nada fuera del directorio temporal
+                dest = os.path.realpath(os.path.join(tmp, member.name))
+                if not dest.startswith(os.path.realpath(tmp) + os.sep):
+                    continue
+                tar.extract(member, tmp)
+
+        manifest = {}
+        mpath = os.path.join(tmp, "manifest.json")
+        if os.path.exists(mpath):
+            with open(mpath, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+
+        # 1) PostgreSQL — reemplazo total
+        pg = os.path.join(tmp, "postgres.dump")
+        if os.path.exists(pg):
+            resultados["postgresql"] = restore_pg_dump(pg, clean=True)
+
+        # 2) MongoDB
+        m_archive = os.path.join(tmp, "mongo.archive")
+        m_json    = os.path.join(tmp, "mongo.json")
+        if os.path.exists(m_archive):
+            resultados["mongodb"] = restore_mongo_archive(m_archive)
+        elif os.path.exists(m_json):
+            resultados["mongodb"] = restore_mongo_json(m_json)
+
+        # 3) Medios
+        media = os.path.join(tmp, "media.tar.gz")
+        if os.path.exists(media):
+            resultados["media"] = restore_media_archive(media)
+
+        warnings = sum(int(r.get("warnings", 0)) for r in resultados.values())
+        return {
+            "engine":      "bundle",
+            "mode":        "clon",
+            "tipo":        manifest.get("tipo"),
+            "componentes": resultados,
+            "warnings":    warnings,
+        }
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dispatcher por extensión
 # ─────────────────────────────────────────────────────────────────────────────
 def restore_backup_file(file_path: str) -> dict:
     """
-    Restaura un backup detectando el motor por la extensión del archivo.
+    Restaura un backup detectando el motor por la extensión / contenido.
     Devuelve un dict con metadatos del resultado. Lanza excepción ante fallo duro.
     """
     if not os.path.exists(file_path):
@@ -260,6 +337,9 @@ def restore_backup_file(file_path: str) -> dict:
     if lower.endswith(".archive"):
         return restore_mongo_archive(file_path)
     if lower.endswith((".tar.gz", ".tgz")):
+        # Un .tar.gz con manifest.json es un paquete completo; si no, son medios.
+        if _es_bundle(file_path):
+            return restore_bundle(file_path)
         return restore_media_archive(file_path)
     if lower.endswith(".json"):
         return restore_mongo_json(file_path)

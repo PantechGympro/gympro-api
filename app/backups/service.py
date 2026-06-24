@@ -1,4 +1,5 @@
 import os
+import io
 import subprocess
 import json
 import tarfile
@@ -289,6 +290,61 @@ def generate_media_archive(output_path: str):
     return output_path
 
 
+# ================= BUNDLE (paquete único) =================
+
+def build_bundle(*, bundle_path, backup_type, archive, json_file,
+                 pg_dump, media, xlsx, pdf, mongo_db, pg_db):
+    """
+    Empaqueta TODO el respaldo en un único .tar.gz portable, con esta estructura:
+
+        manifest.json        metadatos (tipo, fecha, componentes, nombres de BD)
+        mongo.archive        dump nativo Mongo (full)   ── o ──
+        mongo.json           export Mongo (incremental/diferencial)
+        postgres.dump        dump custom PostgreSQL
+        media.tar.gz         imágenes/videos (si existen)
+        reports/datos.xlsx   reporte Excel (no se restaura)
+        reports/reporte.pdf  reporte PDF   (no se restaura)
+
+    Devuelve el dict de componentes incluidos (para el manifest/historial).
+    """
+    componentes = {}
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        if archive and os.path.exists(archive):
+            tar.add(archive, arcname="mongo.archive")
+            componentes["mongo"] = "mongo.archive"
+        elif json_file and os.path.exists(json_file):
+            tar.add(json_file, arcname="mongo.json")
+            componentes["mongo"] = "mongo.json"
+
+        if pg_dump and os.path.exists(pg_dump):
+            tar.add(pg_dump, arcname="postgres.dump")
+            componentes["postgres"] = "postgres.dump"
+
+        if media and os.path.exists(media):
+            tar.add(media, arcname="media.tar.gz")
+            componentes["media"] = "media.tar.gz"
+
+        if xlsx and os.path.exists(xlsx):
+            tar.add(xlsx, arcname="reports/datos.xlsx")
+        if pdf and os.path.exists(pdf):
+            tar.add(pdf, arcname="reports/reporte.pdf")
+
+        manifest = {
+            "formato":     "gympro-bundle",
+            "version":     1,
+            "tipo":        backup_type,
+            "created_at":  datetime.now().isoformat(),
+            "componentes": componentes,
+            "db":          {"mongo": mongo_db, "postgres": pg_db},
+        }
+        data = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+
+    return componentes
+
+
 # ================= POSTGRES =================
 
 def run_pg_dump(output_path: str) -> None:
@@ -478,27 +534,43 @@ def run_backup(job_id: str, backup_type: str, app):
             else:
                 raise Exception("Tipo de respaldo no válido")
 
-            # Medios (imágenes/videos subidos) — se incluyen en cualquier tipo de
-            # backup para que el respaldo sea portable entre máquinas. None si no hay.
+            # Medios (imágenes/videos subidos). None si no hay.
             backup_state["current_step"] = "Empaquetando imágenes/videos"
             backup_state["progress_percentage"] = 85
             media = generate_media_archive(
                 os.path.join(path, f"backup_media_{timestamp}.tar.gz")
             )
 
-            # Tamaño basado en el archivo principal de Mongo
-            main_file = archive if archive else json_file
-            if main_file and os.path.exists(main_file):
-                file_size = os.path.getsize(main_file) / (1024 * 1024)  # MB
+            # ── Paquete único: todo el respaldo en un solo archivo portable ─────
+            backup_state["current_step"] = "Generando paquete único"
+            backup_state["progress_percentage"] = 92
+            bundle = os.path.join(path, f"backup_{backup_type}_{timestamp}.tar.gz")
+            build_bundle(
+                bundle_path=bundle,
+                backup_type=backup_type,
+                archive=archive,
+                json_file=json_file,
+                pg_dump=pg_dump,
+                media=media,
+                xlsx=xlsx,
+                pdf=pdf,
+                mongo_db=db_name,
+                pg_db=PG_DB,
+            )
 
-            backup_state["generated_files"] = {
-                "db_dump":  main_file,
-                "pg_dump":  pg_dump,
-                "json":     json_file,
-                "excel":    xlsx,
-                "pdf":      pdf,
-                "media":    media,
-            }
+            # Los componentes sueltos ya viven dentro del bundle → eliminarlos.
+            for f in (archive, json_file, pg_dump, media, xlsx, pdf):
+                if f and os.path.exists(f) and os.path.abspath(f) != os.path.abspath(bundle):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+
+            if os.path.exists(bundle):
+                file_size = os.path.getsize(bundle) / (1024 * 1024)  # MB
+
+            # Un único artefacto descargable/restaurable
+            backup_state["generated_files"] = {"bundle": bundle}
 
             backup_state["progress_percentage"] = 90
             backup_state["current_step"] = "Guardando historial"
