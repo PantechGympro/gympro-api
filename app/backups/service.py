@@ -5,7 +5,14 @@ import json
 import tarfile
 import pandas as pd
 from fpdf import FPDF
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _now_iso():
+    """Timestamp UTC con offset (+00:00) para que el frontend lo convierta a la
+    hora local del usuario. Evita el desfase de mostrar la hora del contenedor
+    (UTC) como si fuera local."""
+    return datetime.now(timezone.utc).isoformat()
 from flask_mail import Message
 from bson import json_util
 from bson.objectid import ObjectId
@@ -277,7 +284,8 @@ def generate_media_archive(output_path: str):
     ningún archivo de medios, no se crea el archivo y se devuelve None.
     """
     incluidos = 0
-    with tarfile.open(output_path, "w:gz") as tar:
+    # compresslevel=6 → buen balance velocidad/tamaño (9 es mucho más lento).
+    with tarfile.open(output_path, "w:gz", compresslevel=6) as tar:
         for src, arc in MEDIA_SOURCES:
             if _dir_tiene_archivos(src):
                 tar.add(src, arcname=arc)
@@ -308,7 +316,7 @@ def build_bundle(*, bundle_path, backup_type, archive, json_file,
     Devuelve el dict de componentes incluidos (para el manifest/historial).
     """
     componentes = {}
-    with tarfile.open(bundle_path, "w:gz") as tar:
+    with tarfile.open(bundle_path, "w:gz", compresslevel=6) as tar:
         if archive and os.path.exists(archive):
             tar.add(archive, arcname="mongo.archive")
             componentes["mongo"] = "mongo.archive"
@@ -333,7 +341,7 @@ def build_bundle(*, bundle_path, backup_type, archive, json_file,
             "formato":     "gympro-bundle",
             "version":     1,
             "tipo":        backup_type,
-            "created_at":  datetime.now().isoformat(),
+            "created_at":  _now_iso(),
             "componentes": componentes,
             "db":          {"mongo": mongo_db, "postgres": pg_db},
         }
@@ -381,9 +389,20 @@ def run_pg_dump(output_path: str) -> None:
         )
 
 
-def send_email_with_attachments(app, files, backup_type):
+def send_email_notification(app, files, backup_type):
+    """
+    Notifica por correo que el respaldo se generó. NO adjunta el bundle: puede
+    pesar varios MB y un adjunto grande hace lento/inestable el envío SMTP
+    (timeouts que retrasarían el cierre del backup). El archivo se descarga
+    desde el panel.
+    """
     try:
         recipient = app.config.get("MAIL_RECIPIENT") or app.config.get("MAIL_USERNAME")
+        if not recipient:
+            return False
+
+        bundle = files.get("bundle")
+        nombre = os.path.basename(bundle) if bundle else "—"
 
         msg = Message(
             subject=f"[Backup] Respaldo {backup_type.upper()} generado",
@@ -391,21 +410,11 @@ def send_email_with_attachments(app, files, backup_type):
             recipients=[recipient],
             body=(
                 f"El respaldo {backup_type} se generó correctamente.\n\n"
-                f"• MongoDB: dump nativo + JSON + Excel + PDF\n"
-                f"• PostgreSQL: pg_dump (formato custom)\n\n"
+                f"Paquete único (Mongo + PostgreSQL + medios): {nombre}\n"
+                f"Descárgalo desde el panel de Backups.\n\n"
                 f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             ),
         )
-
-        for file_type, file_path in files.items():
-            if os.path.exists(file_path):
-                with open(file_path, "rb") as f:
-                    msg.attach(
-                        os.path.basename(file_path), 
-                        "application/octet-stream", 
-                        f.read()
-                    )
-
         mail.send(msg)
         return True
     except Exception as e:
@@ -443,91 +452,71 @@ def run_backup(job_id: str, backup_type: str, app):
             media     = None
             file_size = 0
 
+            # Reportes Excel/PDF: OPCIONALES. Son lo que más RAM/tiempo consume
+            # (pandas + fpdf cargan todas las colecciones en memoria) y NO se usan
+            # para restaurar. Por defecto OFF → backup rápido y sin riesgo de OOM.
+            # Activar con BACKUP_INCLUDE_REPORTS=true si se quieren dentro del bundle.
+            include_reports = os.getenv("BACKUP_INCLUDE_REPORTS", "false").lower() in ("1", "true", "yes")
+
             if backup_type == "full":
                 backup_state["current_step"] = "Generando dump MongoDB (.archive)"
-                backup_state["progress_percentage"] = 15
+                backup_state["progress_percentage"] = 20
 
-                archive   = os.path.join(path, f"backup_full_{timestamp}.archive")
-                json_file = os.path.join(path, f"backup_full_{timestamp}.json")
-                xlsx      = os.path.join(path, f"backup_full_{timestamp}.xlsx")
-                pdf       = os.path.join(path, f"backup_full_{timestamp}.pdf")
-                pg_dump   = os.path.join(path, f"backup_pg_full_{timestamp}.dump")
+                archive = os.path.join(path, f"backup_full_{timestamp}.archive")
+                pg_dump = os.path.join(path, f"backup_pg_full_{timestamp}.dump")
 
+                # Dump nativo de Mongo (mongodump): rápido y completo. Es el
+                # artefacto que se restaura; NO se genera JSON completo porque
+                # sería redundante con el .archive y muy costoso en memoria.
                 subprocess.run(
                     [MONGODUMP_PATH, "--uri", mongo_uri, "--db", db_name, f"--archive={archive}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
                 )
 
-                backup_state["progress_percentage"] = 30
+                backup_state["progress_percentage"] = 45
                 backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
                 run_pg_dump(pg_dump)
 
-                backup_state["progress_percentage"] = 50
-                backup_state["current_step"] = "Generando JSON completo"
-                generate_full_json(db, json_file)
-
-                backup_state["progress_percentage"] = 65
-                backup_state["current_step"] = "Generando Excel"
-                generate_excel(db, xlsx)
-
-                backup_state["progress_percentage"] = 80
-                backup_state["current_step"] = "Generando PDF"
-                generate_pdf(db, pdf, mode="FULL")
+                if include_reports:
+                    backup_state["progress_percentage"] = 65
+                    backup_state["current_step"] = "Generando reportes (Excel/PDF)"
+                    xlsx = os.path.join(path, f"backup_full_{timestamp}.xlsx")
+                    pdf  = os.path.join(path, f"backup_full_{timestamp}.pdf")
+                    generate_excel(db, xlsx)
+                    generate_pdf(db, pdf, mode="FULL")
 
                 save_last_backup(LAST_FULL_BACKUP_FILE)
                 save_last_backup(LAST_BACKUP_FILE)
 
-            elif backup_type == "differential":
-                since = get_last_backup(LAST_FULL_BACKUP_FILE)
+            elif backup_type in ("differential", "incremental"):
+                ref_file = LAST_FULL_BACKUP_FILE if backup_type == "differential" else LAST_BACKUP_FILE
+                since = get_last_backup(ref_file)
                 if not since:
-                    raise Exception("No existe respaldo FULL previo. Ejecute primero un backup completo.")
+                    falta = "FULL" if backup_type == "differential" else "previo"
+                    raise Exception(
+                        f"No existe respaldo {falta}. Ejecute primero un backup completo."
+                    )
 
-                backup_state["current_step"] = "Generando backup diferencial MongoDB (.json)"
-                backup_state["progress_percentage"] = 20
+                etiqueta = "diff" if backup_type == "differential" else "inc"
+                backup_state["current_step"] = f"Generando backup {backup_type} MongoDB (.json)"
+                backup_state["progress_percentage"] = 25
 
-                json_file = os.path.join(path, f"backup_diff_{timestamp}.json")
-                xlsx      = os.path.join(path, f"backup_diff_{timestamp}.xlsx")
-                pdf       = os.path.join(path, f"backup_diff_{timestamp}.pdf")
-                pg_dump   = os.path.join(path, f"backup_pg_diff_{timestamp}.dump")
+                json_file = os.path.join(path, f"backup_{etiqueta}_{timestamp}.json")
+                pg_dump   = os.path.join(path, f"backup_pg_{etiqueta}_{timestamp}.dump")
 
                 generate_incremental_json(db, json_file, since)
 
-                backup_state["progress_percentage"] = 40
+                backup_state["progress_percentage"] = 50
                 backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
                 run_pg_dump(pg_dump)
 
-                backup_state["progress_percentage"] = 65
-                generate_excel(db, xlsx, since)
-
-                backup_state["progress_percentage"] = 80
-                generate_pdf(db, pdf, since, "DIFERENCIAL")
-
-                save_last_backup(LAST_BACKUP_FILE)
-
-            elif backup_type == "incremental":
-                since = get_last_backup(LAST_BACKUP_FILE)
-                if not since:
-                    raise Exception("No existe respaldo previo. Ejecute primero un backup completo.")
-
-                backup_state["current_step"] = "Generando backup incremental MongoDB (.json)"
-                backup_state["progress_percentage"] = 20
-
-                json_file = os.path.join(path, f"backup_inc_{timestamp}.json")
-                xlsx      = os.path.join(path, f"backup_inc_{timestamp}.xlsx")
-                pdf       = os.path.join(path, f"backup_inc_{timestamp}.pdf")
-                pg_dump   = os.path.join(path, f"backup_pg_inc_{timestamp}.dump")
-
-                generate_incremental_json(db, json_file, since)
-
-                backup_state["progress_percentage"] = 40
-                backup_state["current_step"] = "Generando dump PostgreSQL (.dump)"
-                run_pg_dump(pg_dump)
-
-                backup_state["progress_percentage"] = 65
-                generate_excel(db, xlsx, since)
-
-                backup_state["progress_percentage"] = 80
-                generate_pdf(db, pdf, since, "INCREMENTAL")
+                if include_reports:
+                    backup_state["progress_percentage"] = 65
+                    backup_state["current_step"] = "Generando reportes (Excel/PDF)"
+                    xlsx = os.path.join(path, f"backup_{etiqueta}_{timestamp}.xlsx")
+                    pdf  = os.path.join(path, f"backup_{etiqueta}_{timestamp}.pdf")
+                    generate_excel(db, xlsx, since)
+                    generate_pdf(db, pdf, since, backup_type.upper())
 
                 save_last_backup(LAST_BACKUP_FILE)
 
@@ -576,7 +565,7 @@ def run_backup(job_id: str, backup_type: str, app):
             backup_state["current_step"] = "Guardando historial"
 
             save_history({
-                "date":    datetime.now().isoformat(),
+                "date":    _now_iso(),
                 "type":    backup_type,
                 "status":  "completado",
                 "job_id":  job_id,
@@ -590,12 +579,12 @@ def run_backup(job_id: str, backup_type: str, app):
 
             backup_state["progress_percentage"] = 95
             backup_state["current_step"] = "Enviando email"
-            
-            send_email_with_attachments(app, backup_state["generated_files"], backup_type)
+
+            send_email_notification(app, backup_state["generated_files"], backup_type)
 
             backup_state["current_step"] = "Completado"
             backup_state["progress_percentage"] = 100
-            backup_state["last_backup"] = datetime.now()
+            backup_state["last_backup"] = datetime.now(timezone.utc)
 
             # Purgar backups viejos — mantener solo los 3 más recientes
             try:
@@ -609,7 +598,7 @@ def run_backup(job_id: str, backup_type: str, app):
             print("[BACKUP ERROR]", e)
 
             save_history({
-                "date":   datetime.now().isoformat(),
+                "date":   _now_iso(),
                 "type":   backup_type,
                 "status": "error",
                 "job_id": job_id,

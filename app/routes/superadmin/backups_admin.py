@@ -19,7 +19,7 @@ Endpoints:
 from flask import Blueprint, jsonify, request, current_app, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import uuid
 import os
@@ -405,7 +405,7 @@ def _ejecutar_restore(file_path: str, filename: str, origen: str):
         current_app.logger.info(f"[restore] OK ({origen}) {filename} → {meta}")
 
         entry = {
-            "date":          datetime.utcnow().isoformat(),
+            "date":          datetime.now(timezone.utc).isoformat(),
             "type":          "restore",
             "status":        "completado",
             "file":          filename,
@@ -426,7 +426,7 @@ def _ejecutar_restore(file_path: str, filename: str, origen: str):
     except Exception as e:
         current_app.logger.error(f"[backup restore] Error ({origen}) {filename}: {e}")
         save_history({
-            "date":   datetime.utcnow().isoformat(),
+            "date":   datetime.now(timezone.utc).isoformat(),
             "type":   "restore",
             "status": "error",
             "file":   filename,

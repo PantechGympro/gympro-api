@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app, send_file
 from flask_jwt_extended import jwt_required
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 import threading
 import os
@@ -158,7 +158,7 @@ def restore_backup():
         restore_backup_file(file_path)
 
         save_history({
-            "date": datetime.utcnow().isoformat(),
+            "date": datetime.now(timezone.utc).isoformat(),
             "type": "restore",
             "size": "N/A",
             "url": filename

@@ -24,9 +24,10 @@ import subprocess
 import tarfile
 
 from bson import json_util
-from pymongo.errors import DuplicateKeyError, WriteError
+from pymongo import ReplaceOne
+from pymongo.errors import DuplicateKeyError, WriteError, BulkWriteError
 
-from app.mongo import get_db
+from app.mongo import get_db, get_client
 from app.backups.service import MEDIA_SOURCES
 
 MONGORESTORE_PATH = "mongorestore"
@@ -39,17 +40,25 @@ RESTORABLE_EXTS = (".archive", ".json", ".dump", ".tar.gz", ".tgz")
 # ─────────────────────────────────────────────────────────────────────────────
 # MongoDB — dump nativo (.archive)
 # ─────────────────────────────────────────────────────────────────────────────
-def restore_mongo_archive(file_path: str) -> dict:
+def restore_mongo_archive(file_path: str, drop_db: bool = False) -> dict:
     """
     Restaura un dump nativo de MongoDB generado por mongodump (--archive).
 
     Usa MONGO_URI (misma fuente que service.py / mongo.py), de modo que funciona
     tanto en Docker (mongodb://mongo:27017/gymdb) como en Atlas
-    (mongodb+srv://...). --drop elimina cada colección antes de restaurarla para
-    evitar duplicados; --nsInclude acota la restauración a la base del proyecto.
+    (mongodb+srv://...).
+
+    drop_db=True (clon exacto, usado por el bundle): elimina TODA la base de
+    datos antes de restaurar, de modo que el resultado sea idéntico al backup
+    (incluso colecciones que ya no existen en el origen). Si es False, se usa
+    --drop por-colección (reemplaza solo las colecciones presentes en el dump).
     """
     mongo_uri = os.getenv("MONGO_URI", "mongodb://mongo:27017/gymdb")
     db_name   = os.getenv("MONGO_DB", "gymdb")
+
+    if drop_db:
+        # Reemplazo total: parte de una base limpia.
+        get_client().drop_database(db_name)
 
     result = subprocess.run(
         [
@@ -66,7 +75,7 @@ def restore_mongo_archive(file_path: str) -> dict:
         stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"mongorestore falló (código {result.returncode}): {stderr_msg}")
 
-    return {"engine": "mongodb", "mode": "archive", "target": db_name}
+    return {"engine": "mongodb", "mode": "drop_db" if drop_db else "archive", "target": db_name}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,19 +110,34 @@ def restore_mongo_json(file_path: str) -> dict:
     omitidos    = 0
 
     for coll_name, docs in data.items():
+        if not docs:
+            continue
         coll = db[coll_name]
         colecciones += 1
-        for doc in docs:
-            # $set de todos los campos salvo _id (inmutable; se respeta el del
-            # registro destino cuando fusionamos por clave de negocio).
-            payload = {k: v for k, v in doc.items() if k != "_id"}
-            try:
-                coll.update_one({"_id": doc.get("_id")}, {"$set": payload}, upsert=True)
-                insertados += 1
-            except (DuplicateKeyError, WriteError) as exc:
-                # keyValue trae la clave única en conflicto, p.ej. {'id_usuario_pg': 8}
-                key_value = (getattr(exc, "details", None) or {}).get("keyValue")
-                if key_value:
+
+        # 1) Camino rápido: bulk_write ordered=False de ReplaceOne por _id.
+        #    Procesa miles de documentos en una sola ida a Mongo (vs. un
+        #    update_one por documento). ordered=False no aborta ante un fallo:
+        #    sigue con el resto y reporta los errores al final.
+        ops = [ReplaceOne({"_id": d.get("_id")}, d, upsert=True) for d in docs]
+        try:
+            coll.bulk_write(ops, ordered=False)
+            insertados += len(ops)
+        except BulkWriteError as bwe:
+            we = bwe.details.get("writeErrors", [])
+            # Los que SÍ entraron en el lote
+            insertados += (len(ops) - len(we))
+            # 2) Reintento puntual de los que chocaron contra un índice único de
+            #    negocio: se FUSIONAN sobre el registro existente por su keyValue.
+            for err in we:
+                if err.get("code") != 11000:
+                    omitidos += 1
+                    continue
+                idx = err.get("index")
+                doc = docs[idx] if isinstance(idx, int) and idx < len(docs) else None
+                key_value = err.get("keyValue") or (err.get("errInfo") or {}).get("keyValue")
+                if doc is not None and key_value:
+                    payload = {k: v for k, v in doc.items() if k != "_id"}
                     try:
                         coll.update_one(key_value, {"$set": payload}, upsert=False)
                         fusionados += 1
@@ -297,11 +321,12 @@ def restore_bundle(file_path: str) -> dict:
         if os.path.exists(pg):
             resultados["postgresql"] = restore_pg_dump(pg, clean=True)
 
-        # 2) MongoDB
+        # 2) MongoDB — clon exacto: drop_db en el .archive (full). En bundles
+        #    incrementales/diferenciales el componente es .json (merge de delta).
         m_archive = os.path.join(tmp, "mongo.archive")
         m_json    = os.path.join(tmp, "mongo.json")
         if os.path.exists(m_archive):
-            resultados["mongodb"] = restore_mongo_archive(m_archive)
+            resultados["mongodb"] = restore_mongo_archive(m_archive, drop_db=True)
         elif os.path.exists(m_json):
             resultados["mongodb"] = restore_mongo_json(m_json)
 
