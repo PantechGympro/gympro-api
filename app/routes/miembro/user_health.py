@@ -248,6 +248,57 @@ def update_user_health():
         return jsonify({"error": str(e)}), 500
 
 
+@user_health_bp.route('/api/user/health/medical', methods=['PUT'])
+@jwt_required()
+@require_tenant
+def update_user_medical():
+    """
+    Actualiza la información médica del miembro desde la app.
+
+    Body JSON (todos opcionales — se actualiza solo lo enviado):
+        condicionesMedicas : list[str] | str  -> miembro.condiciones_medicas (lista)
+        alergias           : list[str] | str  -> miembro.alergias            (CSV)
+        medicamentos       : list[str] | str  -> miembro.medicamentos        (CSV)
+        lesiones           : list[str] | str  -> miembro.lesiones_previas     (CSV)
+
+    Se guarda alergias/medicamentos/lesiones como texto separado por comas para
+    ser consistente con el parseo del GET (que hace split por comas).
+    """
+    try:
+        db         = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = db.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        data = request.json or {}
+
+        def _to_list(v):
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            return [s.strip() for s in str(v or "").split(",") if s.strip()]
+
+        update = {}
+        if "condicionesMedicas" in data:
+            update["condiciones_medicas"] = _to_list(data["condicionesMedicas"])
+        if "alergias" in data:
+            update["alergias"] = ", ".join(_to_list(data["alergias"]))
+        if "medicamentos" in data:
+            update["medicamentos"] = ", ".join(_to_list(data["medicamentos"]))
+        if "lesiones" in data:
+            update["lesiones_previas"] = ", ".join(_to_list(data["lesiones"]))
+
+        if update:
+            db.miembros.update_one({"_id": miembro["_id"]}, {"$set": update})
+
+        return jsonify({"message": "Información médica actualizada correctamente"}), 200
+
+    except Exception as e:
+        print(f"Error en update_user_medical: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 def _append_historial_metricas(db, miembro, progreso):
     """
     Escribe un snapshot de métricas en la colección 'historial_metricas'.

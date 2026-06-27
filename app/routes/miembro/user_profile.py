@@ -61,8 +61,13 @@ def get_user_profile():
         genero_str = {"M": "Masculino", "F": "Femenino", "Masculino": "Masculino",
                       "Femenino": "Femenino"}.get(sexo, sexo or "")
 
-        peso    = miembro.get("peso_inicial")
-        estatura= miembro.get("estatura")
+        # Peso "actual": último registro de progreso_fisico; si no hay, peso_inicial.
+        ultimo = mdb.progreso_fisico.find_one(
+            {"id_miembro": miembro["_id"], "peso": {"$ne": None}},
+            sort=[("fecha_registro", -1)],
+        )
+        peso     = (ultimo or {}).get("peso") or miembro.get("peso_inicial")
+        estatura = miembro.get("estatura")
 
         return jsonify({
             "nombre":              usuario.nombre,
@@ -144,6 +149,10 @@ def update_user_profile():
         if data.get('altura'):
             try:    update_miembro['estatura'] = float(str(data['altura']).replace('m', '').strip())
             except: pass
+        # Objetivos y nivel (editables desde el perfil de la app)
+        if data.get('objetivo'):         update_miembro['objetivo']          = data['objetivo']
+        if data.get('nivelExperiencia'): update_miembro['nivel_experiencia'] = data['nivelExperiencia']
+        if data.get('nivelActividad'):   update_miembro['nivel_actividad']   = data['nivelActividad']
         # Contacto de emergencia (from CompleteProfile)
         if data.get('contacto_emergencia_nombre'):
             update_miembro['contacto_emergencia_nombre'] = data['contacto_emergencia_nombre']
