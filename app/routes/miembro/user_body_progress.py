@@ -48,8 +48,11 @@ def get_body_progress():
         # Calcular IMC
         imc = _calcular_imc(peso_actual, estatura)
         
-        # Calcular grasa corporal y músculo usando fórmulas estándar
-        sexo = miembro.get("sexo", "M")
+        # Calcular grasa corporal y músculo usando fórmulas estándar.
+        # Normalizamos el sexo: puede venir como "M"/"F" o "Masculino"/"Femenino"
+        # (según el origen del registro). Antes solo se comparaba == "M", por lo
+        # que un hombre guardado como "Masculino" se interpretaba como femenino.
+        sexo = _norm_sexo(miembro.get("sexo"))
         grasa_corporal_actual = _calcular_grasa_corporal(peso_actual, imc, sexo)
         grasa_corporal_inicial = _calcular_grasa_corporal(peso_inicial, _calcular_imc(peso_inicial, estatura), sexo)
         
@@ -287,6 +290,19 @@ def _append_historial_metricas(db, miembro, progreso):
 # ============================================
 # FUNCIONES AUXILIARES
 # ============================================
+
+def _norm_sexo(raw):
+    """
+    Normaliza el sexo a 'M' o 'F'. Acepta variantes: M/F, Masculino/Femenino,
+    male/female, hombre/mujer (sin distinguir mayúsculas). Default: 'M'.
+    """
+    s = str(raw or "").strip().lower()
+    if s in ("f", "femenino", "female", "mujer", "fem"):
+        return "F"
+    if s in ("m", "masculino", "male", "hombre", "masc", "h"):
+        return "M"
+    return "M"
+
 
 def _calcular_imc(peso, estatura):
     try:
