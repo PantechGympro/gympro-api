@@ -116,11 +116,26 @@ def get_body_progress():
         
         # Determinar género automáticamente
         gender = "male" if sexo == "M" else "female"
-        
+
+        # Plan nutricional: la alimentación también cuenta para el progreso.
+        # Es "en plan nutricional" si tiene al menos una dieta asignada.
+        filtro_dietas = {"$or": [
+            {"id_miembro": miembro["_id"]},
+            {"id_miembro_pg": user_pg_id},
+        ]}
+        planes_nutricion = db.dietas.count_documents(filtro_dietas)
+        plan_doc = db.dietas.find_one(filtro_dietas, sort=[("_id", -1)])
+        nutricion = {
+            "tienePlan":  planes_nutricion > 0,
+            "planes":     planes_nutricion,
+            "planActual": (plan_doc or {}).get("nombre"),
+        }
+
         return jsonify({
             "bodyMetrics": body_metrics,
             "progressHistory": progreso_mensual,
             "gender": gender,
+            "nutricion": nutricion,
             "hasDatos": len(progresos) > 0
         }), 200
         
