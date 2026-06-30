@@ -49,9 +49,9 @@ def _ejecutar_cancelaciones(gym_id=None) -> dict:
         query_m["id_gimnasio_pg"] = int(gym_id)
     miembros = list(db.miembros.find(query_m, {"_id": 1, "nombre": 1, "fecha_registro": 1}))
 
-    if len(miembros) < 5:
-        return {"error": "Datos insuficientes para entrenar el modelo",
-                "total_miembros": len(miembros)}
+    if not miembros:
+        return {"error": "Aun no hay miembros registrados en este gimnasio.",
+                "total_miembros": 0}
 
     member_oids = [m["_id"] for m in miembros]
     member_map  = {str(m["_id"]): m for m in miembros}
@@ -120,78 +120,118 @@ def _ejecutar_cancelaciones(gym_id=None) -> dict:
             "label": label,
         })
 
-    if len(rows) < 10:
-        return {"error": "Datos insuficientes para entrenar el modelo",
-                "total_miembros": len(rows)}
+    if not rows:
+        return {"error": "Aun no hay miembros con historial para analizar.",
+                "total_miembros": 0}
 
     feature_cols = [
         "dias_sin_asistir", "num_asistencias_ult60",
         "total_pagos", "meses_activo", "tiene_membresia_activa",
     ]
-    X = np.array([[r[c] for c in feature_cols] for r in rows])
-    y = np.array([r["label"] for r in rows])
 
-    # 6. Train/test split 80/20
-    rng   = np.random.default_rng(42)
-    idx   = rng.permutation(len(X))
-    split = max(1, int(len(X) * 0.8))
-    X_tr, X_te = X[idx[:split]], X[idx[split:]]
-    y_tr, y_te = y[idx[:split]], y[idx[split:]]
+    # ── Riesgo por reglas (siempre disponible, interpretable) ────────────────
+    # Combina señales reales del historial en una probabilidad 0..1. Es la base
+    # del análisis: funciona aunque el gimnasio tenga pocos miembros.
+    def _heuristic_prob(r) -> float:
+        p = 0.0
+        if r["tiene_membresia_activa"] == 0:
+            p += 0.55                      # membresía vencida: la señal más fuerte
+        d = r["dias_sin_asistir"]
+        if   d > 30: p += 0.40
+        elif d > 21: p += 0.30
+        elif d > 14: p += 0.18
+        elif d > 7:  p += 0.08
+        a = r["num_asistencias_ult60"]
+        if   a <= 1: p += 0.12
+        elif a <= 4: p += 0.05
+        if r["total_pagos"] <= 1:
+            p += 0.05                      # casi sin historial de pagos
+        return min(1.0, round(p, 4))
 
-    # 7. Random Forest
-    rf = RandomForestClassifier(
-        n_estimators=50, max_depth=5, random_state=42, class_weight="balanced"
-    ).fit(X_tr, y_tr)
+    def _heuristic_importances():
+        base = [
+            ("tiene_membresia_activa", 0.42),
+            ("dias_sin_asistir",       0.34),
+            ("num_asistencias_ult60",  0.14),
+            ("total_pagos",            0.06),
+            ("meses_activo",           0.04),
+        ]
+        return [{"feature": c, "importancia": v} for c, v in base]
 
-    # 8. Evaluación
-    eval_X = X_te if len(X_te) > 0 else X_tr
-    eval_y = y_te if len(X_te) > 0 else y_tr
-    y_pred      = rf.predict(eval_X)
-    proba_eval  = rf.predict_proba(eval_X)
-    # Cuando todos los labels son la misma clase sklearn sólo devuelve 1 columna
-    pos_col     = 1 if proba_eval.shape[1] > 1 else 0
-    y_prob      = proba_eval[:, pos_col]
+    # ── Refinamiento con RandomForest cuando hay datos suficientes ───────────
+    labels   = [r["label"] for r in rows]
+    usa_ml   = False
+    metricas = {"accuracy": 0.0, "auc_roc": 0.0}
+    probs    = {}
+    importancias = []
 
-    acc = round(float(accuracy_score(eval_y, y_pred)), 4)
-    try:
-        auc = round(float(roc_auc_score(eval_y, y_prob)), 4)
-    except Exception:
-        auc = 0.0
+    if len(rows) >= 12 and len(set(labels)) > 1:
+        try:
+            X = np.array([[r[c] for c in feature_cols] for r in rows])
+            y = np.array(labels)
+            rng   = np.random.default_rng(42)
+            idx   = rng.permutation(len(X))
+            split = max(1, int(len(X) * 0.8))
+            X_tr, X_te = X[idx[:split]], X[idx[split:]]
+            y_tr, y_te = y[idx[:split]], y[idx[split:]]
 
-    # 9. Predicción sobre todos los miembros
-    proba_all = rf.predict_proba(X)
-    probs_all = proba_all[:, 1] if proba_all.shape[1] > 1 else proba_all[:, 0]
+            rf = RandomForestClassifier(
+                n_estimators=50, max_depth=5, random_state=42, class_weight="balanced"
+            ).fit(X_tr, y_tr)
+
+            eval_X = X_te if len(X_te) > 0 else X_tr
+            eval_y = y_te if len(X_te) > 0 else y_tr
+            proba_eval = rf.predict_proba(eval_X)
+            pos_col    = 1 if proba_eval.shape[1] > 1 else 0
+            acc = round(float(accuracy_score(eval_y, rf.predict(eval_X))), 4)
+            try:
+                auc = round(float(roc_auc_score(eval_y, proba_eval[:, pos_col])), 4)
+            except Exception:
+                auc = 0.0
+
+            proba_all = rf.predict_proba(X)
+            probs_all = proba_all[:, 1] if proba_all.shape[1] > 1 else proba_all[:, 0]
+            probs = {rows[i]["id_miembro"]: float(probs_all[i]) for i in range(len(rows))}
+            importancias = sorted([
+                {"feature": col, "importancia": round(float(imp), 4)}
+                for col, imp in zip(feature_cols, rf.feature_importances_)
+            ], key=lambda x: x["importancia"], reverse=True)
+            metricas = {"accuracy": acc, "auc_roc": auc}
+            usa_ml = True
+        except Exception:
+            usa_ml = False
+
+    if not usa_ml:
+        probs = {r["id_miembro"]: _heuristic_prob(r) for r in rows}
+        importancias = _heuristic_importances()
+
+    # ── Predicción para TODOS los miembros ───────────────────────────────────
     predicciones = []
-    for i, r in enumerate(rows):
-        prob   = float(probs_all[i])
+    for r in rows:
+        prob   = probs.get(r["id_miembro"], 0.0)
         riesgo = "alto" if prob >= 0.65 else "medio" if prob >= 0.35 else "bajo"
         predicciones.append({
             "id_miembro":        r["id_miembro"],
             "nombre":            r["nombre"],
             "dias_sin_asistir":  int(r["dias_sin_asistir"]),
+            "asistencias_60d":   int(r["num_asistencias_ult60"]),
             "membresia_activa":  bool(r["tiene_membresia_activa"]),
             "probabilidad":      round(prob, 4),
             "riesgo":            riesgo,
         })
     predicciones.sort(key=lambda x: x["probabilidad"], reverse=True)
-    predicciones = predicciones[:200]
-
-    # 10. Importancia de features
-    importancias = sorted([
-        {"feature": col, "importancia": round(float(imp), 4)}
-        for col, imp in zip(feature_cols, rf.feature_importances_)
-    ], key=lambda x: x["importancia"], reverse=True)
 
     alto   = sum(1 for p in predicciones if p["riesgo"] == "alto")
     medio  = sum(1 for p in predicciones if p["riesgo"] == "medio")
     activos = len(predicciones) - alto - medio
 
     return {
-        "algoritmo":            "Random Forest Classifier",
-        "descripcion":          "Predicción de riesgo de cancelación de membresía",
-        "metricas":             {"accuracy": acc, "auc_roc": auc},
+        "algoritmo":            "Random Forest" if usa_ml else "Reglas de retencion (historial real)",
+        "modelo_ml":            usa_ml,
+        "descripcion":          "Deteccion de miembros con riesgo de dejar el gimnasio",
+        "metricas":             metricas,
         "importancia_features": importancias,
-        "predicciones":         predicciones,
+        "predicciones":         predicciones[:200],
         "resumen": {
             "total":        len(predicciones),
             "riesgo_alto":  alto,
