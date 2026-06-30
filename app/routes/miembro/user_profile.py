@@ -74,7 +74,7 @@ def get_user_profile():
             "email":               usuario.email,
             "telefono":            miembro.get("telefono", ""),
             "fechaNacimiento":     fn_str,
-            "direccion":           "",
+            "direccion":           miembro.get("direccion", ""),
             "genero":              genero_str,
             "peso":                f"{peso} kg" if peso else "No registrado",
             "altura":              f"{estatura} m" if estatura else "No registrado",
@@ -137,11 +137,22 @@ def update_user_profile():
         # Actualizar miembro en Mongo
         update_miembro = {}
         if data.get('telefono'):       update_miembro['telefono'] = data['telefono']
+        if 'direccion' in data:        update_miembro['direccion'] = data.get('direccion') or ""
         if data.get('fechaNacimiento'):
-            try:    update_miembro['fecha_nacimiento'] = datetime.strptime(data['fechaNacimiento'], '%d/%m/%Y')
-            except: pass
+            # Acepta dd/mm/aaaa (web/móvil) o aaaa-mm-dd (input date nativo).
+            fn_raw = str(data['fechaNacimiento']).strip()
+            parsed = None
+            for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
+                try:
+                    parsed = datetime.strptime(fn_raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed:
+                update_miembro['fecha_nacimiento'] = parsed
         if data.get('genero'):
-            gmap = {"Masculino": "Masculino", "Femenino": "Femenino", "Otro": "Otro"}
+            gmap = {"Masculino": "Masculino", "Femenino": "Femenino", "Otro": "Otro",
+                    "Prefiero no decir": "Otro"}
             if data['genero'] in gmap: update_miembro['sexo'] = gmap[data['genero']]
         if data.get('peso'):
             try:    update_miembro['peso_inicial'] = float(str(data['peso']).replace('kg', '').strip())
