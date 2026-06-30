@@ -157,18 +157,200 @@ def register_progress():
         return jsonify({"error": str(e)}), 500
 
 
-# ─── Marcar ejercicio completado (stub) ────────────────────────────────────
+# ─── Registrar entrenamiento completado (bitácora real) ─────────────────────
 
 @user_dashboard_bp.route('/api/user/workout/complete', methods=['POST'])
 @jwt_required()
-def complete_exercise():
+@require_tenant
+def complete_workout():
+    """
+    Registra un entrenamiento realizado por el miembro (bitácora detallada).
+
+    Body JSON:
+        nombre_rutina   str            nombre de la rutina/día (opcional)
+        grupo_muscular  str            grupo trabajado (opcional)
+        id_rutina       str(ObjectId)  rutina origen (opcional)
+        duracion_min    int            duración en minutos (opcional)
+        notas           str            notas del miembro (opcional)
+        peso_corporal   number         peso del día (opcional) → actualiza métricas
+        ejercicios: [
+            { "nombre": "Press banca",
+              "series": [ {"repeticiones": 12, "peso": 40}, ... ] }
+        ]
+
+    Efectos:
+      - Guarda el entrenamiento en `entrenamientos_realizados` (con volumen total).
+      - Registra la asistencia del día (si aún no hay) → cuenta y racha.
+      - Si viene `peso_corporal`, crea un registro de progreso físico + snapshot
+        analítico → las gráficas y predicciones se actualizan automáticamente.
+    """
     try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = mdb.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        from app.utils.timezone import local_now_naive
         data = request.json or {}
+        ahora = local_now_naive()
+
+        # Normalizar ejercicios + calcular volumen (sum reps*peso).
+        total_series = 0
+        volumen      = 0.0
+        ejercicios   = []
+        for ej in (data.get("ejercicios") or []):
+            series = []
+            for s in (ej.get("series") or []):
+                try:    reps = int(s.get("repeticiones") or 0)
+                except: reps = 0
+                try:    peso = float(s.get("peso") or 0)
+                except: peso = 0.0
+                series.append({"repeticiones": reps, "peso": peso})
+                total_series += 1
+                volumen      += reps * peso
+            if ej.get("nombre"):
+                ejercicios.append({
+                    "nombre":     str(ej.get("nombre")),
+                    "series":     series,
+                    "completado": True,
+                })
+
+        id_rutina = None
+        if data.get("id_rutina"):
+            try:    id_rutina = ObjectId(data["id_rutina"])
+            except: id_rutina = None
+
+        peso_corporal = None
+        if data.get("peso_corporal"):
+            try:    peso_corporal = float(data["peso_corporal"])
+            except: peso_corporal = None
+
+        doc = {
+            "id_miembro":     miembro["_id"],
+            "id_gimnasio_pg": gym_id,
+            "id_rutina":      id_rutina,
+            "nombre_rutina":  str(data.get("nombre_rutina") or "Entrenamiento libre"),
+            "grupo_muscular": str(data.get("grupo_muscular") or ""),
+            "fecha":          ahora,
+            "duracion_min":   int(data["duracion_min"]) if data.get("duracion_min") else None,
+            "ejercicios":     ejercicios,
+            "total_ejercicios": len(ejercicios),
+            "total_series":   total_series,
+            "volumen_total":  round(volumen, 1),
+            "peso_corporal":  peso_corporal,
+            "notas":          str(data.get("notas")) if data.get("notas") else None,
+        }
+        mdb.entrenamientos_realizados.insert_one(doc)
+
+        # Registrar asistencia del día (si no existe) → cuenta y racha.
+        hoy_ini = datetime.combine(ahora.date(), datetime.min.time())
+        hoy_fin = hoy_ini + timedelta(days=1)
+        ya_asistio = mdb.asistencias.find_one({
+            "id_miembro": miembro["_id"],
+            "fecha":      {"$gte": hoy_ini, "$lt": hoy_fin},
+        })
+        if not ya_asistio:
+            mdb.asistencias.insert_one({
+                "id_miembro":   miembro["_id"],
+                "id_gimnasio":  gym_id,
+                "fecha":        ahora,
+                "hora_entrada": ahora.strftime('%H:%M:%S'),
+                "origen":       "entrenamiento",
+            })
+
+        # Registrar peso del día → mueve métricas, gráficas y predicciones.
+        progreso_registrado = False
+        if peso_corporal and peso_corporal > 0:
+            estatura = float(miembro.get("estatura") or 0)
+            bmi = round(peso_corporal / (estatura ** 2), 2) if estatura > 0 else None
+            nuevo_progreso = {
+                "id_miembro":     miembro["_id"],
+                "peso":           peso_corporal,
+                "bmi":            bmi,
+                "fecha_registro": ahora,
+                "origen":         "entrenamiento",
+            }
+            mdb.progreso_fisico.insert_one(nuevo_progreso)
+            try:
+                from app.routes.miembro.user_body_progress import _append_historial_metricas
+                _append_historial_metricas(mdb, miembro, nuevo_progreso)
+            except Exception as ex:
+                print(f"[workout] historial_metricas no-bloqueante: {ex}")
+            progreso_registrado = True
+
         return jsonify({
-            "message": "Ejercicio marcado como completado",
-            "exercise":data.get("exercise_name")
-        }), 200
+            "message":             "Entrenamiento registrado correctamente",
+            "total_ejercicios":    len(ejercicios),
+            "total_series":        total_series,
+            "volumen_total":       round(volumen, 1),
+            "peso_registrado":     progreso_registrado,
+            "fecha":               ahora.strftime('%Y-%m-%d'),
+        }), 201
+
     except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@user_dashboard_bp.route('/api/user/workouts', methods=['GET'])
+@jwt_required()
+@require_tenant
+def list_workouts():
+    """
+    Bitácora de entrenamientos del miembro (más recientes primero) + resumen.
+    Query: limit (default 30).
+    """
+    try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = mdb.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        limit = min(100, request.args.get("limit", 30, type=int))
+        cursor = mdb.entrenamientos_realizados.find(
+            {"id_miembro": miembro["_id"]}
+        ).sort("fecha", -1).limit(limit)
+
+        items = []
+        for w in cursor:
+            f = w.get("fecha")
+            items.append({
+                "id":              str(w["_id"]),
+                "nombre_rutina":   w.get("nombre_rutina", ""),
+                "grupo_muscular":  w.get("grupo_muscular", ""),
+                "fecha":           f.strftime('%Y-%m-%d') if isinstance(f, datetime) else str(f),
+                "duracion_min":    w.get("duracion_min"),
+                "total_ejercicios":w.get("total_ejercicios", len(w.get("ejercicios", []))),
+                "total_series":    w.get("total_series", 0),
+                "volumen_total":   w.get("volumen_total", 0),
+                "peso_corporal":   w.get("peso_corporal"),
+                "ejercicios":      w.get("ejercicios", []),
+                "notas":           w.get("notas"),
+            })
+
+        # Resumen
+        ahora        = datetime.now()
+        inicio_mes   = datetime(ahora.year, ahora.month, 1)
+        total        = mdb.entrenamientos_realizados.count_documents({"id_miembro": miembro["_id"]})
+        este_mes     = mdb.entrenamientos_realizados.count_documents({
+            "id_miembro": miembro["_id"], "fecha": {"$gte": inicio_mes}
+        })
+
+        return jsonify({
+            "workouts": items,
+            "resumen": {
+                "total":      total,
+                "este_mes":   este_mes,
+                "volumen_total": round(sum(i["volumen_total"] or 0 for i in items), 1),
+            },
+        }), 200
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
