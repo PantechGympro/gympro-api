@@ -40,9 +40,13 @@ def get_body_progress():
             peso_inicial = peso_actual
             progreso_actual = None
             
-        # Validar estatura
+        # Validar estatura — normalizar a metros (consistente con /api/user/health).
+        # Si viene en cm (p. ej. 175) se divide entre 100, para que el IMC coincida
+        # en todas las vistas.
         estatura = float(miembro.get("estatura", 1.7) or 1.7)
-        if estatura == 0:
+        if estatura > 3:
+            estatura = estatura / 100
+        if estatura <= 0:
             estatura = 1.7
             
         # Calcular IMC
