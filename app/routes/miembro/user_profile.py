@@ -340,7 +340,10 @@ def upload_profile_photo():
 
         filename        = secure_filename(file.filename)
         unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-        upload_folder   = os.path.join(current_app.root_path, 'static/uploads')
+        # Debe guardarse en el MISMO directorio que sirve /api/uploads/<archivo>
+        # (/app/storage/uploads). Antes se guardaba en static/uploads y la foto
+        # nunca se mostraba (404) en perfil, sidebar ni fichas del entrenador.
+        upload_folder   = "/app/storage/uploads"
         os.makedirs(upload_folder, exist_ok=True)
         file.save(os.path.join(upload_folder, unique_filename))
 

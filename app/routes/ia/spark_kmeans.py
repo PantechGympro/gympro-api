@@ -7,12 +7,26 @@ Datos: pymongo directo sobre colecciones miembros y progreso_fisico.
 Caché por (gym_id, k) con TTL configurable (ANALYTICS_CACHE_TTL_HOURS).
 """
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required, get_jwt
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
+
+
+def _trainer_scope():
+    """
+    Si el usuario autenticado es Entrenador, devuelve su id para acotar el
+    análisis SOLO a los miembros que él entrena (id_entrenador_pg). Para
+    owner_gym / superadmin devuelve None (análisis a nivel de gimnasio).
+    """
+    if get_jwt().get("role") == "Entrenador":
+        try:
+            return int(get_jwt_identity())
+        except (TypeError, ValueError):
+            return None
+    return None
 
 _LABEL_POOL = [
     "Principiante / Alta Prioridad",
@@ -26,13 +40,14 @@ _LABEL_POOL = [
 ]
 
 
-def _cache_key(gym_id, k: int) -> str:
-    return f"kmeans_gym{gym_id}_k{k}"
+def _cache_key(gym_id, k: int, trainer_id=None) -> str:
+    scope = f"_t{trainer_id}" if trainer_id is not None else ""
+    return f"kmeans_gym{gym_id}{scope}_k{k}"
 
 
 # ── Lógica K-Means ────────────────────────────────────────────────────────────
 
-def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=None):
+def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=None, trainer_id=None):
     """
     K-Means con StandardScaler sobre features de composición corporal.
     Retorna: (resumen_clusters, asignaciones, centroides, silhouette)
@@ -44,10 +59,12 @@ def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=Non
 
     db = get_mongo_db()
 
-    # 1. Cargar miembros del gimnasio
+    # 1. Cargar miembros del gimnasio (o solo los del entrenador, si aplica)
     query_m = {}
     if gym_id is not None:
         query_m["id_gimnasio_pg"] = int(gym_id)
+    if trainer_id is not None:
+        query_m["id_entrenador_pg"] = int(trainer_id)
     query_m["peso_inicial"] = {"$ne": None}
     query_m["estatura"]     = {"$ne": None}
 
@@ -223,8 +240,9 @@ def kmeans_analytics():
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id, k)
+        gym_id     = get_jwt().get("id_gimnasio")
+        trainer_id = _trainer_scope()
+        key        = _cache_key(gym_id, k, trainer_id)
 
         cached = cache_get(key)
         if cached:
@@ -232,7 +250,7 @@ def kmeans_analytics():
             return jsonify(cached), 200
 
         resumen, asignaciones, centroides, sil = _ejecutar_kmeans(
-            k=k, max_iter=max_iter, gym_id=gym_id
+            k=k, max_iter=max_iter, gym_id=gym_id, trainer_id=trainer_id
         )
         asignaciones = _enrich_nombres(asignaciones)
         payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, sil)
@@ -258,19 +276,21 @@ def kmeans_train():
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id, k)
+        gym_id     = get_jwt().get("id_gimnasio")
+        trainer_id = _trainer_scope()
+        key        = _cache_key(gym_id, k, trainer_id)
 
         resumen, asignaciones, centroides, sil = _ejecutar_kmeans(
-            k=k, max_iter=max_iter, gym_id=gym_id
+            k=k, max_iter=max_iter, gym_id=gym_id, trainer_id=trainer_id
         )
         asignaciones = _enrich_nombres(asignaciones)
         payload = _build_payload(k, max_iter, resumen, asignaciones, centroides, sil)
         payload["desde_cache"] = False
         cache_set(key, payload)
 
+        ambito = f"entrenador {trainer_id}" if trainer_id else f"gimnasio {gym_id}"
         return jsonify({**payload,
-                        "mensaje": f"K-Means k={k} reentrenado para gimnasio {gym_id}."}), 200
+                        "mensaje": f"K-Means k={k} reentrenado para {ambito}."}), 200
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400

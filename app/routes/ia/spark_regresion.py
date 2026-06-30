@@ -13,7 +13,7 @@ Variables de entorno:
     ANALYTICS_CACHE_TTL_HOURS=24
 """
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required, get_jwt
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timedelta
 import re as _re
 
@@ -22,8 +22,23 @@ from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 spark_regresion_bp = Blueprint("spark_regresion", __name__)
 
 
-def _cache_key(gym_id) -> str:
-    return f"regresion_gym{gym_id}"
+def _trainer_scope():
+    """
+    Si el usuario autenticado es Entrenador, devuelve su id para acotar el
+    modelo SOLO a los miembros que él entrena. Para owner_gym / superadmin
+    devuelve None (modelo a nivel de gimnasio).
+    """
+    if get_jwt().get("role") == "Entrenador":
+        try:
+            return int(get_jwt_identity())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _cache_key(gym_id, trainer_id=None) -> str:
+    scope = f"_t{trainer_id}" if trainer_id is not None else ""
+    return f"regresion_gym{gym_id}{scope}"
 
 
 # ── Helpers de fecha ──────────────────────────────────────────────────────────
@@ -59,9 +74,10 @@ def _to_naive_datetime(val) -> "datetime | None":
 
 # ── Entrenamiento global ──────────────────────────────────────────────────────
 
-def _regresion_global(gym_id=None):
+def _regresion_global(gym_id=None, trainer_id=None):
     """
-    Entrena Ridge Regression con datos de progreso_fisico del gimnasio.
+    Entrena Ridge Regression con datos de progreso_fisico del gimnasio
+    (o solo de los miembros del entrenador, si trainer_id viene dado).
     Retorna: (metricas, coeficientes, tendencia, media_cintura, media_grasa)
     """
     import numpy as np
@@ -71,10 +87,12 @@ def _regresion_global(gym_id=None):
 
     db = get_mongo_db()
 
-    # 1. Obtener IDs de miembros del gimnasio
+    # 1. Obtener IDs de miembros del gimnasio (o solo los del entrenador)
     query_m = {"estado": "Activo"}
     if gym_id is not None:
         query_m["id_gimnasio_pg"] = int(gym_id)
+    if trainer_id is not None:
+        query_m["id_entrenador_pg"] = int(trainer_id)
 
     member_oids = [m["_id"] for m in db.miembros.find(query_m, {"_id": 1})]
     if not member_oids:
@@ -324,15 +342,16 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
 def regresion_analytics():
     """Devuelve métricas globales desde caché. Si expiró, re-entrena."""
     try:
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id)
+        gym_id     = get_jwt().get("id_gimnasio")
+        trainer_id = _trainer_scope()
+        key        = _cache_key(gym_id, trainer_id)
 
         cached = cache_get(key)
         if cached:
             cached["desde_cache"] = True
             return jsonify(cached), 200
 
-        metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id)
+        metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id, trainer_id)
         payload = _build_global_payload(metricas, coeficientes, tendencia)
         payload["desde_cache"] = False
         payload["_medias"] = {"cintura": mc, "grasa": mg}
@@ -351,17 +370,19 @@ def regresion_analytics():
 def regresion_train():
     """Fuerza re-entrenamiento y actualiza caché."""
     try:
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id)
+        gym_id     = get_jwt().get("id_gimnasio")
+        trainer_id = _trainer_scope()
+        key        = _cache_key(gym_id, trainer_id)
 
-        metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id)
+        metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id, trainer_id)
         payload = _build_global_payload(metricas, coeficientes, tendencia)
         payload["desde_cache"] = False
         payload["_medias"] = {"cintura": mc, "grasa": mg}
         cache_set(key, payload)
 
+        ambito = f"entrenador {trainer_id}" if trainer_id else f"gimnasio {gym_id}"
         return jsonify({**payload,
-                        "mensaje": f"Modelo reentrenado para gimnasio {gym_id}."}), 200
+                        "mensaje": f"Modelo reentrenado para {ambito}."}), 200
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
@@ -380,8 +401,9 @@ def predecir_peso_miembro(id_entrada: str):
         if not (30 <= dias_futuro <= 365):
             return jsonify({"error": "dias debe estar entre 30 y 365"}), 400
 
-        gym_id = get_jwt().get("id_gimnasio")
-        key    = _cache_key(gym_id)
+        gym_id     = get_jwt().get("id_gimnasio")
+        trainer_id = _trainer_scope()
+        key        = _cache_key(gym_id, trainer_id)
 
         id_miembro_real = _resolver_id_miembro_mongo(id_entrada)
         if id_miembro_real is None:
@@ -392,12 +414,26 @@ def predecir_peso_miembro(id_entrada: str):
 
         cached = cache_get(key)
         if not cached or "coeficientes" not in cached:
-            metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id)
-            payload = _build_global_payload(metricas, coeficientes, tendencia)
-            payload["_medias"] = {"cintura": mc, "grasa": mg}
-            payload["desde_cache"] = False
-            cache_set(key, payload)
-            cached = payload
+            try:
+                metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id, trainer_id)
+            except ValueError:
+                # El entrenador aún no tiene datos propios suficientes para un
+                # modelo individual: caer al modelo del gimnasio para no romper
+                # la predicción puntual de su cliente.
+                if trainer_id is None:
+                    raise
+                key = _cache_key(gym_id, None)
+                cached = cache_get(key)
+                if cached and "coeficientes" in cached:
+                    metricas = coeficientes = tendencia = None  # ya está en caché
+                else:
+                    metricas, coeficientes, tendencia, mc, mg = _regresion_global(gym_id, None)
+            if not cached or "coeficientes" not in cached:
+                payload = _build_global_payload(metricas, coeficientes, tendencia)
+                payload["_medias"] = {"cintura": mc, "grasa": mg}
+                payload["desde_cache"] = False
+                cache_set(key, payload)
+                cached = payload
 
         coeficientes = cached["coeficientes"]
         medias       = cached.get("_medias", {"cintura": 80.0, "grasa": 22.0})
