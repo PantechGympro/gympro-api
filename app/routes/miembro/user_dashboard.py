@@ -227,6 +227,20 @@ def complete_workout():
             try:    peso_corporal = float(data["peso_corporal"])
             except: peso_corporal = None
 
+        # ── Calorías quemadas (automático, sin que el miembro se pese) ──────────
+        # Se usa el ÚLTIMO peso conocido del miembro como base. Estimación por MET:
+        #   kcal = MET * peso_kg * horas. (fuerza ≈ 5; cardio/piernas ≈ 6)
+        ultimo_peso = mdb.progreso_fisico.find_one(
+            {"id_miembro": miembro["_id"], "peso": {"$ne": None}},
+            sort=[("fecha_registro", -1)],
+        )
+        peso_base = float((ultimo_peso or {}).get("peso") or miembro.get("peso_inicial") or 70)
+        dur_indicada = int(data["duracion_min"]) if data.get("duracion_min") else 0
+        # Si no indican duración, se estima ~3.5 min por serie (entre 15 y 150 min).
+        dur_efectiva = dur_indicada or max(15, min(150, round(total_series * 3.5))) or 30
+        met = 6.0 if str(data.get("grupo_muscular") or "").lower() in ("cardio", "piernas") else 5.0
+        calorias = round(met * peso_base * (dur_efectiva / 60.0))
+
         doc = {
             "id_miembro":     miembro["_id"],
             "id_gimnasio_pg": gym_id,
@@ -234,11 +248,13 @@ def complete_workout():
             "nombre_rutina":  str(data.get("nombre_rutina") or "Entrenamiento libre"),
             "grupo_muscular": str(data.get("grupo_muscular") or ""),
             "fecha":          ahora,
-            "duracion_min":   int(data["duracion_min"]) if data.get("duracion_min") else None,
+            "duracion_min":   dur_indicada or None,
+            "duracion_estimada_min": dur_efectiva,
             "ejercicios":     ejercicios,
             "total_ejercicios": len(ejercicios),
             "total_series":   total_series,
             "volumen_total":  round(volumen, 1),
+            "calorias_estimadas": calorias,
             "peso_corporal":  peso_corporal,
             "notas":          str(data.get("notas")) if data.get("notas") else None,
         }
@@ -285,6 +301,7 @@ def complete_workout():
             "total_ejercicios":    len(ejercicios),
             "total_series":        total_series,
             "volumen_total":       round(volumen, 1),
+            "calorias_estimadas":  calorias,
             "peso_registrado":     progreso_registrado,
             "fecha":               ahora.strftime('%Y-%m-%d'),
         }), 201
@@ -327,6 +344,7 @@ def list_workouts():
                 "total_ejercicios":w.get("total_ejercicios", len(w.get("ejercicios", []))),
                 "total_series":    w.get("total_series", 0),
                 "volumen_total":   w.get("volumen_total", 0),
+                "calorias_estimadas": w.get("calorias_estimadas", 0),
                 "peso_corporal":   w.get("peso_corporal"),
                 "ejercicios":      w.get("ejercicios", []),
                 "notas":           w.get("notas"),
@@ -346,6 +364,7 @@ def list_workouts():
                 "total":      total,
                 "este_mes":   este_mes,
                 "volumen_total": round(sum(i["volumen_total"] or 0 for i in items), 1),
+                "calorias_total": int(sum(i["calorias_estimadas"] or 0 for i in items)),
             },
         }), 200
 

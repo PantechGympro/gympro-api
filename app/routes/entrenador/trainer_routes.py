@@ -1345,6 +1345,34 @@ def reactivate_exercise(exercise_id):
     return jsonify(ej.to_dict()), 200
 
 
+@trainer_bp.route('/exercises/<int:exercise_id>/permanent', methods=['DELETE'])
+@jwt_required()
+@require_tenant
+def delete_exercise_permanent(exercise_id):
+    """
+    Elimina DEFINITIVAMENTE un ejercicio de la biblioteca (borra la fila en PG).
+
+    El borrado normal es soft (activo=False, va a la papelera). Este endpoint sí
+    quita el registro por completo. No afecta a las rutinas existentes porque
+    rutina_ejercicios guarda el nombre del ejercicio de forma denormalizada.
+    """
+    gym_id     = g.tenant_id
+    trainer_id = int(get_jwt_identity())
+    ej         = Ejercicio.query.filter_by(
+        id=exercise_id, id_gimnasio=gym_id, id_entrenador=trainer_id
+    ).first()
+    if not ej:
+        return jsonify({'error': 'Ejercicio no encontrado'}), 404
+
+    try:
+        pg_db.session.delete(ej)
+        pg_db.session.commit()
+        return jsonify({'msg': 'Ejercicio eliminado definitivamente'}), 200
+    except Exception as e:
+        pg_db.session.rollback()
+        return jsonify({'error': f'No se pudo eliminar: {str(e)}'}), 500
+
+
 # ═══════════════════════════════════════════════════════════════
 #  REPORTES Y ESTADÍSTICAS
 # ═══════════════════════════════════════════════════════════════
