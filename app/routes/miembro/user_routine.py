@@ -23,6 +23,8 @@ def _build_routine_dict(db, rutina_doc):
                 "series": ej.get("series", "3"),
                 "reps": ej.get("repeticiones", "12"),
                 "peso": ej.get("peso", ""),
+                "grupo": ej.get("grupo_muscular", ""),
+                "unidad": ej.get("unidad", "kg"),
                 "notas": ej.get("notas", ""),
                 "orden": ej.get("orden", 0)
             })
@@ -35,6 +37,10 @@ def _build_routine_dict(db, rutina_doc):
             "ejercicios": ej_formateados
         })
         
+    return _routine_meta(rutina_doc, dias_formateados)
+
+
+def _routine_meta(rutina_doc, dias_formateados):
     return {
         "id": str(rutina_doc["_id"]),
         "nombre": rutina_doc.get("nombre", ""),
@@ -46,6 +52,21 @@ def _build_routine_dict(db, rutina_doc):
         "activa": rutina_doc.get("activa", True),
         "dias": dias_formateados
     }
+
+
+def _build_ej_doc(dia_id, ej_idx, ed):
+    """Documento de ejercicio con grupo muscular, peso y unidad (kg/lb)."""
+    return {
+        "id_rutina_dia":    dia_id,
+        "nombre_ejercicio": ed['nombre'],
+        "series":           str(ed.get('series', '3')),
+        "repeticiones":     str(ed.get('reps', '12')),
+        "peso":             str(ed.get('peso', '') or ''),
+        "grupo_muscular":   ed.get('grupo', '') or '',
+        "unidad":           (ed.get('unidad') or 'kg'),
+        "orden":            ej_idx,
+    }
+
 
 @user_routines_bp.route('/routines', methods=['GET'])
 @jwt_required()
@@ -152,14 +173,8 @@ def create_routine():
             ejercicios_a_insertar = []
             for ej_idx, ejercicio_data in enumerate(dia_data.get('ejercicios', [])):
                 if ejercicio_data.get('nombre', '').strip():
-                    ejercicios_a_insertar.append({
-                        "id_rutina_dia": dia_id,
-                        "nombre_ejercicio": ejercicio_data['nombre'],
-                        "series": str(ejercicio_data.get('series', '3')),
-                        "repeticiones": str(ejercicio_data.get('reps', '12')),
-                        "orden": ej_idx
-                    })
-                    
+                    ejercicios_a_insertar.append(_build_ej_doc(dia_id, ej_idx, ejercicio_data))
+
             if ejercicios_a_insertar:
                 db.rutina_ejercicios.insert_many(ejercicios_a_insertar)
         
@@ -231,14 +246,8 @@ def update_routine(id):
             ejercicios_a_insertar = []
             for ej_idx, ejercicio_data in enumerate(dia_data.get('ejercicios', [])):
                 if ejercicio_data.get('nombre', '').strip():
-                    ejercicios_a_insertar.append({
-                        "id_rutina_dia": dia_id,
-                        "nombre_ejercicio": ejercicio_data['nombre'],
-                        "series": str(ejercicio_data.get('series', '3')),
-                        "repeticiones": str(ejercicio_data.get('reps', '12')),
-                        "orden": ej_idx
-                    })
-                    
+                    ejercicios_a_insertar.append(_build_ej_doc(dia_id, ej_idx, ejercicio_data))
+
             if ejercicios_a_insertar:
                 db.rutina_ejercicios.insert_many(ejercicios_a_insertar)
         

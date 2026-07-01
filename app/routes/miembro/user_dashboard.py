@@ -197,22 +197,52 @@ def complete_workout():
         ahora = local_now_naive()
 
         # Normalizar ejercicios + calcular volumen (sum reps*peso).
+        # Reps y peso pueden ser multivalor (ej. "7,7,7" y "10,20,30" = drop set),
+        # y el peso puede venir en kg o en libras (unidad). Todo se convierte a kg
+        # para el volumen. Se guarda el valor original para mostrarlo tal cual.
+        import re as _re
+        LB_A_KG = 0.453592
+
+        def _nums(v):
+            out = []
+            for part in str(v if v is not None else "").replace(";", ",").split(","):
+                m = _re.search(r"[-+]?\d*\.?\d+", part)
+                if m:
+                    try: out.append(float(m.group()))
+                    except ValueError: pass
+            return out
+
         total_series = 0
         volumen      = 0.0
         ejercicios   = []
         for ej in (data.get("ejercicios") or []):
+            unidad_ej = (ej.get("unidad") or "kg")
             series = []
             for s in (ej.get("series") or []):
-                try:    reps = int(s.get("repeticiones") or 0)
-                except: reps = 0
-                try:    peso = float(s.get("peso") or 0)
-                except: peso = 0.0
-                series.append({"repeticiones": reps, "peso": peso})
+                rep_raw  = s.get("repeticiones")
+                peso_raw = s.get("peso")
+                unidad   = (s.get("unidad") or unidad_ej or "kg")
+                factor   = LB_A_KG if str(unidad).lower().startswith("lb") else 1.0
+                reps_l   = _nums(rep_raw)
+                peso_kg  = [p * factor for p in _nums(peso_raw)]
+                if reps_l and peso_kg:
+                    if len(reps_l) == len(peso_kg):
+                        vol = sum(r * p for r, p in zip(reps_l, peso_kg))
+                    else:
+                        vol = sum(reps_l) * (sum(peso_kg) / len(peso_kg))
+                else:
+                    vol = 0.0
+                series.append({
+                    "repeticiones": rep_raw if (rep_raw not in (None, "")) else 0,
+                    "peso":         peso_raw if (peso_raw not in (None, "")) else 0,
+                    "unidad":       unidad,
+                })
                 total_series += 1
-                volumen      += reps * peso
+                volumen      += vol
             if ej.get("nombre"):
                 ejercicios.append({
                     "nombre":     str(ej.get("nombre")),
+                    "grupo":      str(ej.get("grupo") or ""),
                     "series":     series,
                     "completado": True,
                 })
