@@ -38,6 +38,7 @@ from app.routes.ia.spark_regresion            import spark_regresion_bp
 from app.routes.ia.spark_cancelaciones        import spark_cancelaciones_bp
 from app.routes.ia.spark_rutinas              import spark_rutinas_bp
 from app.routes.ia.spark_negocio              import spark_negocio_bp
+from app.routes.ia.spark_modelos              import spark_modelos_bp
 from app.routes.compartido.membresias         import membresias_bp
 from app.routes.compartido.miembro_membresias import miembro_membresias_bp
 from app.routes.compartido.notificaciones     import notificaciones_bp
@@ -106,6 +107,7 @@ def create_app():
     app.register_blueprint(spark_cancelaciones_bp)
     app.register_blueprint(spark_rutinas_bp)
     app.register_blueprint(spark_negocio_bp)
+    app.register_blueprint(spark_modelos_bp)
     app.register_blueprint(notifications_bp)
     app.register_blueprint(notificaciones_bp)
     app.register_blueprint(ventas_bp)
