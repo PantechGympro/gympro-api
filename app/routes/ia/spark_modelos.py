@@ -100,7 +100,7 @@ def _build_regresion(db, member_oids):
             "grasa":   float(r.get("grasa_corporal") or 0) or None,
             "bmi":     float(r.get("imc") or 0) or None,
         })
-    if len(filas) < 8:
+    if len(filas) < 5:
         return None
 
     # Imputacion simple de nulos
@@ -133,7 +133,7 @@ def _regresion_lab(db, member_oids):
 
     built = _build_regresion(db, member_oids)
     if built is None:
-        return {"error": "Se necesitan al menos 8 registros de progreso fisico para los modelos de regresion."}
+        return {"error": "Aun no hay suficientes registros de peso de tus miembros para esta prediccion. Pideles que registren su avance fisico."}
     filas, y, _ = built
     n = len(filas)
 
@@ -266,14 +266,35 @@ def _clasificacion_lab(db, miembros, member_oids):
         except Exception as e:
             modelos.append({"nombre": nombre, "error": str(e)})
 
-    # Reglas del arbol (interpretables) — hasta cierto detalle
+    # Reglas del arbol en lenguaje sencillo (sin jerga tipo "class: 1")
     reglas = []
     try:
-        from sklearn.tree import export_text
         arbol = DecisionTreeClassifier(max_depth=3, random_state=42).fit(X, y)
-        nombres = ["dias sin venir", "visitas 60d", "pagos", "meses activo", "membresia activa"]
-        txt = export_text(arbol, feature_names=nombres, max_depth=3)
-        reglas = [ln for ln in txt.split("\n") if ln.strip()][:14]
+        nombres = ["dias sin venir", "visitas en 60 dias", "pagos hechos", "meses en el gimnasio", "membresia al dia"]
+        clases_txt = ["Estable", "En riesgo"]
+        t = arbol.tree_
+
+        def _walk(nodo, prof):
+            ind = "    " * prof
+            if t.feature[nodo] == -2:   # hoja
+                clase = clases_txt[int(np.argmax(t.value[nodo][0]))]
+                reglas.append(f"{ind}=> {clase}")
+                return
+            nombre = nombres[t.feature[nodo]]
+            u = t.threshold[nodo]
+            if nombre == "membresia al dia":
+                reglas.append(f"{ind}Si la membresia NO esta al dia:")
+                _walk(t.children_left[nodo], prof + 1)
+                reglas.append(f"{ind}Si la membresia esta al dia:")
+                _walk(t.children_right[nodo], prof + 1)
+            else:
+                reglas.append(f"{ind}Si {nombre} es {u:.0f} o menos:")
+                _walk(t.children_left[nodo], prof + 1)
+                reglas.append(f"{ind}Si {nombre} es mas de {u:.0f}:")
+                _walk(t.children_right[nodo], prof + 1)
+
+        _walk(0, 0)
+        reglas = reglas[:22]
     except Exception:
         reglas = []
 
