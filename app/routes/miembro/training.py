@@ -183,6 +183,42 @@ def cancelar_solicitud_pt(sol_id):
     return jsonify({"message": "Solicitud cancelada"}), 200
 
 
+@training_bp.route("/pt-activo", methods=["DELETE"])
+@jwt_required()
+@require_tenant
+def terminar_entrenamiento_activo():
+    """
+    Termina la relación de entrenamiento personal con el entrenador ACTUAL
+    (solicitud aceptada). Marca la solicitud como 'finalizada' y libera el
+    vínculo del miembro, dejándolo listo para solicitar a otro entrenador.
+    """
+    db     = get_db()
+    mid    = _pg_id()
+    gym_id = _gym_id()
+
+    sol = db.pt_solicitudes.find_one({
+        "id_miembro_pg":  mid,
+        "id_gimnasio_pg": gym_id,
+        "estado":         "aceptada",
+    })
+    if not sol:
+        return jsonify({"error": "No tienes un entrenador activo"}), 404
+
+    db.pt_solicitudes.update_one(
+        {"_id": sol["_id"]},
+        {"$set": {"estado": "finalizada", "fecha_fin": datetime.now(timezone.utc)}},
+    )
+    # Liberar el vínculo denormalizado en el miembro.
+    db.miembros.update_one(
+        {"id_usuario_pg": mid, "id_gimnasio_pg": gym_id},
+        {"$unset": {"id_entrenador_pg": ""}},
+    )
+    return jsonify({
+        "message":              "Entrenamiento personal finalizado. Ya puedes solicitar otro entrenador.",
+        "entrenador_anterior":  sol.get("nombre_entrenador", ""),
+    }), 200
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  CHAT MIEMBRO ↔ ENTRENADOR
 # ══════════════════════════════════════════════════════════════════════════════

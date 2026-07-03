@@ -259,6 +259,76 @@ def get_client_history(client_id):
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@trainer_bp.route('/clients/<client_id>/historial-previo', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_client_prev_history(client_id):
+    """
+    Para el entrenador NUEVO: qué ha trabajado el miembro con entrenadores
+    anteriores del MISMO gimnasio — relaciones previas + rutinas que le
+    asignaron + total de entrenamientos registrados. Da contexto para
+    continuar el trabajo del entrenador anterior.
+    """
+    try:
+        mdb        = get_db()
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        try:
+            mid = ObjectId(client_id)
+        except Exception:
+            return jsonify({"success": False, "message": "ID de cliente inválido"}), 400
+
+        miembro = mdb.miembros.find_one({"_id": mid})
+        if not miembro:
+            return jsonify({"success": False, "message": "Cliente no encontrado"}), 404
+        mid_pg = miembro.get("id_usuario_pg")
+
+        # Relaciones PT (mismo gimnasio): actuales y finalizadas.
+        rels = list(mdb.pt_solicitudes.find({
+            "id_miembro_pg":  mid_pg,
+            "id_gimnasio_pg": gym_id,
+            "estado":         {"$in": ["aceptada", "finalizada"]},
+        }).sort("fecha_solicitud", -1))
+
+        def _iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else None
+
+        entrenadores = [{
+            "nombre":           r.get("nombre_entrenador", "Entrenador"),
+            "id_entrenador_pg": r.get("id_entrenador_pg"),
+            "estado":           r.get("estado"),
+            "actual":           (r.get("id_entrenador_pg") == trainer_id and r.get("estado") == "aceptada"),
+            "desde":            _iso(r.get("fecha_respuesta") or r.get("fecha_solicitud")),
+            "hasta":            _iso(r.get("fecha_fin")),
+        } for r in rels]
+
+        # Rutinas del miembro (asignadas por cualquier entrenador) — quién y cuándo.
+        rutinas = list(mdb.rutinas.find({"id_miembro": mid}).sort("fecha_creacion", -1).limit(30))
+        rutinas_out = [{
+            "nombre":            rt.get("nombre", "Rutina"),
+            "nombre_entrenador": rt.get("nombre_entrenador", ""),
+            "fecha":             _iso(rt.get("fecha_asignacion") or rt.get("fecha_creacion")),
+            "dias":              mdb.rutina_dias.count_documents({"id_rutina": rt["_id"]}),
+        } for rt in rutinas]
+
+        total_entrenos = mdb.entrenamientos_realizados.count_documents({"id_miembro": mid})
+
+        return jsonify({
+            "success":      True,
+            "objetivo":     miembro.get("objetivo") or "",
+            "entrenadores": entrenadores,
+            "rutinas":      rutinas_out,
+            "resumen": {
+                "total_rutinas":         len(rutinas_out),
+                "total_entrenamientos":  total_entrenos,
+                "entrenadores_previos":  sum(1 for e in entrenadores if not e["actual"]),
+            },
+        }), 200
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @trainer_bp.route('/clients/<client_id>/goal', methods=['PUT'])
 @jwt_required()
 @require_tenant
