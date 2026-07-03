@@ -202,10 +202,97 @@ def actualizar_suscripcion(sub_id: int):
         except ValueError:
             return jsonify({"msg": "fecha_proximo_cobro debe ser ISO-8601"}), 400
 
+    if "auto_renovar" in data:
+        sub.auto_renovar = bool(data["auto_renovar"])
+
     sub.updated_at = ahora
     db.session.commit()
 
     return jsonify({"msg": "Suscripción actualizada", "suscripcion": sub.to_dict()}), 200
+
+
+@billing_bp.route("/suscripcion/renovar", methods=["POST"])
+@jwt_required()
+@require_tenant
+def renovar_suscripcion_demo():
+    """
+    Renueva o mejora el plan del gimnasio con PAGO SIMULADO (flujo demo).
+    Crea una factura ya PAGADA, activa la suscripción y extiende la fecha de
+    próximo cobro 30 días. En producción esto lo confirmaría el webhook de la
+    pasarela (Stripe / PayPal / Mercado Pago).
+
+    Body JSON (todos opcionales):
+        { "id_plan": <int>, "auto_renovar": <bool> }
+        - id_plan presente  → mejora/cambia de plan.
+        - id_plan ausente   → renueva el plan actual.
+    """
+    claims = get_jwt()
+    if not _es_admin(claims):
+        return jsonify({"msg": "Solo el administrador puede renovar la suscripción"}), 403
+
+    gym_id = g.tenant_id
+    ahora  = datetime.now(timezone.utc)
+    data   = request.get_json() or {}
+
+    sub = _suscripcion_activa(gym_id) or (
+        Suscripcion.query.filter_by(id_gimnasio=gym_id)
+        .order_by(Suscripcion.created_at.desc()).first()
+    )
+
+    id_plan = data.get("id_plan")
+    if id_plan:
+        plan = PlanSuscripcion.query.filter_by(id=id_plan, activo=True).first()
+        if not plan:
+            return jsonify({"msg": "Plan no encontrado o inactivo"}), 404
+    elif sub and sub.plan:
+        plan = sub.plan
+    else:
+        return jsonify({"msg": "No hay suscripción; indica id_plan para crear una."}), 400
+
+    # Punto de partida para extender: renovar apila 30 días sobre lo que quede.
+    base = sub.fecha_proximo_cobro if (sub and sub.fecha_proximo_cobro) else ahora
+    try:
+        if base < ahora:
+            base = ahora
+    except TypeError:
+        base = ahora
+    proximo = base + timedelta(days=30)
+
+    if not sub:
+        sub = Suscripcion(
+            id_gimnasio=gym_id, id_plan=plan.id, estado="active",
+            fecha_inicio=ahora, fecha_proximo_cobro=proximo,
+        )
+        db.session.add(sub)
+        db.session.flush()
+    else:
+        sub.id_plan             = plan.id
+        sub.estado              = "active"
+        sub.fecha_proximo_cobro = proximo
+        sub.fecha_fin           = None
+        sub.updated_at          = ahora
+
+    if "auto_renovar" in data:
+        sub.auto_renovar = bool(data["auto_renovar"])
+
+    factura = FacturaSuscripcion(
+        id_suscripcion    = sub.id,
+        monto             = plan.precio_mensual_mxn,
+        moneda            = "MXN",
+        estado            = "pagada",
+        fecha_emision     = ahora,
+        fecha_pago        = ahora,
+        fecha_vencimiento = proximo,
+    )
+    db.session.add(factura)
+    db.session.commit()
+
+    return jsonify({
+        "msg":         "Pago simulado exitoso. Tu suscripción quedó activa.",
+        "demo":        True,
+        "suscripcion": sub.to_dict(),
+        "factura":     factura.to_dict(),
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -50,6 +50,10 @@ class Suscripcion(db.Model):
     # Stripe (nullable mientras se trabaja en local)
     stripe_subscription_id  = db.Column(db.String(100), nullable=True, unique=True)
 
+    # Cargo recurrente: si está activo, la plataforma renueva automáticamente
+    # el plan al llegar la fecha de cobro (en demo se simula el cobro).
+    auto_renovar            = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
+
     # Auditoría
     created_at              = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at              = db.Column(
@@ -83,6 +87,7 @@ class Suscripcion(db.Model):
             "fecha_fin":              self.fecha_fin.isoformat() if self.fecha_fin else None,
             "fecha_proximo_cobro":    self.fecha_proximo_cobro.isoformat() if self.fecha_proximo_cobro else None,
             "stripe_subscription_id": self.stripe_subscription_id,
+            "auto_renovar":           bool(self.auto_renovar),
             "created_at":             self.created_at.isoformat() if self.created_at else None,
             "updated_at":             self.updated_at.isoformat() if self.updated_at else None,
         }
