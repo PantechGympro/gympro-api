@@ -77,18 +77,35 @@ def listar_entrenadores():
         activo=True,
     ).all()
 
-    return jsonify({
-        "trainers": [
-            {
-                "id":           t.id,
-                "nombre":       t.nombre,
-                "email":        t.email,
-                "especialidad": getattr(t, "especialidad", None) or "Entrenamiento General",
-                "foto":         getattr(t, "foto_perfil", None),
-            }
-            for t in trainers
-        ]
-    }), 200
+    db = get_db()
+
+    # Calificación promedio y número de reseñas por entrenador.
+    rating_map = {}
+    for r in db.evaluaciones_entrenador.aggregate([
+        {"$match": {"id_gimnasio_pg": gym_id}},
+        {"$group": {"_id": "$id_entrenador_pg", "avg": {"$avg": "$calificacion"}, "n": {"$sum": 1}}},
+    ]):
+        rating_map[r["_id"]] = {"avg": round(r["avg"], 1), "n": r["n"]}
+
+    out = []
+    for t in trainers:
+        rt = rating_map.get(t.id, {})
+        rutinas = list(db.rutinas.find(
+            {"id_entrenador_pg": t.id}, {"nombre": 1, "categoria": 1},
+        ).sort("fecha_creacion", -1).limit(3))
+        out.append({
+            "id":            t.id,
+            "nombre":        t.nombre,
+            "email":         t.email,
+            "especialidad":  getattr(t, "especialidad", None) or "Entrenamiento General",
+            "foto":          getattr(t, "foto_perfil", None),
+            "rating":        rt.get("avg"),
+            "num_ratings":   rt.get("n", 0),
+            "total_rutinas": db.rutinas.count_documents({"id_entrenador_pg": t.id}),
+            "rutinas":       [{"nombre": x.get("nombre", "Rutina"), "categoria": x.get("categoria", "")} for x in rutinas],
+        })
+
+    return jsonify({"trainers": out}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════════════

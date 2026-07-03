@@ -26,10 +26,82 @@ Endpoints (todos requieren JWT):
 
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 
 from app.mongo import get_db
+
+# Días de la semana en español, indexados por datetime.weekday() (lunes = 0).
+_WEEKDAYS_ES = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+
+
+def _norm_dia(s: str) -> str:
+    return (s or "").lower().replace("á", "a").replace("é", "e").replace("í", "i") \
+        .replace("ó", "o").replace("ú", "u").strip()
+
+
+def _ensure_training_reminder(db, id_usuario: int, id_gimnasio):
+    """
+    Recordatorio AUTOMÁTICO de entrenamiento: si hoy es un día de la rutina del
+    miembro (no descanso, con ejercicios) y aún no registró entrenamiento hoy,
+    crea una notificación. Idempotente por día (referencia_id = fecha de hoy).
+    Silencioso ante cualquier error para no afectar el listado de notificaciones.
+    """
+    try:
+        q = {"id_usuario_pg": int(id_usuario)}
+        if id_gimnasio:
+            q["id_gimnasio_pg"] = int(id_gimnasio)
+        miembro = db.miembros.find_one(q)
+        if not miembro:
+            return
+
+        hoy     = datetime.now()
+        hoy_str = hoy.strftime("%Y-%m-%d")
+
+        # ¿Ya se generó el recordatorio hoy?
+        if db.notificaciones.find_one({
+            "id_usuario_pg": int(id_usuario),
+            "tipo":          "recordatorio_entreno",
+            "referencia_id": hoy_str,
+        }):
+            return
+
+        rutina_ids = [r["_id"] for r in db.rutinas.find({"id_miembro": miembro["_id"]}, {"_id": 1})]
+        if not rutina_ids:
+            return
+
+        dia_hoy = _norm_dia(_WEEKDAYS_ES[hoy.weekday()])
+        dia_doc = None
+        for d in db.rutina_dias.find({"id_rutina": {"$in": rutina_ids}}):
+            if _norm_dia(d.get("dia_semana")) == dia_hoy and _norm_dia(d.get("grupo_muscular")) != "descanso":
+                if db.rutina_ejercicios.count_documents({"id_rutina_dia": d["_id"]}) > 0:
+                    dia_doc = d
+                    break
+        if dia_doc is None:
+            return
+
+        # ¿Ya entrenó hoy?
+        ini = datetime(hoy.year, hoy.month, hoy.day)
+        fin = ini + timedelta(days=1)
+        if db.entrenamientos_realizados.count_documents({
+            "id_miembro": miembro["_id"], "fecha": {"$gte": ini, "$lt": fin},
+        }) > 0:
+            return
+
+        grupo = dia_doc.get("grupo_muscular") or ""
+        db.notificaciones.insert_one({
+            "id_usuario_pg":   int(id_usuario),
+            "id_gimnasio_pg":  int(id_gimnasio) if id_gimnasio else None,
+            "tipo":            "recordatorio_entreno",
+            "titulo":          "Hoy te toca entrenar",
+            "mensaje":         f"Aún no registras tu entrenamiento de hoy{(' (' + grupo + ')') if grupo else ''}. No rompas tu racha.",
+            "leida":           False,
+            "creado_en":       datetime.now(timezone.utc),
+            "referencia_tipo": "rutina",
+            "referencia_id":   hoy_str,
+        })
+    except Exception:
+        pass
 
 notificaciones_bp = Blueprint("notificaciones", __name__, url_prefix="/api/notificaciones")
 
@@ -88,6 +160,10 @@ def get_notificaciones():
     limit          = min(int(request.args.get("limit", 30)), 100)
 
     db    = get_db()
+
+    # Genera automáticamente el recordatorio de entrenamiento del día si aplica.
+    _ensure_training_reminder(db, int(id_usuario), id_gimnasio)
+
     query = {"id_usuario_pg": int(id_usuario)}
     if id_gimnasio:
         query["id_gimnasio_pg"] = int(id_gimnasio)
