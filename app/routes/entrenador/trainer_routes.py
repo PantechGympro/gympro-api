@@ -302,14 +302,30 @@ def get_client_prev_history(client_id):
             "hasta":            _iso(r.get("fecha_fin")),
         } for r in rels]
 
-        # Rutinas del miembro (asignadas por cualquier entrenador) — quién y cuándo.
-        rutinas = list(mdb.rutinas.find({"id_miembro": mid}).sort("fecha_creacion", -1).limit(30))
-        rutinas_out = [{
-            "nombre":            rt.get("nombre", "Rutina"),
-            "nombre_entrenador": rt.get("nombre_entrenador", ""),
-            "fecha":             _iso(rt.get("fecha_asignacion") or rt.get("fecha_creacion")),
-            "dias":              mdb.rutina_dias.count_documents({"id_rutina": rt["_id"]}),
-        } for rt in rutinas]
+        # Rutinas que el miembro ha trabajado, de dos fuentes:
+        #   1) rutinas ASIGNADAS por entrenadores (colección rutinas_asignadas)
+        #   2) rutinas propias/creadas para el miembro (colección rutinas)
+        rutinas_out = []
+        for ra in (mdb.rutinas_asignadas.find({"id_miembro_pg": mid_pg})
+                   .sort("fecha_asignacion", -1).limit(30)):
+            dias = mdb.rutina_dias.count_documents({"id_rutina": ra.get("id_rutina")}) if ra.get("id_rutina") else 0
+            rutinas_out.append({
+                "nombre":            ra.get("nombre", "Rutina"),
+                "nombre_entrenador": ra.get("nombre_entrenador", ""),
+                "fecha":             _iso(ra.get("fecha_asignacion")),
+                "dias":              dias,
+                "origen":            "Asignada por entrenador",
+            })
+        for rt in (mdb.rutinas.find({"id_miembro": mid})
+                   .sort("fecha_creacion", -1).limit(30)):
+            rutinas_out.append({
+                "nombre":            rt.get("nombre", "Rutina"),
+                "nombre_entrenador": rt.get("nombre_entrenador", ""),
+                "fecha":             _iso(rt.get("fecha_asignacion") or rt.get("fecha_creacion")),
+                "dias":              mdb.rutina_dias.count_documents({"id_rutina": rt["_id"]}),
+                "origen":            "Propia del miembro",
+            })
+        rutinas_out = rutinas_out[:30]
 
         total_entrenos = mdb.entrenamientos_realizados.count_documents({"id_miembro": mid})
 
