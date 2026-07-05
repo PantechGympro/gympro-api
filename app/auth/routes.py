@@ -9,9 +9,13 @@ Sprint 2: modo dual de autenticación.
 Sprint 3: una vez migrados todos los usuarios a PG, eliminar el bloque
   "_login_mongo_fallback" y el import de modelos Mongo.
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import create_access_token
-from app.extensions import db, limiter
+from flask_mail import Message
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import random
+from app.extensions import db, limiter, mail
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
 
@@ -295,3 +299,118 @@ def register():
     except Exception as e:
         db.session.rollback()
         return jsonify({"msg": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RECUPERACIÓN DE CONTRASEÑA (código de 6 dígitos por correo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RESET_TTL_MIN   = 15   # vigencia del código en minutos
+_RESET_MAX_TRIES = 5    # intentos permitidos por código
+
+
+def _send_reset_email(email: str, code: str) -> None:
+    """Envía el código de restablecimiento por correo (flask-mail)."""
+    sender = current_app.config.get("MAIL_DEFAULT_SENDER") or current_app.config.get("MAIL_USERNAME")
+    body = (
+        "Hola,\n\n"
+        f"Tu código para restablecer la contraseña de GymPro es:\n\n    {code}\n\n"
+        f"El código vence en {_RESET_TTL_MIN} minutos. Si no solicitaste este cambio, "
+        "ignora este correo; tu contraseña seguirá igual.\n\n— Equipo GymPro"
+    )
+    msg = Message(
+        subject="GymPro — Código para restablecer tu contraseña",
+        sender=sender,
+        recipients=[email],
+        body=body,
+    )
+    mail.send(msg)
+
+
+@auth_bp.route("/forgot-password", methods=["POST"])
+@limiter.limit("3 per minute; 10 per hour")
+def forgot_password():
+    """
+    Paso 1: el usuario pide un código. Genera un código de 6 dígitos, lo guarda
+    hasheado con expiración y lo envía por correo. Responde SIEMPRE de forma
+    genérica para no revelar si el correo existe (enumeration-safe).
+    """
+    data  = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"msg": "El correo es requerido"}), 400
+
+    existe = UsuarioPG.query.filter_by(email=email).first() or UserMongo.find_by_email(email)
+    if existe:
+        code = f"{random.randint(0, 999999):06d}"
+        mdb  = get_db()
+        mdb.password_resets.insert_one({
+            "email":      email,
+            "code_hash":  generate_password_hash(code),
+            "expires_at": datetime.utcnow() + timedelta(minutes=_RESET_TTL_MIN),
+            "used":       False,
+            "attempts":   0,
+            "created_at": datetime.utcnow(),
+        })
+        try:
+            _send_reset_email(email, code)
+        except Exception as e:
+            current_app.logger.error(f"[forgot-password] fallo al enviar correo: {e}")
+
+    return jsonify({
+        "msg": "Si el correo está registrado, te enviamos un código para restablecer tu contraseña."
+    }), 200
+
+
+@auth_bp.route("/reset-password", methods=["POST"])
+@limiter.limit("5 per minute; 20 per hour")
+def reset_password():
+    """
+    Paso 2: valida el código y actualiza la contraseña (PG o Mongo legacy).
+    Body: { email, code, new_password }.
+    """
+    data         = request.get_json(silent=True) or {}
+    email        = (data.get("email") or "").strip().lower()
+    code         = (data.get("code") or "").strip()
+    new_password = data.get("new_password") or data.get("password") or ""
+
+    if not email or not code or not new_password:
+        return jsonify({"msg": "Correo, código y nueva contraseña son requeridos"}), 400
+    if len(new_password) < 8:
+        return jsonify({"msg": "La contraseña debe tener al menos 8 caracteres"}), 400
+
+    mdb   = get_db()
+    reset = mdb.password_resets.find_one({"email": email, "used": False}, sort=[("created_at", -1)])
+    if not reset:
+        return jsonify({"msg": "Código inválido o expirado. Solicita uno nuevo."}), 400
+    if reset.get("expires_at") and reset["expires_at"] < datetime.utcnow():
+        return jsonify({"msg": "El código expiró. Solicita uno nuevo."}), 400
+    if reset.get("attempts", 0) >= _RESET_MAX_TRIES:
+        return jsonify({"msg": "Demasiados intentos. Solicita un código nuevo."}), 429
+    if not check_password_hash(reset["code_hash"], code):
+        mdb.password_resets.update_one({"_id": reset["_id"]}, {"$inc": {"attempts": 1}})
+        return jsonify({"msg": "Código incorrecto"}), 400
+
+    # Código válido → invalidar y actualizar contraseña
+    mdb.password_resets.update_one(
+        {"_id": reset["_id"]},
+        {"$set": {"used": True, "used_at": datetime.utcnow()}},
+    )
+
+    usuario_pg = UsuarioPG.query.filter_by(email=email).first()
+    if usuario_pg:
+        try:
+            usuario_pg.set_password(new_password)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"msg": f"No se pudo actualizar la contraseña: {e}"}), 500
+        return jsonify({"msg": "Contraseña actualizada. Ya puedes iniciar sesión."}), 200
+
+    user_mongo = UserMongo.find_by_email(email)
+    if user_mongo:
+        user_mongo.set_password(new_password)
+        user_mongo.save()
+        return jsonify({"msg": "Contraseña actualizada. Ya puedes iniciar sesión."}), 200
+
+    return jsonify({"msg": "No se pudo actualizar la contraseña"}), 400
