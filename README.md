@@ -1,8 +1,11 @@
 # GymPro API
 
-Backend de GymPro: API REST construida con Flask + PySpark para analíticas. Corre en Docker con Gunicorn como servidor WSGI de producción.
+Backend de GymPro: API REST construida con Flask y servida por Gunicorn dentro de un
+contenedor Docker. Persiste en PostgreSQL (datos relacionales) y MongoDB (datos
+flexibles), usa Redis para caché y rate limiting, y expone módulos de inteligencia
+artificial basados en scikit-learn.
 
-→ [Documentación completa del proyecto](../doc/README.md)
+Documentación completa del proyecto: [../doc/README.md](../doc/README.md)
 
 ---
 
@@ -10,11 +13,12 @@ Backend de GymPro: API REST construida con Flask + PySpark para analíticas. Cor
 
 | Herramienta | Versión mínima | Notas |
 |---|---|---|
-| Docker | 24.x+ | Ver instalación abajo si no lo tienes |
-| Docker Compose | 2.x+ (plugin) | Incluido con Docker Desktop / Engine moderno |
-| Git | cualquiera | Para clonar el repo |
+| Docker | 24.x o superior | Ver instalación abajo si no lo tienes |
+| Docker Compose | 2.x (plugin) | Incluido con Docker Desktop / Engine moderno |
+| Git | cualquiera | Para clonar el repositorio |
 
-> **Nota WSL**: si ejecutas desde WSL 2 (Ubuntu), Docker debe estar instalado dentro de WSL o usar Docker Desktop con integración WSL 2 habilitada.
+Nota WSL: si ejecutas desde WSL 2 (Ubuntu), Docker debe estar instalado dentro de WSL o
+usar Docker Desktop con la integración WSL 2 habilitada.
 
 ---
 
@@ -55,12 +59,13 @@ newgrp docker
 sudo service docker start
 
 # 8. Verificar instalación
-docker --version        # Docker version 27.x.x
-docker compose version  # Docker Compose version v2.x.x
-docker run hello-world  # debe imprimir "Hello from Docker!"
+docker --version
+docker compose version
+docker run hello-world
 ```
 
-> **Arranque automático en WSL**: agrega `sudo service docker start` a tu `~/.bashrc` o `~/.zshrc` para que Docker arranque automáticamente al abrir la terminal.
+Arranque automático en WSL: agrega `sudo service docker start` a tu `~/.bashrc` o
+`~/.zshrc` para que Docker arranque al abrir la terminal.
 
 ---
 
@@ -72,30 +77,31 @@ Copia el archivo de ejemplo y completa los valores:
 cp .env.example .env
 ```
 
-Edita `.env` con tus credenciales reales:
+El archivo `api/.env` se inyecta al contenedor mediante `env_file` en el compose. Las
+conexiones a PostgreSQL, MongoDB y Redis ya vienen resueltas por `docker-compose.yml`
+(apuntan a los servicios internos), así que en desarrollo normalmente solo necesitas
+completar los secretos y el correo:
 
 ```env
-# ── Flask ──────────────────────────────────────────────────────────────────
+# ── Flask / seguridad ──────────────────────────────────────────────────────
 SECRET_KEY=cambia_esto_por_un_secreto_largo_y_aleatorio
 JWT_SECRET_KEY=cambia_esto_por_otro_secreto_diferente
 FLASK_DEBUG=0
 
-# ── MongoDB Atlas ──────────────────────────────────────────────────────────
-# Obtén la URI desde Atlas → Connect → Drivers
-MONGO_USER=tu_usuario_atlas
-MONGO_PASSWORD=tu_password_atlas
-MONGO_CLUSTER=cluster0.xxxxx.mongodb.net
-MONGO_DB=gymdb
+# ── PostgreSQL (usuarios, roles, gimnasios, suscripciones) ─────────────────
+# El compose provee estos valores por defecto; sólo cámbialos en producción.
+POSTGRES_DB=gymprodb
+POSTGRES_USER=gymuser
+POSTGRES_PASSWORD=gympassword
 
-# ── Redis (para rate limiting y cache de tenant) ───────────────────────────
+# ── MongoDB (miembros, rutinas, progreso, pagos) ───────────────────────────
+MONGO_URI=mongodb://mongo:27017/gymdb
+
+# ── Redis (caché y rate limiting) ──────────────────────────────────────────
 REDIS_URL=redis://redis:6379/0
 
-# ── CORS ───────────────────────────────────────────────────────────────────
-# Desarrollo: http://localhost:3000
-# Producción: https://tugimnasio.gymsaas.com
-ALLOWED_ORIGINS=http://localhost:3000
-
-# ── Email (backups y notificaciones) ──────────────────────────────────────
+# ── Email (recuperación de contraseña y notificaciones de backup) ──────────
+# Gmail requiere una App Password de 16 caracteres, no la contraseña normal.
 MAIL_SERVER=smtp.gmail.com
 MAIL_PORT=587
 MAIL_USE_TLS=True
@@ -103,113 +109,76 @@ MAIL_USERNAME=tu_email@gmail.com
 MAIL_PASSWORD=tu_app_password_de_16_letras
 MAIL_DEFAULT_SENDER=tu_email@gmail.com
 MAIL_RECIPIENT=tu_email@gmail.com
-
-# ── Spark (opcional) ───────────────────────────────────────────────────────
-# false = endpoints Spark retornan 503 sin afectar el resto de la API
-SPARK_ENABLED=false
 ```
 
----
-
-## Arranque diario (después de reiniciar la laptop)
-
-Desde la **raíz del proyecto** (`SistemaGYM/`):
-
-```bash
-# 1. Asegurarse de que el servicio Docker está corriendo (solo WSL)
-sudo service docker start
-
-# 2. Levantar todos los contenedores (sin reconstruir — usa las imágenes ya cacheadas)
-cd /mnt/c/Proyectos/SistemaGYM
-docker compose up -d
-
-# 3. Verificar que los 5 servicios están healthy
-docker compose ps
-```
-
-Los contenedores arrancan en ~15-20 segundos. La app estará disponible en http://localhost:3000.
+Importante: como el compose usa `env_file`, tras cambiar `api/.env` hay que recrear el
+contenedor para que tome los nuevos valores: `docker compose up -d --force-recreate api`.
 
 ---
 
 ## Levantar con Docker Compose (recomendado)
 
-Desde la **raíz del proyecto** (`SistemaGYM/`):
+Desde la raíz del proyecto (`SistemaGYM/`):
 
 ```bash
-# Primera vez o después de cambios en código/dependencias: construir y levantar
+# Primera vez o tras cambios en código/dependencias: construir y levantar
 docker compose up --build -d
 
 # Ver logs de la API en tiempo real
 docker compose logs -f api
 
-# Ver logs de todos los servicios
-docker compose logs -f
+# Estado de los contenedores
+docker compose ps
 
-# Detener todos los servicios (datos persistidos en volúmenes)
+# Detener todo (los datos persisten en volúmenes)
 docker compose down
 
-# Detener y eliminar volúmenes (limpieza total — borra todos los datos)
+# Detener y borrar volúmenes (limpieza total: elimina TODOS los datos)
 docker compose down -v
 ```
 
-Servicios disponibles después de `docker compose up`:
+Servicios tras `docker compose up`:
 
 | Servicio | URL / Puerto | Descripción |
 |---|---|---|
-| Web (React) | http://localhost:3000 | Frontend |
-| API (Flask) | interno — proxeado por nginx | API REST |
-| PostgreSQL | localhost:5432 | Roles, gimnasios, usuarios |
-| MongoDB | localhost:27018 | Miembros, pagos, analíticas |
-| Redis | interno | Cache y rate limiting |
+| Web (React) | http://localhost:8080 | Frontend; nginx proxea /api hacia la API |
+| API (Flask) | http://localhost:5000 | API REST |
+| PostgreSQL | localhost:5433 | Usuarios, roles, gimnasios, suscripciones |
+| MongoDB | localhost:27035 | Miembros, rutinas, progreso, pagos |
+| Redis | interno | Caché y rate limiting |
+| Ollama | localhost:11434 | IA local para ETL de rutinas (opcional) |
 
-> **Nota:** MongoDB expone el puerto `27018` (no 27017) para evitar conflicto con instalaciones locales. En MongoDB Compass usa `mongodb://localhost:27018`.
+Verificación de salud: `curl http://localhost:5000/api/health`.
 
 ---
 
-## Construir solo la imagen de la API
+## Migraciones de base de datos
 
-Si solo quieres construir o probar la imagen de la API de forma aislada:
-
-```bash
-# Desde la carpeta api/
-cd api/
-
-# Construir
-docker build -t gympro-api:dev .
-
-# Correr el contenedor standalone (sin compose)
-docker run --rm -p 5000:5000 \
-  --env-file .env \
-  gympro-api:dev
-
-# Verificar que responde
-curl http://localhost:5000/api/health
-```
+El `entrypoint` del contenedor ejecuta `flask db upgrade` (Alembic) al arrancar, por lo
+que el esquema de PostgreSQL se crea/actualiza automáticamente. Las colecciones de
+MongoDB se crean bajo demanda en el primer uso. No se requiere ejecución manual.
 
 ---
 
 ## Comandos útiles de desarrollo
 
 ```bash
-# Entrar al contenedor en ejecución (shell interactiva)
+# Shell interactiva dentro del contenedor de la API
 docker compose exec api bash
 
-# Ejecutar un comando puntual dentro del contenedor
-docker compose exec api python -c "from app import create_app; print('OK')"
-
-# Ver variables de entorno activas dentro del contenedor
-docker compose exec api env | grep -E "FLASK|MONGO|REDIS"
-
-# Reiniciar solo la API sin reconstruir
+# Reiniciar sólo la API sin reconstruir
 docker compose restart api
 
-# Reconstruir solo la API (después de cambios en requirements.txt o Dockerfile)
+# Reconstruir sólo la API (tras cambios en requirements.txt o Dockerfile)
 docker compose up --build api -d
 
-# Ver el uso de recursos de los contenedores
+# Recrear la API para tomar cambios de api/.env
+docker compose up -d --force-recreate api
+
+# Uso de recursos de los contenedores
 docker stats
 
-# Limpiar imágenes huérfanas (liberar espacio en disco)
+# Liberar espacio de imágenes huérfanas
 docker image prune -f
 ```
 
@@ -220,84 +189,88 @@ docker image prune -f
 ```
 api/
 ├── app/
-│   ├── __init__.py          # Factory function create_app()
-│   ├── config.py            # Configuración desde variables de entorno
-│   ├── extensions.py        # Inicialización de extensiones Flask
-│   ├── auth/
-│   │   └── routes.py        # /api/auth/login, /api/auth/register
-│   ├── backups/
-│   │   ├── routes.py        # /api/backups/* (requieren JWT + Admin)
-│   │   └── service.py       # Lógica de backup/restore
-│   ├── models/              # Modelos de datos (PyMongo)
-│   ├── routes/              # Blueprints: miembros, pagos, spark, etc.
-│   └── utils/               # Helpers: seguridad, Luhn, etc.
-├── spark/                   # Scripts PySpark standalone
-├── Dockerfile               # Multi-stage: builder + runtime
-├── wsgi.py                  # Entry point de Gunicorn (producción)
-├── run.py                   # Servidor de desarrollo (FLASK_DEBUG=1)
-├── requirements.txt         # Dependencias Python
-└── .dockerignore            # Excluye venv, .env, uploads del build
+│   ├── __init__.py           # create_app() y registro de blueprints
+│   ├── config.py             # Configuración desde variables de entorno
+│   ├── extensions.py         # db (SQLAlchemy), jwt, mail, limiter, migrate
+│   ├── mongo.py              # Conexión y acceso a MongoDB
+│   ├── auth/routes.py        # Login, registro y recuperación de contraseña
+│   ├── models/pg/            # Modelos relacionales (usuario, rol, gimnasio, ...)
+│   ├── models/               # Modelos/documentos de MongoDB
+│   ├── routes/
+│   │   ├── miembro/          # Endpoints del miembro (dashboard, rutinas, salud, ...)
+│   │   ├── entrenador/       # Endpoints del entrenador
+│   │   ├── owner_gym/        # Endpoints del propietario del gimnasio
+│   │   ├── recepcionista/    # Endpoints de recepción
+│   │   ├── superadmin/       # Endpoints de plataforma
+│   │   ├── admin/            # Reportes, catálogos, billing, notificaciones
+│   │   ├── compartido/       # Membresías y notificaciones compartidas
+│   │   └── ia/               # Módulos de IA (spark_*.py, scikit-learn)
+│   ├── backups/              # Respaldo y restauración
+│   └── utils/                # Seguridad, tenant, timezone, helpers
+├── migrations/               # Migraciones Alembic (PostgreSQL)
+├── Dockerfile                # Imagen (entrypoint corre migraciones + gunicorn)
+├── wsgi.py                   # Punto de entrada de Gunicorn (producción)
+├── run.py                    # Servidor de desarrollo
+└── requirements.txt          # Dependencias Python
 ```
+
+Nota: los archivos de `routes/ia/` mantienen el prefijo `spark_*` por razones
+históricas, pero la implementación actual usa scikit-learn en proceso (sin JVM).
 
 ---
 
 ## Endpoints principales
 
-| Método | Endpoint | Auth requerida | Descripción |
+Todas las rutas cuelgan de `/api`. Requieren cabecera `Authorization: Bearer <token>`
+salvo las de autenticación y salud, y `X-Gym-ID` para el aislamiento por gimnasio.
+
+| Método | Endpoint | Auth | Descripción |
 |---|---|---|---|
-| GET | `/api/health` | — | Health check del servicio |
-| POST | `/api/auth/login` | — | Login → retorna JWT |
+| GET | `/api/health` | — | Estado del servicio |
+| POST | `/api/auth/login` | — | Inicia sesión, devuelve JWT |
 | POST | `/api/auth/register` | — | Registro de usuario |
-| GET | `/api/miembros` | JWT | Listado paginado de miembros |
-| POST | `/api/miembros` | JWT + Admin | Crear miembro |
-| GET | `/api/pagos` | JWT | Historial de pagos |
-| GET | `/api/dashboard/summary` | JWT | Métricas del dashboard |
-| GET | `/api/spark/kmeans` | JWT + Analytics | Segmentación K-Means |
-| GET | `/api/spark/regression` | JWT + Analytics | Predicción de progreso |
-| POST | `/api/backups/trigger` | JWT + Admin | Ejecutar backup |
-| GET | `/api/backups/history` | JWT + Admin | Historial de backups |
+| POST | `/api/auth/forgot-password` | — | Envía código de 6 dígitos por correo |
+| POST | `/api/auth/reset-password` | — | Valida el código y cambia la contraseña |
+| GET | `/api/user/dashboard` | JWT | Panel del miembro |
+| GET/POST/PUT/DELETE | `/api/user/routines` | JWT | Rutinas propias del miembro (Mi Rutina) |
+| GET | `/api/user/membership` | JWT | Membresía, planes y renovación |
+| GET | `/api/trainer/dashboard` | JWT (Entrenador) | Panel del entrenador |
+| GET | `/api/trainer/reports?range=...` | JWT (Entrenador) | Reportes de desempeño |
+| GET | `/api/owner_gym/dashboard` | JWT (owner_gym) | Panel del gimnasio |
+| GET/POST | `/api/analytics/cancelaciones` | JWT | Riesgo de abandono (Random Forest) |
+| GET/POST | `/api/analytics/modelos` | JWT | Laboratorio de modelos |
+| GET | `/api/analytics/regresion/predecir/<id>?dias=N` | JWT | Predicción de peso |
+| GET | `/api/superadmin/gimnasios` | JWT (superadmin) | Gestión de la plataforma |
+
+La referencia completa de endpoints por rol está en el Manual de Referencia de la API.
 
 ---
 
 ## Solución de problemas
 
-**`docker: command not found` en WSL**
-→ Seguir la guía de instalación de Docker de arriba.
+`docker: command not found` en WSL
+: Seguir la guía de instalación de Docker de arriba.
 
-**`error getting credentials - exec: "docker-credential-desktop.exe": executable file not found`**
+`Cannot connect to the Docker daemon`
+: `sudo service docker start`
 
-Ocurre cuando Docker Desktop estuvo instalado en Windows anteriormente y dejó su credential helper configurado. El archivo `~/.docker/config.json` apunta a un ejecutable `.exe` que WSL no puede encontrar.
+`permission denied` al correr docker sin sudo
+: `sudo usermod -aG docker $USER && newgrp docker`
 
-```bash
-# Ver qué credential store tiene configurado
-cat ~/.docker/config.json
-# Salida típica del problema: { "credsStore": "desktop.exe" }
+`error getting credentials ... docker-credential-desktop.exe`
+: Ocurre si Docker Desktop dejó su credential helper configurado. Corrige
+  `~/.docker/config.json` dejándolo como `{ "credStore": "" }` y prueba `docker run hello-world`.
 
-# Solución: reemplazar con el credential store nativo de Linux
-cat > ~/.docker/config.json << 'EOF'
-{
-  "credStore": ""
-}
-EOF
+La API no conecta a la base de datos
+: Verifica que los contenedores `postgres` y `mongo` están arriba (`docker compose ps`)
+  y que `MONGO_URI` / las variables `POSTGRES_*` en `api/.env` son coherentes con el
+  compose. En desarrollo, MongoDB se expone en `localhost:27035` y PostgreSQL en
+  `localhost:5433`.
 
-# Verificar que Docker funciona correctamente
-docker run hello-world
-# Debe imprimir: "Hello from Docker!"
-```
+No llegan los correos de recuperación
+: `MAIL_PASSWORD` debe ser una App Password de Gmail (no la contraseña normal) y la
+  cuenta debe tener verificación en dos pasos. Tras cambiar `.env`, recrea el
+  contenedor: `docker compose up -d --force-recreate api`.
 
-**`permission denied` al correr docker sin sudo**
-→ `sudo usermod -aG docker $USER && newgrp docker`
-
-**`Cannot connect to the Docker daemon`**
-→ `sudo service docker start`
-
-> Tip: para que Docker arranque automáticamente al abrir WSL, agrega `sudo service docker start` a tu `~/.bashrc`:
-> ```bash
-> echo 'sudo service docker start 2>/dev/null' >> ~/.bashrc
-> ```
-
-**La API responde con error de MongoDB**
-→ Verificar que `MONGO_USER`, `MONGO_PASSWORD` y `MONGO_CLUSTER` en `.env` son correctos. Confirmar que tu IP está en la whitelist de MongoDB Atlas (Network Access → Add IP Address).
-
-**`ModuleNotFoundError` al iniciar**
-→ El `requirements.txt` cambió. Reconstruir: `docker compose up --build api -d`
+`ModuleNotFoundError` al iniciar
+: Cambió `requirements.txt`. Reconstruir: `docker compose up --build api -d`.
