@@ -67,3 +67,29 @@ def cache_set(key: str, payload: dict) -> None:
         )
     except Exception as e:
         print(f"[cache] Error guardando '{key}': {e}")
+
+
+# ── Resolución de gimnasio (con override para superadmin) ─────────────────────
+
+def resolve_gym_id():
+    """
+    Devuelve el id de gimnasio al que se acota la petición de analítica actual.
+
+    - Usuarios de un gimnasio (owner_gym, entrenador, recepcionista): usa el
+      id_gimnasio contenido en el JWT.
+    - superadmin: al no estar ligado a un gimnasio, puede acotar el análisis a
+      uno específico mediante el parámetro de query 'gym_id' o la cabecera
+      'X-Gym-ID'. Sin ese override, devuelve None.
+    """
+    from flask import request
+    from flask_jwt_extended import get_jwt
+    claims = get_jwt()
+    if claims.get("role") == "superadmin":
+        gid = request.args.get("gym_id") or request.headers.get("X-Gym-ID")
+        if gid:
+            try:
+                return int(gid)
+            except (TypeError, ValueError):
+                return None
+        return None
+    return claims.get("id_gimnasio")

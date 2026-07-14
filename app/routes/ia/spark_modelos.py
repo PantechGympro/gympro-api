@@ -30,7 +30,7 @@ from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
-from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
 
 spark_modelos_bp = Blueprint("spark_modelos", __name__)
 
@@ -398,7 +398,7 @@ def _ejecutar_modelos(gym_id):
 @jwt_required()
 def modelos_analytics():
     try:
-        gym_id = get_jwt().get("id_gimnasio")
+        gym_id = resolve_gym_id()
         key = _cache_key(gym_id)
         cached = cache_get(key)
         if cached:
@@ -418,12 +418,120 @@ def modelos_analytics():
 @jwt_required()
 def modelos_train():
     try:
-        gym_id = get_jwt().get("id_gimnasio")
+        gym_id = resolve_gym_id()
         payload = _ejecutar_modelos(gym_id)
         payload["desde_cache"] = False
         if "error" not in payload:
             cache_set(_cache_key(gym_id), payload)
         return jsonify({**payload, "reentrenado": True}), 200
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Entrenamiento, Prueba y Error (5 pasos) ───────────────────────────────────
+# Flujo didactico de aprendizaje supervisado sobre la deteccion de abandono:
+#   1) Entrenamiento  2) Evaluacion  3) Analisis del Error  4) Optimizacion  5) Interpretacion
+
+_CHURN_COLS = ["dias_sin_asistir", "asistencias_ult60", "total_pagos", "meses_activo", "membresia_activa"]
+
+
+def _entrenamiento(gym_id):
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+    db = get_mongo_db()
+    miembros = _gym_members(db, gym_id)
+    if not miembros:
+        return {"error": "Aun no hay miembros registrados en este gimnasio."}
+    member_oids = [m["_id"] for m in miembros]
+    X, y = _build_churn(db, miembros, member_oids)
+    X = np.array(X, dtype=float); y = np.array(y)
+    n = len(y)
+    if n < 8 or len(set(y.tolist())) < 2:
+        return {"error": "Se necesitan al menos 8 miembros con historial y ambas clases (en riesgo / estable)."}
+
+    try:
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+    except ValueError:
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
+
+    # 1) Entrenamiento
+    base = RandomForestClassifier(n_estimators=60, max_depth=5, random_state=42,
+                                  class_weight="balanced").fit(X_tr, y_tr)
+    tr_acc = float(accuracy_score(y_tr, base.predict(X_tr)))
+
+    # 2) Evaluacion (sobre datos no vistos)
+    y_pred = base.predict(X_te)
+    ev = {
+        "accuracy":  round(float(accuracy_score(y_te, y_pred)), 3),
+        "precision": round(float(precision_score(y_te, y_pred, average="weighted", zero_division=0)), 3),
+        "recall":    round(float(recall_score(y_te, y_pred, average="weighted", zero_division=0)), 3),
+        "f1":        round(float(f1_score(y_te, y_pred, average="weighted", zero_division=0)), 3),
+    }
+    te_acc = ev["accuracy"]
+
+    # 3) Analisis del error (entrenamiento vs prueba)
+    tr_err = round(1 - tr_acc, 3); te_err = round(1 - te_acc, 3)
+    brecha = round(te_err - tr_err, 3)
+    if brecha > 0.15:
+        diag = "Sobreajuste: el modelo memoriza el entrenamiento y generaliza peor en datos nuevos."
+    elif te_err > 0.40:
+        diag = "Subajuste: el modelo es demasiado simple o faltan datos; el error es alto en ambos conjuntos."
+    else:
+        diag = "Buen balance: el error de prueba es cercano al de entrenamiento; el modelo generaliza bien."
+
+    # 4) Optimizacion (busqueda de profundidad que mejora la prueba)
+    opt = []
+    for md in [3, 5, 8, None]:
+        m = RandomForestClassifier(n_estimators=60, max_depth=md, random_state=42,
+                                   class_weight="balanced").fit(X_tr, y_tr)
+        a = round(float(accuracy_score(y_te, m.predict(X_te))), 3)
+        opt.append({"max_depth": (md if md is not None else "sin limite"), "accuracy_prueba": a})
+    mejor = max(opt, key=lambda o: o["accuracy_prueba"])
+
+    # 5) Interpretacion (importancia de variables)
+    imp = sorted(
+        [{"feature": c, "importancia": round(float(v), 4)} for c, v in zip(_CHURN_COLS, base.feature_importances_)],
+        key=lambda x: x["importancia"], reverse=True)
+    top = imp[0]["feature"] if imp else "—"
+
+    return {
+        "n": n, "n_entrenamiento": int(len(y_tr)), "n_prueba": int(len(y_te)),
+        "objetivo": "Prediccion de riesgo de abandono (clasificacion binaria)",
+        "pasos": {
+            "1_entrenamiento": {
+                "descripcion": "Se ajusta un Random Forest con el 75% de los miembros.",
+                "accuracy_entrenamiento": round(tr_acc, 3)},
+            "2_evaluacion": {
+                "descripcion": "Se mide el desempeño sobre el 25% restante (datos no vistos).",
+                "metricas": ev},
+            "3_analisis_error": {
+                "descripcion": "Se comparan los errores de entrenamiento y de prueba.",
+                "error_entrenamiento": tr_err, "error_prueba": te_err, "brecha": brecha,
+                "diagnostico": diag},
+            "4_optimizacion": {
+                "descripcion": "Se prueban distintas profundidades y se elige la de mejor desempeño en prueba.",
+                "pruebas": opt, "mejor": mejor},
+            "5_interpretacion": {
+                "descripcion": "Se identifican las variables que más influyen en la prediccion.",
+                "importancias": imp,
+                "conclusion": f"La variable mas influyente es '{top}'. {diag}"},
+        },
+        "ejecutado_en": datetime.now().isoformat(),
+    }
+
+
+@spark_modelos_bp.route("/api/analytics/entrenamiento", methods=["GET"])
+@jwt_required()
+def entrenamiento_analytics():
+    """Flujo de Entrenamiento, Prueba y Error en 5 pasos (aprendizaje supervisado)."""
+    try:
+        gym_id = resolve_gym_id()
+        payload = _entrenamiento(gym_id)
+        return jsonify(payload), (400 if "error" in payload else 200)
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500

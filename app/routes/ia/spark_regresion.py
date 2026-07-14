@@ -17,7 +17,7 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timedelta
 import re as _re
 
-from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
 
 spark_regresion_bp = Blueprint("spark_regresion", __name__)
 
@@ -342,7 +342,7 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
 def regresion_analytics():
     """Devuelve métricas globales desde caché. Si expiró, re-entrena."""
     try:
-        gym_id     = get_jwt().get("id_gimnasio")
+        gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
         key        = _cache_key(gym_id, trainer_id)
 
@@ -370,7 +370,7 @@ def regresion_analytics():
 def regresion_train():
     """Fuerza re-entrenamiento y actualiza caché."""
     try:
-        gym_id     = get_jwt().get("id_gimnasio")
+        gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
         key        = _cache_key(gym_id, trainer_id)
 
@@ -401,7 +401,7 @@ def predecir_peso_miembro(id_entrada: str):
         if not (30 <= dias_futuro <= 365):
             return jsonify({"error": "dias debe estar entre 30 y 365"}), 400
 
-        gym_id     = get_jwt().get("id_gimnasio")
+        gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
         key        = _cache_key(gym_id, trainer_id)
 

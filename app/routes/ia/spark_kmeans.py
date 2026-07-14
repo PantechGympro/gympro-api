@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime
 
-from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
+from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
 
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
 
@@ -228,6 +228,103 @@ def _enrich_nombres(asignaciones: list) -> list:
     return enriched
 
 
+# ── Método del codo y coeficiente de silueta ──────────────────────────────────
+
+def _load_X(gym_id=None, trainer_id=None):
+    """Carga la matriz de features (peso, imc, grasa, musculo) de los miembros."""
+    import numpy as np
+    db = get_mongo_db()
+    query_m = {"peso_inicial": {"$ne": None}, "estatura": {"$ne": None}}
+    if gym_id is not None:     query_m["id_gimnasio_pg"]  = int(gym_id)
+    if trainer_id is not None: query_m["id_entrenador_pg"] = int(trainer_id)
+    miembros = list(db.miembros.find(query_m, {"_id": 1, "peso_inicial": 1, "estatura": 1}))
+    if not miembros:
+        raise ValueError("No hay miembros con datos suficientes para el análisis.")
+    oids = [m["_id"] for m in miembros]
+    prog = {str(r["_id"]): r for r in db.progreso_fisico.aggregate([
+        {"$match": {"id_miembro": {"$in": oids}}},
+        {"$sort": {"fecha_registro": -1}},
+        {"$group": {"_id": "$id_miembro", "peso": {"$first": "$peso"},
+                    "bmi": {"$first": "$imc"}, "grasa": {"$first": "$grasa_corporal"},
+                    "musculo": {"$first": "$masa_muscular"}}}])}
+    rows = []
+    for m in miembros:
+        try:
+            peso_i = float(m.get("peso_inicial") or 0); est = float(m.get("estatura") or 0)
+        except (TypeError, ValueError):
+            continue
+        if est <= 0:
+            continue
+        p = prog.get(str(m["_id"]), {})
+        peso    = float(p.get("peso")    or peso_i)
+        imc     = float(p.get("bmi")     or (peso_i / (est ** 2)))
+        grasa   = float(p.get("grasa")   or 20.0)
+        musculo = float(p.get("musculo") or 30.0)
+        rows.append([peso, imc, grasa, musculo])
+    return np.array(rows, dtype=float)
+
+
+def _elbow_k(res):
+    """Elige el k del 'codo': mayor caída de la pendiente de la inercia."""
+    if len(res) < 3:
+        return res[0]["k"] if res else 3
+    inertias = [r["inercia"] for r in res]
+    deltas = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
+    curvatura = [deltas[i - 1] - deltas[i] for i in range(1, len(deltas))]
+    idx = curvatura.index(max(curvatura)) + 1
+    return res[idx]["k"]
+
+
+def _optimo(gym_id=None, trainer_id=None, kmax=8):
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import silhouette_score
+    X = _load_X(gym_id, trainer_id)
+    n = len(X)
+    if n < 3:
+        raise ValueError("Se necesitan al menos 3 miembros con datos para el análisis.")
+    Xs = StandardScaler().fit_transform(X)
+    kmax = min(kmax, n - 1)
+    res = []
+    for k in range(2, kmax + 1):
+        m = KMeans(n_clusters=k, random_state=42, n_init=10).fit(Xs)
+        sil = round(float(silhouette_score(Xs, m.labels_)), 4) if n > k else 0.0
+        res.append({"k": k, "inercia": round(float(m.inertia_), 2), "silhouette": sil})
+    k_sil  = max(res, key=lambda r: r["silhouette"])["k"] if res else 3
+    k_codo = _elbow_k(res)
+    return {
+        "n": n,
+        "resultados": res,
+        "k_recomendado_codo":   k_codo,
+        "k_recomendado_silueta": k_sil,
+        "ejecutado_en": datetime.now().isoformat(),
+    }
+
+
+@spark_kmeans_bp.route("/api/analytics/kmeans/optimo", methods=["GET"])
+@jwt_required()
+def kmeans_optimo():
+    """Método del codo (inercia por k) y coeficiente de silueta por k."""
+    try:
+        gym_id     = resolve_gym_id()
+        trainer_id = _trainer_scope()
+        kmax       = request.args.get("kmax", 8, type=int)
+        key        = f"kmeans_optimo_gym{gym_id}" + (f"_t{trainer_id}" if trainer_id else "")
+        cached = cache_get(key)
+        if cached:
+            cached["desde_cache"] = True
+            return jsonify(cached), 200
+        payload = _optimo(gym_id, trainer_id, kmax=max(3, min(kmax, 10)))
+        payload["desde_cache"] = False
+        cache_set(key, payload)
+        return jsonify(payload), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @spark_kmeans_bp.route("/api/analytics/kmeans", methods=["GET"])
@@ -240,7 +337,7 @@ def kmeans_analytics():
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
-        gym_id     = get_jwt().get("id_gimnasio")
+        gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
         key        = _cache_key(gym_id, k, trainer_id)
 
@@ -276,7 +373,7 @@ def kmeans_train():
         if not (2 <= k <= 8):
             return jsonify({"error": "k debe estar entre 2 y 8"}), 400
 
-        gym_id     = get_jwt().get("id_gimnasio")
+        gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
         key        = _cache_key(gym_id, k, trainer_id)
 
