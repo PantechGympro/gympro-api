@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # GymPro API — Dockerfile multi-stage
 # =============================================================================
@@ -20,10 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
-# Instalar dependencias (cacheado mientras requirements.txt no cambie)
+# Instalar dependencias (cacheado mientras requirements.txt no cambie).
+# --mount=type=cache reutiliza las ruedas ya descargadas entre builds, así que
+# cuando cambia requirements.txt sólo se recompila lo nuevo. Se quita
+# --no-cache-dir para que el cache del mount tenga efecto real.
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install -r requirements.txt
 
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
