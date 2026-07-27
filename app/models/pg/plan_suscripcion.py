@@ -21,6 +21,18 @@ class PlanSuscripcion(db.Model):
     descripcion        = db.Column(db.Text, nullable=True)
     activo             = db.Column(db.Boolean, default=True, nullable=False)
     stripe_price_id    = db.Column(db.String(100), nullable=True)                # se completa al configurar Stripe
+
+    # ── Comercialización y control de acceso por plan ────────────────────────
+    # Etiqueta comercial mostrada en la web ("Ideal para gimnasios en crecimiento")
+    titulo_comercial   = db.Column(db.String(120), nullable=True)
+    # Lista de textos que se muestran como beneficios incluidos en el plan
+    caracteristicas    = db.Column(db.JSON, nullable=True, default=list)
+    # Banderas de funciones habilitadas: {"analiticas_ia": true, "pos": true, ...}
+    # El sistema consultará estas banderas para bloquear módulos por plan.
+    limites            = db.Column(db.JSON, nullable=True, default=dict)
+    # Orden de aparición en la página de planes y plan resaltado
+    orden              = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    destacado          = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
     created_at         = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -43,4 +55,18 @@ class PlanSuscripcion(db.Model):
             "descripcion":         self.descripcion,
             "activo":              self.activo,
             "stripe_price_id":     self.stripe_price_id,
+            "titulo_comercial":    self.titulo_comercial,
+            "caracteristicas":     self.caracteristicas or [],
+            "limites":             self.limites or {},
+            "orden":               self.orden,
+            "destacado":           self.destacado,
+            "precio_mxn":          round((self.precio_mensual_mxn or 0) / 100, 2),
         }
+
+    def permite(self, funcion: str) -> bool:
+        """
+        True si el plan habilita la función indicada. Se usará para bloquear
+        módulos según la suscripción del gimnasio (por ejemplo 'analiticas_ia').
+        Si la bandera no está definida, se considera NO incluida.
+        """
+        return bool((self.limites or {}).get(funcion, False))

@@ -64,7 +64,12 @@ def listar_planes():
     Devuelve todos los planes activos de la plataforma.
     Disponible para cualquier usuario autenticado (sin restricción de rol).
     """
-    planes = PlanSuscripcion.query.filter_by(activo=True).order_by(PlanSuscripcion.precio_mensual_mxn).all()
+    # Se ordena por el campo 'orden' definido en el catálogo comercial y, como
+    # criterio secundario, por precio (planes antiguos con orden = 0).
+    planes = (PlanSuscripcion.query
+              .filter_by(activo=True)
+              .order_by(PlanSuscripcion.orden, PlanSuscripcion.precio_mensual_mxn)
+              .all())
     return jsonify([p.to_dict() for p in planes]), 200
 
 

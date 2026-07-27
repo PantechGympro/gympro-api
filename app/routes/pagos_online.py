@@ -58,6 +58,25 @@ def metodos_disponibles():
     return jsonify({"metodos": proveedores_disponibles(g.tenant_id)}), 200
 
 
+@pagos_online_bp.route("/metodos-plataforma", methods=["GET"])
+@jwt_required()
+def metodos_plataforma():
+    """
+    Métodos con los que la PLATAFORMA puede cobrar la suscripción SaaS.
+    Se derivan de las variables de entorno, no de la configuración del gimnasio.
+    """
+    modo = os.getenv("PLATAFORMA_PAGOS_MODO", "sandbox")
+    moneda = os.getenv("PLATAFORMA_PAGOS_MONEDA", "MXN")
+    metodos = []
+    if os.getenv("PLATAFORMA_PAYPAL_CLIENT_ID"):
+        metodos.append({"proveedor": "paypal", "nombre": "PayPal",
+                        "modo": modo, "moneda": moneda})
+    if os.getenv("PLATAFORMA_MP_ACCESS_TOKEN"):
+        metodos.append({"proveedor": "mercadopago", "nombre": "Mercado Pago",
+                        "modo": modo, "moneda": moneda})
+    return jsonify({"metodos": metodos}), 200
+
+
 # ── Crear checkout ───────────────────────────────────────────────────────────
 
 @pagos_online_bp.route("/checkout", methods=["POST"])

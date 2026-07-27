@@ -66,14 +66,17 @@ class MercadoPagoPasarela(PasarelaBase):
             data = r.json()
             nick = data.get("nickname") or data.get("email") or "cuenta"
             token = str(self.credenciales.get("access_token", ""))
-            es_test = token.startswith("TEST-")
-            modo = "pruebas" if es_test else "producción"
+            # Nota: las credenciales de prueba actuales de Mercado Pago (p. ej. en
+            # México) también empiezan con APP_USR-, igual que las productivas; el
+            # prefijo TEST- solo aparece en integraciones antiguas. Por eso no se
+            # puede inferir el entorno del token: solo se avisa cuando es seguro.
             aviso = ""
-            if es_test and not self.es_sandbox:
-                aviso = " Atención: el token es de prueba pero el modo está en producción."
-            elif not es_test and self.es_sandbox:
-                aviso = " Atención: el token es productivo pero el modo está en sandbox."
-            return True, f"Conexión correcta con Mercado Pago ({nick}), credenciales de {modo}.{aviso}"
+            if token.startswith("TEST-") and not self.es_sandbox:
+                aviso = (" Atención: el token es de prueba (TEST-) pero el modo "
+                         "está en producción.")
+            modo_cfg = "pruebas" if self.es_sandbox else "producción"
+            return True, (f"Conexión correcta con Mercado Pago ({nick}). "
+                          f"Configurado en modo {modo_cfg}.{aviso}")
 
         if r.status_code in (401, 403):
             return False, "Mercado Pago rechazó el Access Token. Verifica que sea correcto y vigente."
@@ -117,9 +120,11 @@ class MercadoPagoPasarela(PasarelaBase):
             raise PasarelaError("Mercado Pago no pudo crear el cobro. Revisa las credenciales y la moneda.")
 
         data = r.json()
-        # En sandbox se usa sandbox_init_point para no mover dinero real.
-        url = data.get("sandbox_init_point") if self.es_sandbox else data.get("init_point")
-        url = url or data.get("init_point") or data.get("sandbox_init_point")
+        # init_point es la URL correcta en ambos entornos: con credenciales de
+        # prueba (las de "Credenciales de prueba" del panel) ya apunta al entorno
+        # de test, sin mover dinero real. sandbox_init_point solo se usa como
+        # respaldo para integraciones antiguas que aún lo devuelven.
+        url = data.get("init_point") or data.get("sandbox_init_point")
         if not url:
             raise PasarelaError("Mercado Pago no devolvió la URL de pago.")
         return ResultadoCheckout(referencia_externa=str(data.get("id", "")), url_pago=url, datos=data)
