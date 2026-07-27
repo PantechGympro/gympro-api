@@ -38,6 +38,12 @@ fpdf2==2.8.2
 python-dateutil==2.9.0
 stripe>=8.0.0,<9.0.0
 
+# ── Pagos en linea: PayPal y Mercado Pago ────────────────────────────────────
+# Ambas pasarelas se consumen por REST con requests (ya incluido), por lo que no
+# se requieren SDKs propietarios. cryptography cifra las credenciales que cada
+# gimnasio guarda en la base de datos (Fernet, ver utils/crypto.py).
+cryptography>=42.0.0
+
 # ── Sprint 4 ──────────────────────────────────────────────────────────────────
 reportlab>=4.2.0          # Generacion de PDFs (US18)
 apscheduler>=3.10.0       # Scheduler de notificaciones (US21)

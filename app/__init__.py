@@ -10,6 +10,8 @@ from app.routes.owner_gym.pagos               import pagos_bp
 from app.routes.owner_gym.dashboard_routes    import dashboard_bp
 from app.routes.owner_gym.billing             import billing_bp
 from app.routes.owner_gym.billing_stripe      import billing_stripe_bp
+from app.routes.owner_gym.pasarelas           import pasarelas_bp
+from app.routes.pagos_online                  import pagos_online_bp
 from app.routes.owner_gym.onboarding          import onboarding_bp
 from app.routes.owner_gym.catalogos           import catalogos_bp
 from app.routes.owner_gym.reports             import reports_bp
@@ -101,6 +103,8 @@ def create_app():
     app.register_blueprint(miembro_membresias_bp, url_prefix="/api")
     app.register_blueprint(billing_bp)
     app.register_blueprint(billing_stripe_bp)
+    app.register_blueprint(pasarelas_bp)
+    app.register_blueprint(pagos_online_bp)
     app.register_blueprint(onboarding_bp)
     app.register_blueprint(catalogos_bp,          url_prefix="/api")
     app.register_blueprint(reports_bp)

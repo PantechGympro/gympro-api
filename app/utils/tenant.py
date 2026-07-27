@@ -39,6 +39,9 @@ _EXEMPT_PREFIXES = (
     "/api/billing/webhook",
     "/api/billing/stripe/webhook",
     "/api/onboarding",
+    # Webhooks de PayPal y Mercado Pago: la pasarela notifica sin token JWT.
+    # La transacción se identifica por la referencia incluida en el payload.
+    "/api/pagos/webhook",
 )
 
 
