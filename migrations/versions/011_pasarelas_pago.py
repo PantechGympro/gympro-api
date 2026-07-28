@@ -26,18 +26,28 @@ depends_on    = None
 def upgrade():
     bind = op.get_bind()
 
+    # Los tipos se crean UNA sola vez aqui. Las columnas los referencian con
+    # create_type=False para que create_table NO intente crearlos de nuevo
+    # (de lo contrario PostgreSQL responde "type ... already exists").
+    postgresql.ENUM("paypal", "mercadopago",
+                    name="proveedor_pago_enum").create(bind, checkfirst=True)
+    postgresql.ENUM("sandbox", "live",
+                    name="modo_pasarela_enum").create(bind, checkfirst=True)
+    postgresql.ENUM("membresia", "producto", "suscripcion",
+                    name="contexto_pago_enum").create(bind, checkfirst=True)
+    postgresql.ENUM("pendiente", "aprobado", "rechazado", "cancelado", "reembolsado",
+                    name="estado_transaccion_enum").create(bind, checkfirst=True)
+
     proveedor_enum = postgresql.ENUM(
-        "paypal", "mercadopago", name="proveedor_pago_enum")
+        "paypal", "mercadopago", name="proveedor_pago_enum", create_type=False)
     modo_enum = postgresql.ENUM(
-        "sandbox", "live", name="modo_pasarela_enum")
+        "sandbox", "live", name="modo_pasarela_enum", create_type=False)
     contexto_enum = postgresql.ENUM(
-        "membresia", "producto", "suscripcion", name="contexto_pago_enum")
+        "membresia", "producto", "suscripcion", name="contexto_pago_enum",
+        create_type=False)
     estado_tx_enum = postgresql.ENUM(
         "pendiente", "aprobado", "rechazado", "cancelado", "reembolsado",
-        name="estado_transaccion_enum")
-
-    for tipo in (proveedor_enum, modo_enum, contexto_enum, estado_tx_enum):
-        tipo.create(bind, checkfirst=True)
+        name="estado_transaccion_enum", create_type=False)
 
     op.create_table(
         "configuracion_pasarela",

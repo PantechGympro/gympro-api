@@ -105,13 +105,25 @@ def get_available_plans():
 
             plan_id = "monthly" if duracion == 1 else "quarterly" if duracion == 3 else "annual"
 
+            # Las promociones vencidas no se ofrecen al miembro
+            if getattr(tm, "caducada", False):
+                continue
+
             planes.append({
                 "id":            plan_id,
                 "id_membresia":  tm.id,         # entero PG — lo esperamos en /renew
                 "nombre":        tm.nombre,
                 "duracion_meses":duracion,
                 "precio":        precio,
-                "ahorro":        ahorro
+                "ahorro":        ahorro,
+                # Información comercial para que el miembro compare planes
+                "tipo":          tm.tipo or "estandar",
+                "descripcion":   tm.descripcion,
+                "beneficios":    tm.beneficios or [],
+                "es_combo":      bool(tm.es_combo),
+                "items_combo":   tm.items_combo or [],
+                "fecha_fin_promo": tm.fecha_fin_promo.isoformat() if tm.fecha_fin_promo else None,
+                "dias_restantes_promo": tm.dias_restantes_promo,
             })
 
         return jsonify({"planes": planes}), 200
