@@ -98,14 +98,35 @@ def registrar_venta():
 
         # ── Decrementar stock de cada producto vendido ────────────────────────
         # Usa pipeline de actualización para que stock nunca baje de 0.
+        # Si el artículo es un COMBO, no se descuenta él mismo (no lleva stock
+        # propio): se descuenta el stock de cada componente que lo integra,
+        # multiplicado por la cantidad de combos vendidos.
         for item in items:
             try:
                 oid = ObjectId(str(item["id"]))
                 qty = max(1, int(item.get("qty", 1)))
-                db.productos.update_one(
+
+                prod = db.productos.find_one(
                     {"_id": oid, "id_gimnasio": id_gimnasio},
-                    [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", qty]}]}}}]
+                    {"es_combo": 1, "items_combo": 1},
                 )
+
+                if prod and prod.get("es_combo"):
+                    for comp in (prod.get("items_combo") or []):
+                        try:
+                            comp_oid = ObjectId(str(comp["id_producto"]))
+                            comp_qty = max(1, int(comp.get("cantidad", 1))) * qty
+                            db.productos.update_one(
+                                {"_id": comp_oid, "id_gimnasio": id_gimnasio},
+                                [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", comp_qty]}]}}}]
+                            )
+                        except Exception:
+                            continue
+                else:
+                    db.productos.update_one(
+                        {"_id": oid, "id_gimnasio": id_gimnasio},
+                        [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", qty]}]}}}]
+                    )
             except Exception:
                 pass  # no-bloqueante: fallo de stock no cancela la venta
 

@@ -28,6 +28,21 @@ class TipoMembresia(db.Model):
     precio          = db.Column(db.Numeric(10, 2), nullable=False)
     descripcion     = db.Column(db.Text, nullable=True)
     activo          = db.Column(db.Boolean, default=True, nullable=False)
+
+    # ── Beneficios que el dueño define para el plan ──────────────────────────
+    # Lista de textos mostrados como incluidos: ["Acceso 24/7", "1 clase grupal"]
+    beneficios      = db.Column(db.JSON, nullable=True, default=list)
+
+    # ── Combos: agrupan varios conceptos en un solo precio ───────────────────
+    # items_combo: [{"nombre": "Mensualidad", "cantidad": 1},
+    #               {"nombre": "Proteína 1kg", "cantidad": 1, "id_producto": 4}]
+    es_combo        = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
+    items_combo     = db.Column(db.JSON, nullable=True, default=list)
+
+    # ── Vigencia de promociones ──────────────────────────────────────────────
+    # Cuando 'tipo' es 'promocion', el dueño puede fijar hasta cuándo se ofrece.
+    # Al pasar esa fecha, la membresía se desactiva automáticamente.
+    fecha_fin_promo = db.Column(db.Date, nullable=True)
     created_at      = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -54,5 +69,34 @@ class TipoMembresia(db.Model):
             "precio":         float(self.precio),
             "descripcion":    self.descripcion,
             "activo":         self.activo,
+            "beneficios":     self.beneficios or [],
+            "es_combo":       bool(self.es_combo),
+            "items_combo":    self.items_combo or [],
+            "fecha_fin_promo": self.fecha_fin_promo.isoformat() if self.fecha_fin_promo else None,
+            "vigente":        self.vigente,
+            "dias_restantes_promo": self.dias_restantes_promo,
             "created_at":     self.created_at.isoformat() if self.created_at else None,
         }
+
+    # ── Vigencia de promociones ──────────────────────────────────────────────
+
+    @property
+    def caducada(self) -> bool:
+        """True si es una promoción cuya fecha de fin ya pasó."""
+        if not self.fecha_fin_promo:
+            return False
+        from datetime import date
+        return date.today() > self.fecha_fin_promo
+
+    @property
+    def vigente(self) -> bool:
+        """Se puede ofrecer: está activa y no ha caducado."""
+        return bool(self.activo) and not self.caducada
+
+    @property
+    def dias_restantes_promo(self):
+        """Días que faltan para que caduque la promoción (None si no aplica)."""
+        if not self.fecha_fin_promo:
+            return None
+        from datetime import date
+        return (self.fecha_fin_promo - date.today()).days
