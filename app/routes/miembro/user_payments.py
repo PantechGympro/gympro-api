@@ -24,32 +24,68 @@ def get_user_payments():
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
 
+        # ── Pagos de membresía ───────────────────────────────────────────────
         pagos = list(mdb.pagos.find({"id_miembro": miembro["_id"]}).sort("fecha_pago", -1))
-
-        pipeline = [
-            {"$match": {"id_miembro": miembro["_id"]}},
-            {"$group": {"_id": None, "total": {"$sum": "$monto"}}}
-        ]
-        resultado_suma = list(mdb.pagos.aggregate(pipeline))
-        total_pagado   = resultado_suma[0]["total"] if resultado_suma else 0
-
-        ultimo_pago = pagos[0] if pagos else None
 
         pagos_formateados = []
         for pago in pagos:
-            fecha_p = pago.get("fecha_pago")
-            if isinstance(fecha_p, str):
-                try:    fecha_p = datetime.strptime(fecha_p[:19], "%Y-%m-%dT%H:%M:%S")
-                except: fecha_p = datetime.strptime(fecha_p[:10], "%Y-%m-%d")
+            fecha_p = _a_fecha(pago.get("fecha_pago"))
             pagos_formateados.append({
                 "id":      f"PAY-{str(pago['_id'])[-5:].upper()}",
-                "date":    fecha_p.strftime('%d %b %Y') if isinstance(fecha_p, datetime) else str(fecha_p),
+                "date":    _texto_fecha(fecha_p),
                 "concept": pago.get("concepto") or "Pago de membresía",
                 "amount":  float(pago.get("monto", 0)),
                 "method":  _format_payment_method(pago.get("metodo_pago")),
                 "status":  "Completado",
-                "rawDate": fecha_p.isoformat() if isinstance(fecha_p, datetime) else str(fecha_p)
+                "type":    "membresia",
+                "rawDate": _iso(fecha_p),
             })
+
+        # ── Compras en el punto de venta ─────────────────────────────────────
+        # El miembro ve en un mismo lugar lo que pagó por su membresía y lo que
+        # compró en el gimnasio; sin esto parecía que las compras no se habían
+        # registrado. Se buscan por ambos identificadores porque las ventas
+        # conviven guardadas con el ObjectId del miembro o con su id de
+        # PostgreSQL (ver GET /api/ventas).
+        ventas = list(mdb.ventas.find({
+            "id_gimnasio": gym_id,
+            "$or": [
+                {"id_miembro": miembro["_id"]},
+                {"id_miembro_pg": user_pg_id},
+                {"id_miembro": user_pg_id},
+            ],
+        }).sort("fecha", -1))
+
+        for venta in ventas:
+            fecha_v = _a_fecha(venta.get("fecha"))
+            articulos = venta.get("items") or []
+            cantidad = sum(int(i.get("qty") or i.get("cantidad") or 1) for i in articulos)
+            if articulos:
+                primero = articulos[0].get("nombre", "Producto")
+                concepto = (primero if len(articulos) == 1
+                            else f"{primero} y {len(articulos) - 1} más")
+            else:
+                concepto = "Compra en el gimnasio"
+            pagos_formateados.append({
+                "id":      f"POS-{str(venta['_id'])[-5:].upper()}",
+                "date":    _texto_fecha(fecha_v),
+                "concept": concepto,
+                "amount":  float(venta.get("total", 0)),
+                "method":  _format_payment_method(venta.get("metodo_pago")),
+                "status":  "Completado",
+                "type":    "producto",
+                "items":   cantidad,
+                "rawDate": _iso(fecha_v),
+            })
+
+        # Un solo orden cronológico para las dos fuentes
+        pagos_formateados.sort(key=lambda p: p.get("rawDate") or "", reverse=True)
+
+        total_membresias = sum(float(p.get("monto", 0)) for p in pagos)
+        total_compras    = sum(float(v.get("total", 0)) for v in ventas)
+        total_pagado     = total_membresias + total_compras
+
+        ultimo_pago = pagos[0] if pagos else None
 
         membresia_activa = mdb.miembro_membresia.find_one({
             "id_miembro": miembro["_id"],
@@ -62,15 +98,14 @@ def get_user_payments():
                 fecha_f = datetime.strptime(fecha_f[:10], "%Y-%m-%d")
             proximo_pago = (fecha_f - timedelta(days=3)).strftime('%d %b %Y')
 
-        up_date = ultimo_pago.get("fecha_pago") if ultimo_pago else None
-        if isinstance(up_date, str):
-            try:    up_date = datetime.strptime(up_date[:10], "%Y-%m-%d")
-            except: up_date = None
+        up_date = _a_fecha(ultimo_pago.get("fecha_pago")) if ultimo_pago else None
 
         return jsonify({
             "stats": {
-                "totalPaid":   float(total_pagado),
-                "lastPayment": up_date.strftime('%d %b %Y') if up_date else "N/A",
+                "totalPaid":       float(total_pagado),
+                "totalMembresias": float(total_membresias),
+                "totalCompras":    float(total_compras),
+                "lastPayment": _texto_fecha(up_date) if up_date else "N/A",
                 "nextPayment": proximo_pago or "No programado",
                 "status":      "Al día" if membresia_activa else "Sin membresía"
             },
@@ -138,5 +173,40 @@ def _format_payment_method(metodo):
     return {
         "Efectivo":      "Efectivo",
         "Tarjeta":       "Tarjeta de crédito/débito",
-        "Transferencia": "Transferencia bancaria"
+        "Transferencia": "Transferencia bancaria",
+        "PayPal":        "PayPal",
+        "Mercado Pago":  "Mercado Pago",
     }.get(metodo, metodo or "")
+
+
+# ── Fechas ───────────────────────────────────────────────────────────────────
+# Las dos colecciones guardan la fecha de forma distinta: `pagos` a veces la
+# tiene como texto (registros antiguos) y `ventas` como datetime. Estos tres
+# ayudantes normalizan ambos casos para poder ordenarlas juntas.
+
+_MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun',
+          'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+
+
+def _a_fecha(valor):
+    """Devuelve un datetime a partir de un datetime o de un texto ISO."""
+    if isinstance(valor, datetime):
+        return valor
+    if isinstance(valor, str) and valor:
+        for corte, patron in ((19, "%Y-%m-%dT%H:%M:%S"), (10, "%Y-%m-%d")):
+            try:
+                return datetime.strptime(valor[:corte], patron)
+            except ValueError:
+                continue
+    return None
+
+
+def _texto_fecha(f):
+    """'05 mar 2026'. Se arma a mano para no depender del locale del contenedor."""
+    if not isinstance(f, datetime):
+        return ""
+    return f"{f.day:02d} {_MESES[f.month - 1]} {f.year}"
+
+
+def _iso(f):
+    return f.isoformat() if isinstance(f, datetime) else ""

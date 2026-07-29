@@ -242,18 +242,26 @@ def listar_ventas():
         if tenant_filter:
             filtro["id_gimnasio"] = tenant_filter["id_gimnasio"]
 
-        # Si es miembro, filtrar solo sus compras propias
+        # Si es miembro, filtrar solo sus compras propias.
+        #
+        # Se busca por los DOS identificadores porque conviven ventas guardadas
+        # de formas distintas: las del POS traen el ObjectId del documento
+        # miembro, y las pagadas en línea antes de la corrección quedaron solo
+        # con el id de PostgreSQL. Con un único criterio, parte del historial
+        # queda invisible para el miembro.
         if role in ("user", "miembro"):
             user_pg_id = int(get_jwt_identity())
             gym_id = tenant_filter.get("id_gimnasio") if tenant_filter else None
             query_m = {"id_usuario_pg": user_pg_id}
             if gym_id:
                 query_m["id_gimnasio_pg"] = gym_id
-            miembro = db.miembros.find_one(query_m)
+            miembro = db.miembros.find_one(query_m) or db.miembros.find_one(
+                {"id_usuario_pg": user_pg_id})
+
+            criterios = [{"id_miembro_pg": user_pg_id}, {"id_miembro": user_pg_id}]
             if miembro:
-                filtro["id_miembro"] = miembro["_id"]
-            else:
-                return jsonify({"ventas": [], "total": 0, "pages": 0, "page": page}), 200
+                criterios.append({"id_miembro": miembro["_id"]})
+            filtro["$or"] = criterios
 
         total  = db.ventas.count_documents(filtro)
         cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(per_page)

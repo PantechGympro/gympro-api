@@ -514,12 +514,41 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
     mdb = get_db()
     proveedor = tx.proveedor.value if hasattr(tx.proveedor, "value") else tx.proveedor
 
+    # ── Comprador ────────────────────────────────────────────────────────────
+    # El historial del miembro (GET /api/ventas) filtra por el ObjectId del
+    # documento de la colección `miembros`, mientras que el frontend envía en
+    # los metadatos el id de PostgreSQL del usuario. Si se guarda tal cual, la
+    # compra se cobra pero nunca aparece en "Mis compras". Se resuelven ambos,
+    # igual que hace el POST /api/ventas.
+    id_miembro_oid = None
+    id_miembro_pg  = None
+    crudo = meta.get("id_miembro")
+    if crudo is not None and crudo != "":
+        miembro_doc = None
+        try:
+            id_miembro_pg = int(crudo)
+            miembro_doc = mdb.miembros.find_one({
+                "id_usuario_pg":  id_miembro_pg,
+                "id_gimnasio_pg": tx.id_gimnasio,
+            }) or mdb.miembros.find_one({"id_usuario_pg": id_miembro_pg})
+        except (TypeError, ValueError):
+            # Ya venía como ObjectId en texto (POS del staff)
+            try:
+                miembro_doc = mdb.miembros.find_one({"_id": ObjectId(str(crudo))})
+            except Exception:
+                miembro_doc = None
+        if miembro_doc:
+            id_miembro_oid = miembro_doc["_id"]
+            if id_miembro_pg is None:
+                id_miembro_pg = miembro_doc.get("id_usuario_pg")
+
     venta = {
         "id_gimnasio":    tx.id_gimnasio,
         "items":          items,
         "total":          float(tx.monto),
         "metodo_pago":    "PayPal" if proveedor == "paypal" else "Mercado Pago",
-        "id_miembro":     meta.get("id_miembro"),
+        "id_miembro":     id_miembro_oid,
+        "id_miembro_pg":  id_miembro_pg,
         "nombre_miembro": meta.get("nombre_miembro", ""),
         "fecha":          datetime.now(),
         "referencia_pasarela": tx.referencia_pago or tx.referencia_externa,
