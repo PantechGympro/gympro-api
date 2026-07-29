@@ -149,9 +149,22 @@ def crear_checkout():
     db.session.add(tx)
     db.session.flush()   # obtiene tx.id sin cerrar la transacción
 
-    front = _url_base_front()
-    url_exito      = f"{front}/pago/exito?tx={tx.id}"
-    url_cancelacion = f"{front}/pago/cancelado?tx={tx.id}"
+    # ── URLs de retorno ──────────────────────────────────────────────────────
+    # Desde la app móvil no sirve FRONTEND_URL si apunta a localhost: en el
+    # teléfono 'localhost' es el propio teléfono. Se usa el host con el que la
+    # app llamó a la API (la IP de la máquina en la red local), que sí es
+    # alcanzable, y se marca 'app=1' para que la página de retorno devuelva el
+    # control a la aplicación mediante el deep link gympro://
+    es_movil = (data.get("origen") or "").lower() == "mobile"
+    if es_movil:
+        front = request.host_url.rstrip("/")
+        sufijo = "&app=1"
+    else:
+        front = _url_base_front()
+        sufijo = ""
+
+    url_exito       = f"{front}/pago/exito?tx={tx.id}{sufijo}"
+    url_cancelacion = f"{front}/pago/cancelado?tx={tx.id}{sufijo}"
 
     extra = {"brand_name": "GymPro"}
     api_publica = _url_base_api()
