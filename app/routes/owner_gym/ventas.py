@@ -263,9 +263,44 @@ def listar_ventas():
                 criterios.append({"id_miembro": miembro["_id"]})
             filtro["$or"] = criterios
 
+        # ── Periodo (opcional) ────────────────────────────────────────────────
+        # anio sin mes devuelve el año completo. Se filtra por rango de fechas
+        # en vez de por año extraído, para que el índice de 'fecha' sirva.
+        anio = request.args.get("anio", type=int)
+        mes  = request.args.get("mes",  type=int)
+        if anio:
+            if mes and 1 <= mes <= 12:
+                desde = datetime(anio, mes, 1)
+                hasta = datetime(anio + (mes == 12), (mes % 12) + 1, 1)
+            else:
+                desde = datetime(anio, 1, 1)
+                hasta = datetime(anio + 1, 1, 1)
+            filtro["fecha"] = {"$gte": desde, "$lt": hasta}
+
         total  = db.ventas.count_documents(filtro)
         cursor = db.ventas.find(filtro).sort("fecha", -1).skip(skip).limit(per_page)
         pages  = math.ceil(total / per_page) if total > 0 else 0
+
+        # Importe de todo el filtro, no solo de la página: es lo que la pantalla
+        # muestra como total del periodo.
+        agg = list(db.ventas.aggregate([
+            {"$match": filtro},
+            {"$group": {"_id": None, "suma": {"$sum": "$total"}}},
+        ]))
+        monto_total = float(agg[0]["suma"]) if agg and agg[0].get("suma") is not None else 0.0
+
+        # Años con ventas, para el selector de periodo. Se calcula sobre el mismo
+        # filtro pero sin el rango de fechas, si no siempre devolvería un año.
+        filtro_sin_fecha = {k: v for k, v in filtro.items() if k != "fecha"}
+        anios = sorted(
+            {
+                d["_id"] for d in db.ventas.aggregate([
+                    {"$match": filtro_sin_fecha},
+                    {"$group": {"_id": {"$year": {"$toDate": "$fecha"}}}},
+                ]) if d.get("_id")
+            },
+            reverse=True,
+        )
 
         ventas = []
         for v in cursor:
@@ -278,7 +313,15 @@ def listar_ventas():
                 "nombre_miembro": v.get("nombre_miembro", ""),
             })
 
-        return jsonify({"ventas": ventas, "total": total, "pages": pages, "page": page}), 200
+        return jsonify({
+            "ventas":      ventas,
+            "total":       total,
+            "pages":       pages,
+            "page":        page,
+            "per_page":    per_page,
+            "monto_total": monto_total,
+            "anios":       anios,
+        }), 200
 
     except Exception as e:
         print(f"Error en listar_ventas: {e}")

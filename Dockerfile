@@ -61,6 +61,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends \
         postgresql-client-16 \
         mongodb-database-tools \
+        # tzdata — sin esto el contenedor solo conoce UTC y datetime.now()
+        # guarda la hora equivocada: una venta de las 19:00 del día 31 en
+        # México queda registrada como día 1 (01:00 UTC). Con tzdata + la
+        # variable TZ, datetime.now() ya devuelve la hora local del gimnasio.
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Variables de entorno para Python
@@ -68,6 +73,9 @@ ENV PATH="/venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# Zona horaria por defecto. docker-compose la sobrescribe con APP_TIMEZONE.
+# Afecta a todo el código que llama datetime.now(), que es la mayoría.
+ENV TZ=America/Mexico_City
 # FLASK_ENV y FLASK_DEBUG se inyectan desde .env / docker-compose (no hardcoded)
 
 # Usuario no-root — el proceso de la API nunca corre como root

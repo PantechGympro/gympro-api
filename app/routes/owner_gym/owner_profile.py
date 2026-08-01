@@ -22,20 +22,59 @@ owner_profile_bp = Blueprint("owner_profile", __name__)
 @require_role("owner_gym")
 @require_tenant
 def get_perfil():
-    """Devuelve los datos del gimnasio del owner autenticado."""
+    """
+    Datos del gimnasio y de su propietario.
+
+    La app tiene dos pantallas distintas alimentadas por este endpoint:
+    'Mi Perfil' (la persona) y 'Perfil del Gym' (el negocio). Antes solo se
+    devolvían el nombre y la foto del dueño, así que 'Mi Perfil' terminaba
+    mostrando los datos del gimnasio. Ahora el propietario viaja completo en
+    su propio bloque y el tipo de gimnasio incluye su etiqueta legible.
+    """
+    from app.utils.gym_types import GYM_TYPES
+
     gym = Gimnasio.query.get(g.tenant_id)
     if not gym:
         return jsonify({"msg": "Gimnasio no encontrado"}), 404
 
     data = gym.to_dict()
-    # Adjuntar la foto de perfil del propietario (Usuario autenticado).
+
+    # Etiqueta legible del tipo: la interfaz no debe mostrar 'gimnasio_tradicional'.
+    tipo = data.get("tipo_gimnasio") or "gimnasio_tradicional"
+    data["tipo_gimnasio_label"] = GYM_TYPES.get(tipo, {}).get("label", "Gimnasio Tradicional")
+
+    # Catálogo de tipos válidos, para que la app ofrezca una lista y no un
+    # campo de texto libre donde se puede escribir cualquier cosa.
+    data["tipos_disponibles"] = [
+        {"value": clave, "label": conf.get("label", clave)}
+        for clave, conf in GYM_TYPES.items()
+    ]
+
+    # ── Propietario ───────────────────────────────────────────────────────────
     try:
         owner = Usuario.query.get(int(get_jwt_identity()))
-        fp = getattr(owner, "foto_perfil", None) if owner else None
-        data["owner_foto"]   = fp if (fp and fp.startswith("data:image")) else None
-        data["owner_nombre"] = owner.nombre if owner else None
     except Exception:
-        data["owner_foto"] = None
+        owner = None
+
+    if owner:
+        fp = getattr(owner, "foto_perfil", None)
+        data["propietario"] = {
+            "id":          owner.id,
+            "nombre":      owner.nombre,
+            "email":       owner.email,
+            "telefono":    getattr(owner, "telefono", None),
+            "rol":         owner.rol.nombre if getattr(owner, "rol", None) else "Owner",
+            "activo":      owner.activo,
+            "foto_perfil": fp if (fp and fp.startswith("data:image")) else None,
+            "created_at":  owner.created_at.isoformat() if owner.created_at else None,
+        }
+    else:
+        data["propietario"] = None
+
+    # Se conservan por compatibilidad con pantallas que aún los leen.
+    data["owner_foto"]   = (data["propietario"] or {}).get("foto_perfil")
+    data["owner_nombre"] = (data["propietario"] or {}).get("nombre")
+
     return jsonify(data), 200
 
 
@@ -58,7 +97,21 @@ def update_perfil():
     if not gym:
         return jsonify({"msg": "Gimnasio no encontrado"}), 404
 
+    from app.utils.gym_types import GYM_TYPES
+
     data = request.get_json() or {}
+
+    # El tipo debe pertenecer al catálogo del SaaS: de él dependen las etiquetas
+    # y los módulos que se activan, así que un valor libre dejaría al gimnasio
+    # con una configuración inexistente.
+    if "tipo_gimnasio" in data:
+        tipo = (data.get("tipo_gimnasio") or "").strip()
+        if tipo and tipo not in GYM_TYPES:
+            return jsonify({
+                "msg": "Tipo de gimnasio no válido",
+                "tipos_validos": list(GYM_TYPES.keys()),
+            }), 400
+
     EDITABLES = ["nombre", "email_contacto", "telefono", "tipo_gimnasio"]
     updated = []
     for field in EDITABLES:
@@ -70,4 +123,9 @@ def update_perfil():
         return jsonify({"msg": "Sin campos para actualizar"}), 400
 
     db.session.commit()
-    return jsonify({"msg": "Perfil actualizado", **gym.to_dict()}), 200
+
+    salida = gym.to_dict()
+    salida["tipo_gimnasio_label"] = GYM_TYPES.get(
+        salida.get("tipo_gimnasio") or "", {}
+    ).get("label", "Gimnasio Tradicional")
+    return jsonify({"msg": "Perfil actualizado", **salida}), 200

@@ -108,6 +108,76 @@ def listar_entrenadores():
     return jsonify({"trainers": out}), 200
 
 
+@training_bp.route("/trainers/<int:trainer_id>", methods=["GET"])
+@jwt_required()
+@require_tenant
+def perfil_entrenador(trainer_id: int):
+    """
+    Ficha pública de un entrenador, para que el miembro pueda consultarla antes
+    de solicitarlo o mientras entrena con él.
+
+    Solo se exponen datos profesionales (especialidad, experiencia, biografía,
+    certificaciones y calificación). El teléfono y la dirección quedan fuera:
+    son del expediente laboral y el miembro no tiene por qué verlos.
+    """
+    from app.models.pg.rol import Rol
+
+    gym_id = _gym_id()
+    db     = get_db()
+
+    rol = Rol.query.filter_by(nombre="Entrenador").first()
+    entrenador = Usuario.query.filter_by(
+        id=trainer_id, id_gimnasio=gym_id, activo=True,
+        **({"id_rol": rol.id} if rol else {}),
+    ).first()
+    if not entrenador:
+        return jsonify({"msg": "Entrenador no encontrado"}), 404
+
+    # Colección en singular, igual que la usa el módulo del entrenador.
+    perfil = db.perfil_entrenador.find_one({"id_entrenador_pg": trainer_id}) or {}
+
+    certificaciones = [
+        {
+            "nombre": c.get("nombre", ""),
+            "emisor": c.get("emisor", ""),
+            "anio":   c.get("anio", ""),
+        }
+        for c in db.certificaciones_entrenador.find({"id_entrenador_pg": trainer_id})
+    ]
+
+    evaluaciones = list(db.evaluaciones_entrenador.aggregate([
+        {"$match": {"id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id}},
+        {"$group": {"_id": None, "avg": {"$avg": "$calificacion"}, "n": {"$sum": 1}}},
+    ]))
+    rating = round(evaluaciones[0]["avg"], 1) if evaluaciones else None
+    n_rating = evaluaciones[0]["n"] if evaluaciones else 0
+
+    # Antigüedad como aproximación de la experiencia cuando no la ha escrito.
+    creado = getattr(entrenador, "created_at", None)
+    if creado and creado.tzinfo:
+        creado = creado.replace(tzinfo=None)
+    anios = (datetime.now() - creado).days // 365 if creado else 0
+
+    foto = getattr(entrenador, "foto_perfil", None)
+
+    return jsonify({
+        "id":              entrenador.id,
+        "nombre":          entrenador.nombre,
+        "email":           entrenador.email,
+        "foto":            foto if (foto and foto.startswith("data:image")) else None,
+        "especialidad":    perfil.get("especializacion") or "Entrenamiento General",
+        "biografia":       perfil.get("biografia", ""),
+        "experiencia":     perfil.get("experiencia_texto") or (f"{anios} años" if anios else ""),
+        "certificaciones": certificaciones,
+        "rating":          rating,
+        "num_ratings":     n_rating,
+        "total_rutinas":   db.rutinas.count_documents({"id_entrenador_pg": trainer_id}),
+        "total_clientes":  db.miembros.count_documents({
+            "id_entrenador_pg": trainer_id, "id_gimnasio_pg": gym_id,
+        }),
+    }), 200
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  SOLICITUDES DE ENTRENAMIENTO PERSONAL (PT)
 # ══════════════════════════════════════════════════════════════════════════════
