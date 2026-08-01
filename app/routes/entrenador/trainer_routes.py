@@ -419,11 +419,14 @@ def get_trainer_profile():
         # Certificaciones: devolver como array estructurado
         certs_list = [
             {
-                'id':          str(c['_id']),
-                'nombre':      c.get('nombre', ''),
-                'emisor':      c.get('emisor', ''),
-                'anio':        c.get('anio', ''),
-                'url_archivo': c.get('url_archivo', ''),
+                'id':             str(c['_id']),
+                'nombre':         c.get('nombre', ''),
+                'emisor':         c.get('emisor', ''),
+                'anio':           c.get('anio', ''),
+                # 'archivo' es el documento en data URL; url_archivo se mantiene
+                # por los registros anteriores a esta versión.
+                'archivo':        c.get('archivo') or c.get('url_archivo', ''),
+                'nombre_archivo': c.get('nombre_archivo', ''),
             }
             for c in certificaciones
         ]
@@ -500,23 +503,46 @@ def update_trainer_profile():
                 upsert=True
             )
 
-        # Certificaciones: array de objetos {nombre, emisor, anio, url_archivo}
+        # Certificaciones: array de objetos {nombre, emisor, anio, archivo}
+        #
+        # 'archivo' es el documento escaneado en data URL (PDF o imagen). Se
+        # guarda en la propia colección porque el proyecto no tiene servidor de
+        # archivos; por eso se limita el tamaño, si no cada lectura del perfil
+        # arrastraría varios megas.
         if 'certifications' in data:
-            incoming = data['certifications']  # list of {id?, nombre, emisor, anio, url_archivo}
-            # Remove all existing certs and replace
+            incoming = data['certifications']
+            LIMITE_ARCHIVO = 4_200_000        # ~3 MB reales tras base64
+
+            limpias = []
+            for c in incoming or []:
+                nombre = (c.get("nombre") or "").strip()
+                if not nombre:
+                    continue
+
+                archivo = c.get("archivo") or c.get("url_archivo") or ""
+                if archivo and not str(archivo).startswith(("data:application/pdf", "data:image")):
+                    archivo = ""                       # formato no admitido: se descarta
+                if archivo and len(archivo) > LIMITE_ARCHIVO:
+                    return jsonify({
+                        'success': False,
+                        'error': f"El archivo de '{nombre}' supera los 3 MB permitidos",
+                    }), 400
+
+                limpias.append({
+                    "id_entrenador_pg": trainer_id,
+                    "id_gimnasio_pg":   g.tenant_id,
+                    "nombre":           nombre,
+                    "emisor":           (c.get("emisor") or "").strip(),
+                    "anio":             str(c.get("anio") or "").strip(),
+                    "archivo":          archivo,
+                    "nombre_archivo":   (c.get("nombre_archivo") or "").strip(),
+                })
+
+            # Se reemplaza el conjunto completo: la app envía siempre la lista
+            # entera, así que borrar y reinsertar mantiene ambos lados iguales.
             mdb.certificaciones_entrenador.delete_many({"id_entrenador_pg": trainer_id})
-            if incoming:
-                mdb.certificaciones_entrenador.insert_many([
-                    {
-                        "id_entrenador_pg": trainer_id,
-                        "id_gimnasio_pg":   g.tenant_id,
-                        "nombre":           c.get("nombre", "").strip(),
-                        "emisor":           c.get("emisor", "").strip(),
-                        "anio":             str(c.get("anio", "")).strip(),
-                        "url_archivo":      c.get("url_archivo", ""),
-                    }
-                    for c in incoming if c.get("nombre", "").strip()
-                ])
+            if limpias:
+                mdb.certificaciones_entrenador.insert_many(limpias)
 
         return jsonify({'success': True, 'message': 'Perfil actualizado correctamente'}), 200
 

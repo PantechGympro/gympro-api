@@ -13,6 +13,13 @@ class Config:
     # para flujos de trabajo reales en un turno de entrenador).
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
 
+    # Token de refresco: 90 días. Es lo que hace que la sesión se sienta
+    # permanente (como en WhatsApp o YouTube) sin sacrificar seguridad: el
+    # access token sigue caducando pronto y solo el refresco, que nunca viaja
+    # en las peticiones normales, tiene vida larga. Al refrescar se revalidan
+    # rol y estado del usuario contra la base.
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=90)
+
     # DEBUG siempre False en producción; run.py lo sobreescribe en desarrollo.
     # Gunicorn ignora esta variable, pero la dejamos explícita como salvaguarda.
     DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"

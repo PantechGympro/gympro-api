@@ -10,7 +10,9 @@ Sprint 3: una vez migrados todos los usuarios a PG, eliminar el bloque
   "_login_mongo_fallback" y el import de modelos Mongo.
 """
 from flask import Blueprint, request, jsonify, current_app
-from flask_jwt_extended import create_access_token
+from flask_jwt_extended import (
+    create_access_token, create_refresh_token, jwt_required, get_jwt_identity,
+)
 from flask_mail import Message
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
@@ -221,7 +223,18 @@ def login():
             identity=payload["identity"],
             additional_claims=payload["claims"],
         )
-        return jsonify({"access_token": token, "user": payload["user_response"]}), 200
+        # Token de refresco de larga duración: permite que la sesión sobreviva
+        # al cierre de la aplicación sin tener que alargar el access token, que
+        # es el que viaja en cada petición y por eso conviene que caduque pronto.
+        refresh = create_refresh_token(
+            identity=payload["identity"],
+            additional_claims=payload["claims"],
+        )
+        return jsonify({
+            "access_token":  token,
+            "refresh_token": refresh,
+            "user":          payload["user_response"],
+        }), 200
 
     # ── 2. Fallback MongoDB (usuarios legacy — Sprint 2 transitorio) ──────────
     user_mongo = UserMongo.find_by_email(email)
@@ -239,10 +252,63 @@ def login():
             identity=payload["identity"],
             additional_claims=payload["claims"],
         )
-        return jsonify({"access_token": token, "user": payload["user_response"]}), 200
+        refresh = create_refresh_token(
+            identity=payload["identity"],
+            additional_claims=payload["claims"],
+        )
+        return jsonify({
+            "access_token":  token,
+            "refresh_token": refresh,
+            "user":          payload["user_response"],
+        }), 200
 
     # ── Usuario no encontrado en ninguna fuente ───────────────────────────────
     return jsonify({"msg": "Credenciales inválidas"}), 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REFRESCO DE SESIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/refresh", methods=["POST"])
+@jwt_required(refresh=True)
+def refresh_token():
+    """
+    Entrega un access token nuevo a partir del token de refresco.
+
+    Es lo que permite que la sesión se sienta permanente: la aplicación guarda
+    el refresco y, cuando el access token caduca, pide uno nuevo en silencio en
+    vez de mandar al usuario a la pantalla de acceso.
+
+    Se vuelven a leer el rol y el gimnasio desde la base en lugar de copiarlos
+    del token viejo: así, si al usuario le cambiaron el rol o lo dieron de baja,
+    el cambio surte efecto en el siguiente refresco y no dentro de dos meses.
+    """
+    user_id = get_jwt_identity()
+
+    usuario = UsuarioPG.query.get(int(user_id)) if str(user_id).isdigit() else None
+    if usuario:
+        if not usuario.activo:
+            return jsonify({"msg": "Usuario inactivo"}), 403
+        if usuario.gimnasio and not usuario.gimnasio.activo:
+            return jsonify({"msg": "El gimnasio no está activo"}), 403
+
+        payload = _build_token_pg(usuario)
+        return jsonify({
+            "access_token": create_access_token(
+                identity=payload["identity"],
+                additional_claims=payload["claims"],
+            ),
+            "user": payload["user_response"],
+        }), 200
+
+    # Usuarios legacy de Mongo: se conservan los claims del token de refresco.
+    from flask_jwt_extended import get_jwt
+    claims = {k: v for k, v in get_jwt().items()
+              if k not in ("exp", "iat", "jti", "type", "sub", "nbf", "fresh")}
+    return jsonify({
+        "access_token": create_access_token(identity=user_id, additional_claims=claims),
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

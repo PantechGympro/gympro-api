@@ -47,6 +47,9 @@ class Usuario(db.Model):
     # Foto de perfil almacenada como data URL base64 (nullable)
     foto_perfil  = db.Column(db.Text, nullable=True)
 
+    # Teléfono de la PERSONA, distinto del teléfono de contacto del gimnasio.
+    telefono     = db.Column(db.String(30), nullable=True)
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def set_password(self, password: str) -> None:
@@ -70,6 +73,7 @@ class Usuario(db.Model):
             "id_rol":      self.id_rol,
             "rol":         self.rol.nombre if self.rol else None,
             "id_gimnasio": self.id_gimnasio,
+            "telefono":    self.telefono,
             "created_at":  self.created_at.isoformat() if self.created_at else None,
             # Solo exponer si es base64 valida
             "foto_perfil": fp if (fp and fp.startswith("data:image")) else None,

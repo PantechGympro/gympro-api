@@ -42,6 +42,8 @@ class Gimnasio(db.Model):
     telefono           = db.Column(db.String(20))
     # Tipo de establecimiento — usado para personalizar la experiencia
     tipo_gimnasio      = db.Column(db.String(50), nullable=True)
+    # Logotipo del gimnasio como data URL base64 (nullable)
+    logo               = db.Column(db.Text, nullable=True)
     # Config libre por tipo: etiquetas, módulos activos, etc.
     configuracion      = db.Column(db.JSON, nullable=True, default=dict)
     # Stripe Customer ID — se completa al integrar billing
@@ -67,6 +69,8 @@ class Gimnasio(db.Model):
             "email_contacto": self.email_contacto,
             "telefono":       self.telefono,
             "tipo_gimnasio":  self.tipo_gimnasio,
+            # Solo se expone si es una data URL válida
+            "logo":           self.logo if (self.logo or "").startswith("data:image") else None,
             "configuracion":  self.configuracion or {},
             "created_at":     self.created_at.isoformat() if self.created_at else None,
         }

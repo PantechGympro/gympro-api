@@ -136,11 +136,15 @@ def perfil_entrenador(trainer_id: int):
     # Colección en singular, igual que la usa el módulo del entrenador.
     perfil = db.perfil_entrenador.find_one({"id_entrenador_pg": trainer_id}) or {}
 
+    # Se incluye el documento escaneado para que el miembro pueda comprobar la
+    # certificación, que es justamente lo que da confianza al elegir entrenador.
     certificaciones = [
         {
-            "nombre": c.get("nombre", ""),
-            "emisor": c.get("emisor", ""),
-            "anio":   c.get("anio", ""),
+            "nombre":         c.get("nombre", ""),
+            "emisor":         c.get("emisor", ""),
+            "anio":           c.get("anio", ""),
+            "archivo":        c.get("archivo") or c.get("url_archivo", ""),
+            "nombre_archivo": c.get("nombre_archivo", ""),
         }
         for c in db.certificaciones_entrenador.find({"id_entrenador_pg": trainer_id})
     ]
