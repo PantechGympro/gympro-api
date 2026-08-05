@@ -106,17 +106,45 @@ def _read_timestamp(path: str):
 
 
 # ── Extracción MongoDB filtrada por gimnasio ──────────────────────────────────
+#
+# Un documento pertenece a un gimnasio de tres maneras distintas y cada una
+# necesita su propia consulta:
+#
+#   1. Lleva el id del gimnasio encima          → DIRECT_COLLECTIONS
+#   2. Cuelga de un miembro                     → BY_MEMBER
+#   3. Cuelga de otro documento que ya se sacó  → cascada rutinas/dietas
+#
+# El tercer caso era el que faltaba y por eso los ejercicios de las rutinas no
+# se respaldaban: `rutinas` sí se guardaba, pero un ejercicio no conoce ni al
+# gimnasio ni al miembro. Vive colgando de `rutina_dias`, que a su vez cuelga de
+# `rutinas`. Restaurar un respaldo antiguo devolvía rutinas con cero días y cero
+# ejercicios: la cáscara sin el contenido.
+
 DIRECT_COLLECTIONS = {
     # colección → campo de filtro con id numérico del gimnasio
-    "miembros":    "id_gimnasio_pg",
-    "pagos":       "id_gimnasio",
-    "asistencias": "id_gimnasio",
-    "sesiones":    "id_gimnasio",
-    "rutinas":     "id_gimnasio",
-    "dietas":      "id_gimnasio",
-    "ventas":      "id_gimnasio",
-    "productos":   "id_gimnasio",
+    "miembros":                 "id_gimnasio_pg",
+    "pagos":                    "id_gimnasio",
+    "asistencias":              "id_gimnasio",
+    "sesiones":                 "id_gimnasio",
+    "rutinas":                  "id_gimnasio",
+    "dietas":                   "id_gimnasio",
+    "ventas":                   "id_gimnasio",
+    "productos":                "id_gimnasio",
+    "citas":                    "id_gimnasio_pg",
+    "mensajes_chat":            "id_gimnasio_pg",
+    "pt_solicitudes":           "id_gimnasio_pg",
+    "historial_metricas":       "id_gimnasio_pg",
+    "entrenamientos_realizados": "id_gimnasio_pg",
 }
+
+# Colecciones que cuelgan de un miembro por su ObjectId.
+BY_MEMBER = ("miembro_membresia", "progreso_fisico", "recetas", "consumo_recetas")
+
+
+def _ids(docs) -> list:
+    """ObjectIds de una lista de documentos ya extraídos."""
+    return [d["_id"] for d in docs if d.get("_id") is not None]
+
 
 def _export_gym_data(gym_id: int, since_iso: str = None) -> dict:
     """Devuelve dict {coleccion: [docs]} con todos los datos del gym."""
@@ -134,24 +162,99 @@ def _export_gym_data(gym_id: int, since_iso: str = None) -> dict:
             {"updated_at":     {"$gte": since_dt}},
         ]}
 
-    for coll, field in DIRECT_COLLECTIONS.items():
-        query = {field: gym_id}
-        if date_filter:
+    def _buscar(coll: str, query: dict, aplicar_fecha: bool = True) -> list:
+        """Consulta tolerante: una colección ausente no aborta el respaldo."""
+        if aplicar_fecha and date_filter:
             query = {"$and": [query, date_filter]}
-        docs = list(db[coll].find(query))
+        try:
+            return list(db[coll].find(query))
+        except Exception as exc:
+            print(f"[backup gym {gym_id}] Colección '{coll}' omitida: {exc}")
+            return []
+
+    # 1. Documentos que llevan el id del gimnasio.
+    for coll, field in DIRECT_COLLECTIONS.items():
+        docs = _buscar(coll, {field: gym_id})
         if docs:
             result[coll] = docs
 
-    # Colecciones por join: obtener ids de miembros del gym primero
-    member_ids = [d["_id"] for d in db.miembros.find(
-        {"id_gimnasio_pg": gym_id}, {"_id": 1}
-    )]
+    # 2. Documentos que cuelgan de un miembro. Se guardan las dos claves con las
+    #    que el sistema referencia a un miembro: el ObjectId de Mongo y el id
+    #    numérico del usuario en PostgreSQL. Colecciones distintas usan una u
+    #    otra, y buscar por la equivocada devuelve cero resultados en silencio.
+    miembros_docs = list(db.miembros.find(
+        {"id_gimnasio_pg": gym_id}, {"_id": 1, "id_usuario_pg": 1},
+    ))
+    member_ids = _ids(miembros_docs)
+    member_pg_ids = [
+        d["id_usuario_pg"] for d in miembros_docs if d.get("id_usuario_pg") is not None
+    ]
     if member_ids:
-        for coll in ("miembro_membresia", "progreso_fisico"):
-            query = {"id_miembro": {"$in": member_ids}}
-            if date_filter:
-                query = {"$and": [query, date_filter]}
-            docs = list(db[coll].find(query))
+        for coll in BY_MEMBER:
+            docs = _buscar(coll, {"id_miembro": {"$in": member_ids}})
+            if docs:
+                result[coll] = docs
+
+    # 3. Cascada de rutinas: rutina → rutina_dias → rutina_ejercicios.
+    #    El filtro de fecha NO se aplica aquí. Un día o un ejercicio no tienen
+    #    fecha propia, así que filtrarlos por fecha los dejaría siempre fuera y
+    #    un respaldo incremental restauraría rutinas vacías.
+    rutina_ids = _ids(result.get("rutinas", []))
+    if rutina_ids:
+        dias = _buscar("rutina_dias", {"id_rutina": {"$in": rutina_ids}}, aplicar_fecha=False)
+        if dias:
+            result["rutina_dias"] = dias
+            dia_ids = _ids(dias)
+            if dia_ids:
+                ejercicios = _buscar(
+                    "rutina_ejercicios",
+                    {"id_rutina_dia": {"$in": dia_ids}},
+                    aplicar_fecha=False,
+                )
+                if ejercicios:
+                    result["rutina_ejercicios"] = ejercicios
+
+    # 4. Asignaciones de rutina a miembros: el vínculo entre ambos lados. Sin
+    #    esto el miembro restaurado no vería ninguna rutina aunque las rutinas
+    #    sí estuvieran en la base.
+    #    `miembro_rutina` referencia la rutina por ObjectId;
+    #    `rutinas_asignadas` referencia al miembro por su id de PostgreSQL.
+    if rutina_ids or member_ids:
+        criterios = []
+        if rutina_ids:
+            criterios.append({"id_rutina": {"$in": rutina_ids}})
+        if member_ids:
+            criterios.append({"id_miembro": {"$in": member_ids}})
+        if criterios:
+            docs = _buscar("miembro_rutina", {"$or": criterios}, aplicar_fecha=False)
+            if docs:
+                result["miembro_rutina"] = docs
+
+    if member_pg_ids or rutina_ids:
+        criterios = []
+        if member_pg_ids:
+            criterios.append({"id_miembro_pg": {"$in": member_pg_ids}})
+        if rutina_ids:
+            criterios.append({"id_rutina": {"$in": rutina_ids}})
+        docs = _buscar("rutinas_asignadas", {"$or": criterios}, aplicar_fecha=False)
+        if docs:
+            result["rutinas_asignadas"] = docs
+
+    # 5. Perfiles y certificaciones del staff del gimnasio. Se resuelven contra
+    #    PostgreSQL porque el staff vive ahí, no en Mongo.
+    try:
+        from app.models.pg.usuario import Usuario
+        staff_ids = [
+            u.id for u in Usuario.query.filter_by(id_gimnasio=gym_id).all()
+        ]
+    except Exception as exc:
+        print(f"[backup gym {gym_id}] No se pudo listar el staff: {exc}")
+        staff_ids = []
+
+    if staff_ids:
+        for coll in ("perfil_entrenador", "certificaciones_entrenador",
+                     "evaluaciones_entrenador", "logros_entrenador"):
+            docs = _buscar(coll, {"id_entrenador_pg": {"$in": staff_ids}}, aplicar_fecha=False)
             if docs:
                 result[coll] = docs
 
@@ -292,15 +395,25 @@ def restore_tenant_backup(filepath: str, gym_id: int):
     for coll_name, docs in data.items():
         coll = db[coll_name]
         for doc in docs:
-            # Doble verificación: el doc pertenece a este gym
+            if doc.get("_id") is None:
+                continue
+
+            # Doble verificación de tenant. Si el documento declara a qué
+            # gimnasio pertenece y no es este, se descarta: subir por error el
+            # respaldo de otro gimnasio no debe mezclar datos.
+            #
+            # Los documentos que NO declaran gimnasio —rutina_dias,
+            # rutina_ejercicios, miembro_membresia, progreso_fisico— cuelgan de
+            # un padre que sí lo declara, así que se aceptan tal cual: es la
+            # única forma de restaurar el contenido de una rutina.
+            declara = "id_gimnasio" in doc or "id_gimnasio_pg" in doc
             owns = (
                 doc.get("id_gimnasio") == gym_id
                 or doc.get("id_gimnasio_pg") == gym_id
             )
-            # Para colecciones join (miembro_membresia, progreso_fisico)
-            # no tienen id_gimnasio directo — se confía en el archivo
-            if not owns and "id_gimnasio" in doc and "id_gimnasio_pg" in doc:
+            if declara and not owns:
                 continue
+
             coll.update_one({"_id": doc["_id"]}, {"$set": doc}, upsert=True)
             restored += 1
 

@@ -112,6 +112,10 @@ def restore_mongo_json(file_path: str) -> dict:
     for coll_name, docs in data.items():
         if not docs:
             continue
+        # Claves reservadas: si un respaldo trae material que no es de Mongo, no
+        # se convierte en una colección. PostgreSQL se restaura desde su .dump.
+        if coll_name in ("postgres", "manifest", "_meta"):
+            continue
         coll = db[coll_name]
         colecciones += 1
 

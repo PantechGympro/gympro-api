@@ -301,6 +301,122 @@ def renovar_suscripcion_demo():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# AUTO-RENOVACIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def procesar_auto_renovaciones(app=None) -> dict:
+    """
+    Renueva las suscripciones vencidas que tienen `auto_renovar` activo.
+
+    Hasta ahora `auto_renovar` era una casilla que se guardaba pero que nadie
+    leía: el gimnasio la activaba, la fecha de cobro pasaba y la suscripción
+    vencía igual. Esta función es la que le da sentido a la casilla.
+
+    Comportamiento por suscripción vencida:
+      - Con auto_renovar → se extiende 30 días y se emite una factura pagada.
+      - Sin auto_renovar → se marca 'past_due' para que el panel lo muestre
+        como vencida en lugar de seguir diciendo que está activa.
+
+    Con un cobro real esto lo dispararía el webhook de la pasarela; aquí la
+    renovación es simulada, igual que el botón "Renovar 30 días" del panel.
+
+    La ejecuta el scheduler una vez al día y también puede llamarse a mano desde
+    POST /api/billing/suscripcion/auto-renovar.
+    """
+    from flask import current_app
+
+    contexto = app.app_context() if app is not None else current_app.app_context()
+    with contexto:
+        ahora = datetime.now(timezone.utc)
+        resumen = {"renovadas": 0, "vencidas": 0, "errores": 0, "revisadas": 0}
+
+        pendientes = (
+            Suscripcion.query
+            .filter(
+                Suscripcion.estado.in_(["trialing", "active"]),
+                Suscripcion.fecha_proximo_cobro.isnot(None),
+                Suscripcion.fecha_proximo_cobro <= ahora,
+            )
+            .all()
+        )
+        resumen["revisadas"] = len(pendientes)
+
+        for sub in pendientes:
+            try:
+                if not sub.auto_renovar:
+                    # Sin auto-renovación no se cobra nada: solo se refleja que
+                    # el periodo terminó.
+                    sub.estado     = "past_due"
+                    sub.updated_at = ahora
+                    resumen["vencidas"] += 1
+                    continue
+
+                plan = sub.plan
+                if not plan or not getattr(plan, "activo", True):
+                    # El plan fue dado de baja: no se puede renovar a ciegas a un
+                    # precio que ya no existe. Queda pendiente de pago para que
+                    # el dueño elija otro plan.
+                    sub.estado     = "past_due"
+                    sub.updated_at = ahora
+                    resumen["vencidas"] += 1
+                    continue
+
+                # Se parte de la fecha de cobro, no de hoy, para no regalar días
+                # cuando el proceso corre con retraso. Si el atraso es de más de
+                # un ciclo se avanza hasta rebasar el presente.
+                proximo = sub.fecha_proximo_cobro or ahora
+                # Una fila antigua puede venir sin zona horaria; compararla con
+                # un datetime consciente lanzaría TypeError y abortaría el ciclo
+                # para todos los demás gimnasios.
+                if proximo.tzinfo is None:
+                    proximo = proximo.replace(tzinfo=timezone.utc)
+                while proximo <= ahora:
+                    proximo = proximo + timedelta(days=30)
+
+                sub.estado              = "active"
+                sub.fecha_proximo_cobro = proximo
+                sub.fecha_fin           = None
+                sub.updated_at          = ahora
+
+                db.session.add(FacturaSuscripcion(
+                    id_suscripcion    = sub.id,
+                    monto             = plan.precio_mensual_mxn,  # centavos
+                    moneda            = "MXN",
+                    estado            = "pagada",
+                    fecha_emision     = ahora,
+                    fecha_pago        = ahora,
+                    fecha_vencimiento = proximo,
+                ))
+                resumen["renovadas"] += 1
+
+            except Exception as exc:
+                resumen["errores"] += 1
+                print(f"[auto-renovacion] Suscripción {sub.id} falló: {exc}")
+
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            print(f"[auto-renovacion] No se pudo guardar: {exc}")
+            resumen["errores"] += 1
+
+        return resumen
+
+
+@billing_bp.route("/suscripcion/auto-renovar", methods=["POST"])
+@jwt_required()
+def trigger_auto_renovacion():
+    """Ejecuta el ciclo de auto-renovación a mano. Solo superadmin."""
+    claims = get_jwt()
+    if claims.get("role") != "superadmin":
+        return jsonify({"msg": "Solo el superadministrador puede ejecutar esta acción"}), 403
+
+    from flask import current_app
+    resultado = procesar_auto_renovaciones(app=current_app._get_current_object())
+    return jsonify({"msg": "Ciclo de auto-renovación ejecutado", **resultado}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FACTURAS
 # ─────────────────────────────────────────────────────────────────────────────
 

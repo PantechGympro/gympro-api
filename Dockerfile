@@ -89,8 +89,25 @@ COPY --from=builder /venv /venv
 # Copiar código fuente (el .dockerignore excluye lo que no debe ir)
 COPY --chown=gymuser:gymuser . .
 
-# Dar permisos de ejecución al entrypoint
-RUN chmod +x /app/entrypoint.sh
+# Normalizar finales de línea y dar permisos de ejecución al entrypoint.
+#
+# El `sed` no es decorativo: si el archivo llega con finales de línea de Windows
+# (CRLF), el kernel de Linux lee el shebang como `#!/bin/sh\r`, busca un
+# intérprete llamado "sh\r" que no existe y aborta con un mensaje engañoso:
+#
+#     exec /app/entrypoint.sh: no such file or directory
+#
+# —engañoso porque el archivo SÍ está ahí y el `chmod` funcionó. Detrás, nginx
+# cae con "host not found in upstream 'api'" al no poder resolver un contenedor
+# que está en bucle de reinicio, y parece un problema de red que no lo es.
+#
+# El .gitattributes de la raíz ya obliga a que los .sh se guarden con LF en el
+# repositorio, así que un clon limpio nunca tiene el problema. Esta línea cubre
+# el caso que aquel no puede: `docker build` copia desde el DISCO, no desde git,
+# de modo que un editor que guarde el archivo con CRLF rompería el arranque aun
+# con el repositorio correcto. Normalizar aquí hace la imagen inmune a ambos.
+RUN sed -i 's/\r$//' /app/entrypoint.sh \
+ && chmod +x /app/entrypoint.sh
 
 # Crear directorios de storage y uploads; ownership a gymuser ANTES de USER gymuser.
 # Los named volumes Docker se inicializan copiando el directorio de la imagen

@@ -165,6 +165,89 @@ def _construir_query_fechas(since_date):
     }
 
 
+# ================= POSTGRES: LECTURA PARA REPORTES =================
+#
+# El .dump de pg_dump ya contiene TODAS las tablas de PostgreSQL, así que la
+# restauración nunca perdió nada. Lo que faltaba era el lado legible: el Excel y
+# el JSON solo recorrían colecciones de Mongo, de modo que datos que viven en
+# PostgreSQL —el catálogo de ejercicios entre ellos— no aparecían por ningún
+# lado al abrir el respaldo. Estas funciones cierran ese hueco.
+#
+# El catálogo de ejercicios es un caso claro: `rutina_ejercicios` (Mongo) guarda
+# qué ejercicio va en qué día de rutina, pero el ejercicio en sí —nombre, grupo
+# muscular, instrucciones, video— está en la tabla `ejercicios` de PostgreSQL.
+# Sin ella el Excel mostraba rutinas apuntando a ejercicios invisibles.
+
+# Tablas que se exportan a los reportes legibles. Se listan explícitamente en
+# lugar de volcar el esquema entero para no arrastrar tablas de infraestructura
+# (alembic_version) ni credenciales cifradas de pasarelas de pago.
+PG_TABLAS_REPORTE = [
+    "gimnasios",
+    "usuarios",
+    "roles",
+    "ejercicios",
+    "tipos_membresia",
+    "tipos_clase",
+    "planes_suscripcion",
+    "suscripciones",
+    "facturas_suscripcion",
+    "transacciones_pago",
+]
+# `configuracion_pasarela` queda fuera a propósito: guarda las credenciales de
+# PayPal y Mercado Pago cifradas con Fernet y no tiene por qué viajar en un
+# Excel que se abre en cualquier equipo. El .dump sí la incluye, que es donde
+# hace falta para restaurar.
+
+# Columnas que nunca salen en un reporte legible, en cualquier tabla.
+PG_COLUMNAS_SENSIBLES = {
+    "password", "password_hash", "contrasena", "contrasena_hash",
+    "token", "refresh_token", "secret", "api_key", "client_secret",
+    "access_token", "credenciales", "credenciales_cifradas",
+}
+
+
+def _leer_tablas_pg() -> dict:
+    """
+    Devuelve {nombre_tabla: [filas...]} para PG_TABLAS_REPORTE.
+
+    Se ejecuta dentro del contexto de aplicación que ya abre `run_backup`, así
+    que reutiliza la conexión de SQLAlchemy en lugar de abrir una propia. Si una
+    tabla no existe todavía (una migración pendiente en ese entorno) se omite en
+    silencio: un respaldo incompleto es mejor que un respaldo fallido.
+    """
+    datos = {}
+    try:
+        from sqlalchemy import inspect as sa_inspect, text
+        from app.extensions import db as sa_db
+
+        existentes = set(sa_inspect(sa_db.engine).get_table_names())
+    except Exception as exc:
+        print(f"[backup] No se pudo inspeccionar PostgreSQL: {exc}")
+        return datos
+
+    for tabla in PG_TABLAS_REPORTE:
+        if tabla not in existentes:
+            continue
+        try:
+            filas = sa_db.session.execute(text(f'SELECT * FROM "{tabla}"')).mappings().all()
+            if not filas:
+                continue
+            limpias = []
+            for fila in filas:
+                registro = {}
+                for col, val in dict(fila).items():
+                    if col.lower() in PG_COLUMNAS_SENSIBLES:
+                        continue
+                    # Excel y JSON no saben de date, Decimal ni UUID.
+                    registro[col] = val if isinstance(val, (int, float, bool, type(None))) else str(val)
+                limpias.append(registro)
+            datos[tabla] = limpias
+        except Exception as exc:
+            print(f"[backup] Tabla PostgreSQL '{tabla}' omitida del reporte: {exc}")
+
+    return datos
+
+
 # ================= EXCEL =================
 
 def generate_excel(db, output_path, since_date=None):
@@ -172,12 +255,14 @@ def generate_excel(db, output_path, since_date=None):
     query = _construir_query_fechas(since_date)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        hojas_escritas = 0
+
         for coll in collections:
             try:
                 docs = list(db[coll].find(query))
                 if not docs:
                     continue
-                
+
                 # Aplanar los ObjectIds para que Pandas los soporte en Excel
                 for d in docs:
                     for k, v in d.items():
@@ -185,13 +270,33 @@ def generate_excel(db, output_path, since_date=None):
                             d[k] = str(v)
                         elif isinstance(v, (dict, list)):
                             d[k] = str(v) # Convertir anidados a string
-                            
+
                 df = pd.DataFrame(docs)
                 sheet_name = coll[:31]
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
+                hojas_escritas += 1
             except Exception as e:
                 print(f"Error procesando colección {coll} para Excel: {e}")
                 continue
+
+        # Tablas de PostgreSQL. El prefijo distingue de dónde salió cada hoja
+        # cuando dos motores tienen entidades de nombre parecido.
+        for tabla, filas in _leer_tablas_pg().items():
+            try:
+                pd.DataFrame(filas).to_excel(
+                    writer, sheet_name=f"pg_{tabla}"[:31], index=False,
+                )
+                hojas_escritas += 1
+            except Exception as e:
+                print(f"Error procesando tabla PostgreSQL {tabla} para Excel: {e}")
+
+        # openpyxl no acepta un libro sin hojas: en un gimnasio recién creado, o
+        # en un incremental sin cambios, no habría ninguna y el archivo saldría
+        # corrupto.
+        if hojas_escritas == 0:
+            pd.DataFrame([{"aviso": "Sin datos en el periodo respaldado."}]).to_excel(
+                writer, sheet_name="Vacio", index=False,
+            )
 
 # ================= PDF =================
 
@@ -224,6 +329,17 @@ def generate_pdf(db, output_path, since_date=None, mode="FULL"):
         except Exception as e:
             print(f"Error en PDF para colección {coll}: {e}")
             continue
+
+    # Inventario de PostgreSQL. Sin esta sección el reporte daba a entender que
+    # el respaldo solo cubría Mongo.
+    tablas_pg = _leer_tablas_pg()
+    if tablas_pg:
+        pdf.ln(6)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 8, "PostgreSQL", ln=True)
+        pdf.set_font("Arial", size=8)
+        for tabla, filas in tablas_pg.items():
+            pdf.multi_cell(0, 5, f"Tabla {tabla}: {len(filas)} registro(s)")
 
     pdf.output(output_path)
 
@@ -259,6 +375,10 @@ def generate_full_json(db, output_path):
         except Exception as e:
             print(f"Error extrayendo {coll} para JSON FULL: {e}")
 
+    # Aquí NO se añaden las tablas de PostgreSQL: este archivo lo consume
+    # restore_service, que trata cada clave de primer nivel como una colección
+    # de Mongo y crearía una colección basura. El material de PostgreSQL para
+    # consulta va en el Excel y en el PDF del respaldo.
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(json_util.dumps(backup_data, indent=2))
 
