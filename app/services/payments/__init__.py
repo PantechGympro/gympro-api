@@ -9,6 +9,7 @@ from .base import (
     PasarelaError,
     ResultadoCheckout,
     ResultadoPago,
+    ResultadoSuscripcion,
 )
 from .factory import (
     PROVEEDORES,
@@ -24,6 +25,7 @@ __all__ = [
     "PasarelaError",
     "ResultadoCheckout",
     "ResultadoPago",
+    "ResultadoSuscripcion",
     "PROVEEDORES",
     "PROVEEDORES_INFO",
     "construir_pasarela",

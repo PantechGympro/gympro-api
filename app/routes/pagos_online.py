@@ -307,6 +307,13 @@ def webhook(proveedor):
     payload = request.get_json(silent=True) or {}
     logger.info("Webhook %s recibido: %s", proveedor, str(payload)[:300])
 
+    # ── Cobro recurrente ─────────────────────────────────────────────────────
+    # Se comprueba primero porque estos cargos NO tienen transacción local: los
+    # inicia la pasarela por su cuenta cada periodo, sin que nadie pulse nada en
+    # GymPro. Buscarles una transacción sería inútil y se descartarían.
+    if _es_evento_recurrente(proveedor, payload):
+        return _procesar_webhook_recurrente(proveedor, payload)
+
     # La transacción se localiza por la referencia externa del proveedor
     tx = _localizar_transaccion(proveedor, payload)
     if not tx:
@@ -327,6 +334,71 @@ def webhook(proveedor):
         db.session.commit()
 
     return jsonify({"msg": "ok"}), 200
+
+
+# ── Helpers de cobro recurrente ──────────────────────────────────────────────
+
+def _es_evento_recurrente(proveedor: str, payload: dict) -> bool:
+    """
+    ¿La notificación corresponde a un acuerdo de cobro recurrente?
+
+    Se distingue por la forma del evento, no por el importe: un cargo recurrente
+    y uno puntual pueden valer lo mismo, pero llegan con estructuras distintas.
+    """
+    if proveedor == "paypal":
+        evento  = (payload or {}).get("event_type", "")
+        recurso = (payload or {}).get("resource", {}) or {}
+        # Las renovaciones traen el acuerdo que las originó; los pagos sueltos no.
+        return (evento.startswith("BILLING.SUBSCRIPTION.")
+                or bool(recurso.get("billing_agreement_id")))
+
+    if proveedor == "mercadopago":
+        tipo = (payload or {}).get("type") or (payload or {}).get("topic")
+        return tipo in ("subscription_preapproval", "preapproval",
+                        "subscription_authorized_payment")
+
+    return False
+
+
+def _procesar_webhook_recurrente(proveedor: str, payload: dict):
+    """
+    Registra una renovación o refleja el cambio de estado de un acuerdo.
+
+    Siempre responde 200: un error nuestro no debe provocar que la pasarela
+    reintente en bucle. Lo que no se pueda procesar aquí queda a la espera de la
+    reconciliación manual, que consulta el estado real del acuerdo.
+    """
+    from app.routes.owner_gym.suscripcion_recurrente import registrar_cobro_recurrente
+    from app.models.pg.suscripcion import Suscripcion
+
+    try:
+        pasarela  = pasarela_de_plataforma(proveedor)
+        resultado = pasarela.interpretar_webhook(payload, dict(request.headers))
+    except Exception as exc:
+        logger.error("Webhook recurrente %s no interpretado: %s", proveedor, exc)
+        return jsonify({"msg": "Error procesando webhook"}), 200
+
+    if not resultado or not resultado.referencia_externa:
+        return jsonify({"msg": "Evento recurrente sin acuerdo asociado"}), 200
+
+    if resultado.estado == "aprobado":
+        registrado = registrar_cobro_recurrente(
+            resultado.referencia_externa, resultado.monto, resultado.referencia_pago,
+        )
+        return jsonify({"msg": "cobro registrado" if registrado else "duplicado"}), 200
+
+    # El acuerdo dejó de cobrar. No se corta el servicio: la suscripción sigue
+    # vigente hasta la fecha ya pagada y el ciclo diario decide después.
+    sub = Suscripcion.query.filter_by(
+        referencia_recurrente=resultado.referencia_externa).first()
+    if sub:
+        sub.estado_recurrente = "cancelado"
+        sub.auto_renovar      = False
+        db.session.commit()
+        logger.info("Acuerdo recurrente %s dejó de cobrar; suscripcion %s",
+                    resultado.referencia_externa, sub.id)
+
+    return jsonify({"msg": "estado del acuerdo actualizado"}), 200
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

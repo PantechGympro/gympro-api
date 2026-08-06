@@ -48,6 +48,13 @@ class FacturaSuscripcion(db.Model):
     # Stripe (nullable para modo local)
     stripe_invoice_id = db.Column(db.String(100), nullable=True, unique=True)
 
+    # Identificador del cargo en PayPal o Mercado Pago cuando la factura viene de
+    # un cobro recurrente. Es único porque las pasarelas reenvían la misma
+    # notificación varias veces si no reciben respuesta: sin esta restricción,
+    # un reintento generaría una factura duplicada y el historial de cobros
+    # mostraría el doble de lo realmente pagado.
+    referencia_externa = db.Column(db.String(120), nullable=True, unique=True, index=True)
+
     # Auditoría
     created_at        = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 

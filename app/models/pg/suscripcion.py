@@ -50,9 +50,22 @@ class Suscripcion(db.Model):
     # Stripe (nullable mientras se trabaja en local)
     stripe_subscription_id  = db.Column(db.String(100), nullable=True, unique=True)
 
-    # Cargo recurrente: si está activo, la plataforma renueva automáticamente
-    # el plan al llegar la fecha de cobro (en demo se simula el cobro).
+    # ── Cargo recurrente ─────────────────────────────────────────────────────
+    #
+    # `auto_renovar` es la intención del dueño; los tres campos siguientes son
+    # el acuerdo real con la pasarela, que es quien cobra. Están separados a
+    # propósito: el dueño puede haber pedido el cargo recurrente y que el
+    # acuerdo todavía esté sin autorizar, o que la pasarela lo haya suspendido
+    # tras varios intentos fallidos. Guardar solo la casilla ocultaría esa
+    # diferencia y el panel afirmaría que se cobra solo cuando no es cierto.
     auto_renovar            = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
+
+    # 'paypal' | 'mercadopago'. Null mientras no haya acuerdo.
+    pasarela_recurrente     = db.Column(db.String(30), nullable=True)
+    # Id del acuerdo en la pasarela (subscription de PayPal, preapproval de MP).
+    referencia_recurrente   = db.Column(db.String(120), nullable=True, index=True)
+    # Último estado conocido: pendiente | activo | pausado | cancelado | vencido.
+    estado_recurrente       = db.Column(db.String(20), nullable=True)
 
     # Auditoría
     created_at              = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -75,6 +88,17 @@ class Suscripcion(db.Model):
     def activa(self) -> bool:
         return self.estado in ("trialing", "active")
 
+    @property
+    def cobro_automatico(self) -> bool:
+        """
+        True solo si el cobro recurrente va a ocurrir de verdad.
+
+        Requiere las dos cosas: que el dueño lo haya pedido y que la pasarela
+        confirme el acuerdo como activo. Un acuerdo pendiente de autorizar, o
+        suspendido por pagos fallidos, no cobra nada.
+        """
+        return bool(self.auto_renovar) and self.estado_recurrente == "activo"
+
     def to_dict(self):
         return {
             "id":                     self.id,
@@ -88,6 +112,11 @@ class Suscripcion(db.Model):
             "fecha_proximo_cobro":    self.fecha_proximo_cobro.isoformat() if self.fecha_proximo_cobro else None,
             "stripe_subscription_id": self.stripe_subscription_id,
             "auto_renovar":           bool(self.auto_renovar),
+            "pasarela_recurrente":    self.pasarela_recurrente,
+            "estado_recurrente":      self.estado_recurrente,
+            # Lo que el panel debe creer: solo hay cobro automático si el dueño
+            # lo pidió Y la pasarela confirma que el acuerdo está activo.
+            "cobro_automatico":       self.cobro_automatico,
             "created_at":             self.created_at.isoformat() if self.created_at else None,
             "updated_at":             self.updated_at.isoformat() if self.updated_at else None,
         }

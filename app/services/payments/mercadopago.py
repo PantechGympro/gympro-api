@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import requests
 
-from .base import PasarelaBase, ResultadoCheckout, ResultadoPago, PasarelaError
+from .base import (
+    PasarelaBase, ResultadoCheckout, ResultadoPago, ResultadoSuscripcion, PasarelaError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +156,28 @@ class MercadoPagoPasarela(PasarelaBase):
 
     def interpretar_webhook(self, payload: dict, headers: dict) -> ResultadoPago | None:
         tipo = (payload or {}).get("type") or (payload or {}).get("topic")
+
+        # Cobro recurrente: MP avisa con el tipo `subscription_preapproval`
+        # cuando el acuerdo cambia de estado (autorizado, pausado, cancelado).
+        # No trae el importe, así que se consulta el acuerdo para saber cómo
+        # quedó y se traduce a aprobado/rechazado.
+        if tipo in ("subscription_preapproval", "preapproval"):
+            preapproval_id = ((payload or {}).get("data") or {}).get("id") or (payload or {}).get("id")
+            if not preapproval_id:
+                return None
+            try:
+                estado = self.consultar_suscripcion(str(preapproval_id))
+            except PasarelaError as exc:
+                logger.error("MP webhook preapproval %s: %s", preapproval_id, exc)
+                return None
+            return ResultadoPago(
+                estado="aprobado" if estado.cobra_sola else "rechazado",
+                referencia_externa=str(preapproval_id),
+                monto=estado.monto,
+                moneda=estado.moneda,
+                datos=estado.datos,
+            )
+
         if tipo not in ("payment", "merchant_order"):
             return None
 
@@ -173,6 +197,126 @@ class MercadoPagoPasarela(PasarelaBase):
             return self._a_resultado(r.json(), None)
 
         return None
+
+    # ── Cobro recurrente (Preapproval) ───────────────────────────────────────
+    #
+    # Mercado Pago lo resuelve en un solo objeto: el "preapproval" lleva dentro
+    # el importe y la periodicidad, sin el encadenado producto/plan que exige
+    # PayPal. El pagador autoriza en `init_point` y a partir de ahí MP cobra solo.
+    #
+    # Documentación: https://www.mercadopago.com.mx/developers/es/reference/subscriptions/_preapproval/post
+
+    soporta_suscripciones = True
+
+    def crear_suscripcion(self, *, monto: float, descripcion: str,
+                          url_retorno: str, url_cancelacion: str,
+                          referencia: str, dias_periodo: int = 30,
+                          extra: dict | None = None) -> ResultadoSuscripcion:
+        # MP solo admite "days" o "months" como unidad. 30 días es exactamente
+        # un mes para su calendario de cobro, y expresarlo en meses evita el
+        # desfase que acumularía contar de 30 en 30 a lo largo del año.
+        if dias_periodo % 30 == 0:
+            frecuencia, tipo_frecuencia = dias_periodo // 30, "months"
+        else:
+            frecuencia, tipo_frecuencia = dias_periodo, "days"
+
+        cuerpo = {
+            "reason": (descripcion or "Suscripción GymPro")[:255],
+            "external_reference": referencia,
+            "payer_email": (extra or {}).get("payer_email") or "",
+            "back_url": url_retorno,
+            "status": "pending",
+            "auto_recurring": {
+                "frequency": frecuencia,
+                "frequency_type": tipo_frecuencia,
+                "transaction_amount": round(float(monto), 2),
+                "currency_id": self.moneda,
+            },
+        }
+        # MP rechaza el campo si va vacío, así que se omite cuando no se conoce
+        # el correo del pagador; en ese caso lo pedirá durante la autorización.
+        if not cuerpo["payer_email"]:
+            cuerpo.pop("payer_email")
+
+        try:
+            r = requests.post(f"{_API}/preapproval", json=cuerpo,
+                              headers=self._headers(), timeout=_TIMEOUT)
+        except requests.RequestException as exc:
+            raise PasarelaError(f"No se pudo crear la suscripción en Mercado Pago: {exc}") from exc
+
+        if r.status_code not in (200, 201):
+            logger.error("MP crear preapproval %s: %s", r.status_code, r.text[:400])
+            raise PasarelaError("Mercado Pago no pudo crear el acuerdo de cobro recurrente.")
+
+        data = r.json()
+        url = data.get("init_point") or data.get("sandbox_init_point")
+        if not url:
+            raise PasarelaError("Mercado Pago no devolvió la URL para autorizar el cargo recurrente.")
+
+        return ResultadoSuscripcion(
+            estado=self._estado_suscripcion(data.get("status")),
+            referencia_externa=str(data.get("id") or ""),
+            url_autorizacion=url,
+            proximo_cobro=(data.get("auto_recurring") or {}).get("start_date"),
+            monto=float(monto),
+            moneda=self.moneda,
+            datos=data,
+        )
+
+    def consultar_suscripcion(self, referencia_externa: str) -> ResultadoSuscripcion:
+        try:
+            r = requests.get(f"{_API}/preapproval/{referencia_externa}",
+                             headers=self._headers(), timeout=_TIMEOUT)
+        except requests.RequestException as exc:
+            raise PasarelaError(f"No se pudo consultar la suscripción en Mercado Pago: {exc}") from exc
+
+        if r.status_code == 404:
+            raise PasarelaError("Mercado Pago no encontró el acuerdo de cobro recurrente.")
+        if r.status_code != 200:
+            logger.error("MP consultar preapproval %s: %s", r.status_code, r.text[:400])
+            raise PasarelaError("Mercado Pago no devolvió el estado del acuerdo.")
+
+        data = r.json()
+        recurrente = data.get("auto_recurring") or {}
+        monto = None
+        try:
+            monto = float(recurrente.get("transaction_amount"))
+        except (TypeError, ValueError):
+            pass
+
+        return ResultadoSuscripcion(
+            estado=self._estado_suscripcion(data.get("status")),
+            referencia_externa=referencia_externa,
+            # MP nombra `next_payment_date` a lo que PayPal llama next_billing_time.
+            proximo_cobro=data.get("next_payment_date") or recurrente.get("end_date"),
+            monto=monto,
+            moneda=recurrente.get("currency_id") or self.moneda,
+            datos=data,
+        )
+
+    def cancelar_suscripcion(self, referencia_externa: str,
+                             motivo: str = "Cancelado por el usuario") -> bool:
+        try:
+            r = requests.put(f"{_API}/preapproval/{referencia_externa}",
+                             json={"status": "cancelled"},
+                             headers=self._headers(), timeout=_TIMEOUT)
+        except requests.RequestException as exc:
+            raise PasarelaError(f"No se pudo cancelar la suscripción en Mercado Pago: {exc}") from exc
+
+        if r.status_code == 200:
+            return True
+        logger.error("MP cancelar preapproval %s: %s", r.status_code, r.text[:400])
+        return False
+
+    @staticmethod
+    def _estado_suscripcion(status: str | None) -> str:
+        return {
+            "pending":   "pendiente",
+            "authorized": "activo",
+            "paused":    "pausado",
+            "cancelled": "cancelado",
+            "finished":  "vencido",
+        }.get((status or "").lower(), "pendiente")
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
