@@ -105,12 +105,33 @@ def _regresion_global(gym_id=None, trainer_id=None):
     if not member_oids:
         raise ValueError(f"No hay miembros registrados para el gimnasio {gym_id}.")
 
-    # 2. Leer progreso_fisico de esos miembros
+    # 2. Leer las mediciones de peso de esos miembros.
+    #
+    # Dos fuentes, igual que en la prediccion individual: la ficha de Progreso
+    # Fisico y el peso corporal que se anota al cerrar un entrenamiento. Leer
+    # solo la primera desaprovechaba mediciones reales y dejaba el modelo por
+    # debajo del minimo en gimnasios donde la gente registra su peso al entrenar.
     registros = list(db.progreso_fisico.find(
         {"id_miembro": {"$in": member_oids}},
         {"id_miembro": 1, "peso": 1, "imc": 1, "grasa_corporal": 1,
          "cintura": 1, "fecha_registro": 1},
     ))
+
+    # Los entrenamientos aportan peso y fecha; no traen cintura ni grasa, que se
+    # imputan mas abajo con la media, igual que un registro de progreso al que
+    # le falten esos campos.
+    for e in db.entrenamientos_realizados.find(
+        {"id_miembro": {"$in": member_oids}, "peso_corporal": {"$ne": None, "$gt": 0}},
+        {"id_miembro": 1, "peso_corporal": 1, "fecha": 1},
+    ):
+        registros.append({
+            "id_miembro":     e.get("id_miembro"),
+            "peso":           e.get("peso_corporal"),
+            "fecha_registro": e.get("fecha"),
+            "imc":            None,
+            "grasa_corporal": None,
+            "cintura":        None,
+        })
 
     if len(registros) < 10:
         raise ValueError("Se necesitan al menos 10 registros de progreso para entrenar el modelo.")
@@ -353,7 +374,23 @@ def _regresion_personal(historial: list, dias_futuro: int):
 
 
 def _historial_de_miembro(id_miembro: str):
-    """Serie de peso del miembro, ordenada, con la fecha cruda para calcular."""
+    """
+    Serie de peso del miembro, ordenada, con la fecha cruda para calcular.
+
+    Lee DOS fuentes, porque el miembro puede anotar su peso por dos caminos
+    distintos y ambos son mediciones igual de validas:
+
+      progreso_fisico            la ficha de Progreso Fisico
+      entrenamientos_realizados  el campo de peso corporal de la bitacora
+
+    Usar solo la primera dejaba sin prediccion a quien registraba su peso al
+    terminar de entrenar: la pantalla decia "0 / 3 registros" con la bitacora
+    llena de entrenamientos.
+
+    Cuando hay varias mediciones el mismo dia se conserva la ultima, que es la
+    mas reciente; promediarlas mezclaria una pesada en ayunas con otra despues
+    de entrenar, que no son comparables.
+    """
     from bson import ObjectId
     db = get_mongo_db()
     try:
@@ -368,21 +405,36 @@ def _historial_de_miembro(id_miembro: str):
         ).sort("fecha_registro", 1)
     )
 
-    historial = []
-    for r in registros:
-        if r.get("peso") is None:
-            continue
-        try:
-            peso = round(float(r["peso"]), 1)
-        except (TypeError, ValueError):
-            continue
-        dt = _to_naive_datetime(r.get("fecha_registro"))
-        historial.append({
-            "fecha": dt.strftime("%Y-%m-%d") if dt else str(r.get("fecha_registro", "")),
-            "peso":  peso,
-            "_dt":   r.get("fecha_registro"),
-        })
+    # La bitacora guarda `peso_corporal` solo cuando el miembro lo anota; los
+    # entrenamientos sin peso no aportan nada a este modelo y se descartan.
+    entrenos = list(
+        db.entrenamientos_realizados.find(
+            {"id_miembro": oid, "peso_corporal": {"$ne": None, "$gt": 0}},
+            {"peso_corporal": 1, "fecha": 1, "_id": 0},
+        ).sort("fecha", 1)
+    )
 
+    # Se indexa por dia para que las dos fuentes no cuenten dos veces la misma
+    # medicion: guardar el peso al entrenar YA crea un registro de progreso.
+    por_dia = {}
+
+    def _anotar(peso_bruto, fecha_bruta):
+        try:
+            peso = round(float(peso_bruto), 1)
+        except (TypeError, ValueError):
+            return
+        if peso <= 0:
+            return
+        dt = _to_naive_datetime(fecha_bruta)
+        clave = dt.strftime("%Y-%m-%d") if dt else str(fecha_bruta)
+        por_dia[clave] = {"fecha": clave, "peso": peso, "_dt": fecha_bruta}
+
+    for r in registros:
+        _anotar(r.get("peso"), r.get("fecha_registro"))
+    for e in entrenos:
+        _anotar(e.get("peso_corporal"), e.get("fecha"))
+
+    historial = sorted(por_dia.values(), key=lambda h: h["fecha"])
     return registros, historial
 
 
@@ -471,12 +523,22 @@ def _diagnostico_datos(gym_id, trainer_id):
         query["id_entrenador_pg"] = int(trainer_id)
 
     oids = [m["_id"] for m in db.miembros.find(query, {"_id": 1})]
-    registros = db.progreso_fisico.count_documents(
-        {"id_miembro": {"$in": oids}, "peso": {"$ne": None}}
-    ) if oids else 0
-    con_registro = len(db.progreso_fisico.distinct(
-        "id_miembro", {"id_miembro": {"$in": oids}, "peso": {"$ne": None}}
-    )) if oids else 0
+    if not oids:
+        registros = con_registro = 0
+    else:
+        # Se cuentan las dos fuentes de peso, las mismas que usa el modelo.
+        registros = (
+            db.progreso_fisico.count_documents(
+                {"id_miembro": {"$in": oids}, "peso": {"$ne": None}})
+            + db.entrenamientos_realizados.count_documents(
+                {"id_miembro": {"$in": oids}, "peso_corporal": {"$ne": None, "$gt": 0}})
+        )
+        con_registro = len(set(
+            db.progreso_fisico.distinct(
+                "id_miembro", {"id_miembro": {"$in": oids}, "peso": {"$ne": None}})
+            + db.entrenamientos_realizados.distinct(
+                "id_miembro", {"id_miembro": {"$in": oids}, "peso_corporal": {"$ne": None, "$gt": 0}})
+        ))
 
     return {
         "miembros_en_alcance":  len(oids),

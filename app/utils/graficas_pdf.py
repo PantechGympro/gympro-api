@@ -62,6 +62,23 @@ def _abreviar(texto: str, limite: int = 14) -> str:
     return t if len(t) <= limite else t[: limite - 1] + "…"
 
 
+def _limite_eje(n_categorias: int) -> int:
+    """
+    Caracteres que caben en una etiqueta del eje X según cuántas haya.
+
+    Con pocas categorías cada una dispone de mucho espacio horizontal y no hay
+    razón para recortarla: "Punto de venta" salía como "Punto de …" aunque
+    sobrase sitio de sobra, porque el límite era fijo.
+    """
+    if n_categorias <= 2:
+        return 24
+    if n_categorias <= 4:
+        return 16
+    if n_categorias <= 8:
+        return 11
+    return 8
+
+
 def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
     """
     Barras agrupadas. `series` es [(nombre, [valores], color), ...].
@@ -84,7 +101,7 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
     g.width  = ANCHO - 60
     g.height = alto - 70
     g.data = [s[1] for s in series]
-    g.categoryAxis.categoryNames = [_abreviar(e, 10) for e in etiquetas]
+    g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
     g.categoryAxis.labels.fontSize = 7
     g.categoryAxis.labels.angle = 0 if len(etiquetas) <= 8 else 30
@@ -136,7 +153,7 @@ def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS, alto=6.5
     g.width  = ANCHO - 60
     g.height = alto - 55
     g.data = [list(valores)]
-    g.categoryAxis.categoryNames = [_abreviar(e, 10) for e in etiquetas]
+    g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
     g.categoryAxis.labels.fontSize = 7
     g.valueAxis.valueMin = 0
@@ -274,7 +291,7 @@ def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
     g.width  = ANCHO - 60
     g.height = alto - 62
     g.data = [_limpiar(reales), _limpiar(predichos)]
-    g.categoryAxis.categoryNames = [_abreviar(e, 10) for e in etiquetas]
+    g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
     g.categoryAxis.labels.fontSize = 6.5
     g.categoryAxis.labels.angle = 30
