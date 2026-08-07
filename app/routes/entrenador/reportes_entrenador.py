@@ -178,7 +178,9 @@ def opciones():
 def reporte_pdf():
     """Reporte de desempeño del entrenador en PDF."""
     from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak,
+    )
     from reportlab.lib import colors as rl_colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
@@ -202,48 +204,50 @@ def reporte_pdf():
 
     datos = _recolectar(trainer_id, gym_id, desde, hasta)
 
-    # ── Identidad visual: la misma del reporte del gimnasio ──────────────────
-    VERDE = rl_colors.HexColor("#00875A")
-    GRIS  = rl_colors.HexColor("#5A6673")
-    TINTA = rl_colors.HexColor("#0F1720")
-    SUAVE = rl_colors.HexColor("#EAEFF3")
+    # ── Identidad visual: la misma que el reporte del gimnasio ───────────────
+    # Compartida en app/utils/estilo_pdf.py. Antes cada reporte definía sus
+    # propios estilos y acababan pareciéndose sin llegar a ser iguales.
+    from app.utils import estilo_pdf as ep
 
-    base = getSampleStyleSheet()
-    st_portada = ParagraphStyle("Portada", parent=base["Heading1"], fontSize=28,
-                                textColor=TINTA, alignment=TA_CENTER, leading=34, spaceAfter=6)
-    st_sub  = ParagraphStyle("Sub", parent=base["Normal"], fontSize=13,
-                             textColor=GRIS, alignment=TA_CENTER, spaceAfter=4)
-    st_h2   = ParagraphStyle("H2", parent=base["Heading2"], fontSize=15,
-                             textColor=VERDE, spaceBefore=16, spaceAfter=8)
-    st_nota = ParagraphStyle("Nota", parent=base["Normal"], fontSize=8.5,
-                             textColor=GRIS, leading=12)
+    st      = ep.estilos()
+    VERDE   = ep.VERDE
+    GRIS    = ep.GRIS
+    TINTA   = ep.TINTA
+    SUAVE   = ep.SUAVE
+    st_h2   = st["h2"]
+    st_nota = st["nota"]
 
-    def tabla(filas, anchos):
-        t = Table(filas, colWidths=anchos, hAlign="LEFT")
-        t.setStyle(TableStyle([
-            ("FONTSIZE",      (0, 0), (-1, -1), 9.5),
-            ("TEXTCOLOR",     (0, 0), (-1, -1), TINTA),
-            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-            ("BACKGROUND",    (0, 0), (-1, 0), SUAVE),
-            ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING",    (0, 0), (-1, -1), 6),
-            ("LINEBELOW",     (0, 0), (-1, -2), 0.4, SUAVE),
-            ("BOX",           (0, 0), (-1, -1), 0.6, SUAVE),
-        ]))
-        return t
+    def tabla(filas, anchos, derecha=None):
+        return ep.tabla(filas, anchos, st, alinear_derecha=derecha)
 
-    story = [
-        Spacer(1, 3 * cm),
-        Paragraph("Reporte de desempeño", st_portada),
-        Paragraph(entrenador.nombre if entrenador else "Entrenador", st_sub),
-        Paragraph(gym.nombre if gym else "", st_sub),
-        Paragraph(etiqueta, st_sub),
-        Spacer(1, 1.5 * cm),
-    ]
+    nombre_gym  = gym.nombre if gym else "Gimnasio"
+    nombre_ent  = entrenador.nombre if entrenador else "Entrenador"
+
+    # PORTADA con el logotipo del gimnasio donde trabaja el entrenador
+    story = ep.portada(
+        titulo="Reporte de desempeño",
+        subtitulo=nombre_ent,
+        periodo=etiqueta,
+        st=st,
+        logo_data_url=getattr(gym, "logo", None),
+        pie=nombre_gym,
+    )
+    story.append(PageBreak())
 
     if "resumen" in secciones:
-        story.append(Paragraph("Resumen del periodo", st_h2))
+        story += ep.seccion("Resumen del periodo", st,
+                            "Tu actividad como entrenador en el rango seleccionado.")
+
+        tarjetas = ep.tarjetas_kpi([
+            ("Sesiones completadas", str(datos["completadas"]), ep.VERDE),
+            ("Tasa de asistencia",   f'{datos["asistencia"]}%', ep.ACENTO_INGRESOS),
+            ("Clientes activos",     str(datos["clientes"]),    ep.TINTA),
+            ("Cancelación",          f'{datos["cancelacion"]}%',
+             ep.ACENTO_ALERTA if datos["cancelacion"] > 20 else ep.GRIS),
+        ], st)
+        if tarjetas:
+            story += [tarjetas, Spacer(1, 0.55 * cm)]
+
         filas = [
             ["Indicador", "Valor"],
             ["Sesiones completadas", str(datos["completadas"])],
@@ -258,10 +262,11 @@ def reporte_pdf():
                 "Calificación promedio",
                 f'{datos["calificacion"]} / 5  ({datos["n_evaluaciones"]} evaluación/es)',
             ])
-        story.append(tabla(filas, [9 * cm, 6 * cm]))
+        story.append(tabla(filas, [9 * cm, 6 * cm], derecha=[1]))
 
     if "sesiones" in secciones:
-        story.append(Paragraph("Sesiones mes a mes", st_h2))
+        story += ep.seccion("Sesiones mes a mes", st,
+                            "Cuántas sesiones cerraste y cuántas se cayeron, mes a mes.")
         if datos["por_mes"]:
             filas = [["Mes", "Completadas", "Canceladas", "Total"]]
             for m in datos["por_mes"]:
@@ -270,7 +275,7 @@ def reporte_pdf():
                     f"{_MESES[int(mes_txt) - 1]} {anio_txt}",
                     str(m["completadas"]), str(m["canceladas"]), str(m["total"]),
                 ])
-            story.append(tabla(filas, [6 * cm, 3.2 * cm, 3.2 * cm, 2.6 * cm]))
+            story.append(tabla(filas, [6 * cm, 3.2 * cm, 3.2 * cm, 2.6 * cm], derecha=[1, 2, 3]))
 
             if con_graficas:
                 etiquetas, completadas, canceladas = [], [], []
@@ -291,11 +296,12 @@ def reporte_pdf():
             story.append(Paragraph("Sin sesiones registradas en el periodo.", st_nota))
 
     if "clientes" in secciones:
-        story.append(Paragraph("Clientes atendidos", st_h2))
+        story += ep.seccion("Clientes atendidos", st,
+                            "Quién entrenó contigo, ordenado por número de sesiones.")
         if datos["lista_clientes"]:
             filas = [["Cliente", "Sesiones completadas"]]
             filas += [[c["nombre"], str(c["sesiones"])] for c in datos["lista_clientes"]]
-            story.append(tabla(filas, [10 * cm, 5 * cm]))
+            story.append(tabla(filas, [10 * cm, 5 * cm], derecha=[1]))
 
             if con_graficas:
                 story += [
@@ -310,7 +316,8 @@ def reporte_pdf():
             story.append(Paragraph("Ningún cliente completó sesiones en el periodo.", st_nota))
 
     if "tipos" in secciones:
-        story.append(Paragraph("Tipos de sesión", st_h2))
+        story += ep.seccion("Tipos de sesión", st,
+                            "Cómo se reparte tu trabajo entre las distintas modalidades.")
         if datos["tipos"]:
             total = sum(t["count"] for t in datos["tipos"]) or 1
             filas = [["Tipo", "Sesiones", "Participación"]]
@@ -320,7 +327,7 @@ def reporte_pdf():
                     str(t["count"]),
                     f'{t["count"] / total * 100:.1f}%',
                 ])
-            story.append(tabla(filas, [7 * cm, 4 * cm, 4 * cm]))
+            story.append(tabla(filas, [7 * cm, 4 * cm, 4 * cm], derecha=[1, 2]))
 
             if con_graficas:
                 story += [
@@ -346,11 +353,21 @@ def reporte_pdf():
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=2 * cm, rightMargin=2 * cm,
-        topMargin=2 * cm, bottomMargin=2 * cm,
-        title=f"Reporte {entrenador.nombre if entrenador else 'entrenador'} — {etiqueta}",
+        # Margen superior mayor en las interiores para el encabezado, que se
+        # dibuja fuera del flujo del texto.
+        topMargin=2.6 * cm, bottomMargin=2.2 * cm,
+        title=f"Reporte {nombre_ent} — {etiqueta}",
         author="GymPro",
     )
-    doc.build(story)
+    doc.build(
+        story,
+        onFirstPage=ep.marco_portada,
+        onLaterPages=ep.marco_pagina(
+            titulo=f"{nombre_ent} · {etiqueta}",
+            gimnasio=nombre_gym,
+            logo_data_url=getattr(gym, "logo", None),
+        ),
+    )
     buf.seek(0)
 
     crudo = (entrenador.nombre if entrenador else "entrenador")
