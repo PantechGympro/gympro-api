@@ -21,6 +21,7 @@ from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.charts.legends import Legend
+from reportlab.graphics.widgets.markers import makeMarker
 
 # Mismos tonos que la interfaz web
 COLOR_INGRESOS   = rl_colors.HexColor("#6366F1")
@@ -44,6 +45,41 @@ def _titulo(dibujo: Drawing, texto: str, y: float) -> None:
     """Rótulo del gráfico dentro del propio Drawing."""
     dibujo.add(String(0, y, texto, fontName="Helvetica-Bold",
                       fontSize=10, fillColor=COLOR_TINTA))
+
+
+def _subtitulo(dibujo: Drawing, texto: str, y: float) -> None:
+    """
+    Línea de contexto bajo el título: el total, el promedio o el máximo.
+
+    Una gráfica dice cómo se reparte algo, pero no cuánto es ese algo. El
+    subtítulo pone la cifra global para no tener que sumar las barras a ojo.
+    """
+    if not texto:
+        return
+    dibujo.add(String(0, y, texto, fontName="Helvetica",
+                      fontSize=7.5, fillColor=COLOR_GRIS))
+
+
+def _formato_corto(valor: float) -> str:
+    """
+    Cifra compacta para las etiquetas dentro del gráfico.
+
+    Encima de una barra no caben "7,298.00" y sus vecinas: se abrevia a 7.3k.
+    El importe exacto sigue estando en la tabla que acompaña a cada gráfica.
+    """
+    v = float(valor or 0)
+    if abs(v) >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M".replace(".0M", "M")
+    if abs(v) >= 1_000:
+        return f"{v / 1_000:.1f}k".replace(".0k", "k")
+    if v != int(v):
+        return f"{v:.1f}"
+    return str(int(v))
+
+
+def _dinero(valor: float) -> str:
+    """Importe con separador de miles, para los subtítulos."""
+    return f"${float(valor or 0):,.2f}"
 
 
 def _sin_datos(texto: str = "Sin datos en el periodo") -> Drawing:
@@ -79,12 +115,16 @@ def _limite_eje(n_categorias: int) -> int:
     return 8
 
 
-def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
+def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False):
     """
     Barras agrupadas. `series` es [(nombre, [valores], color), ...].
 
     Se usa para comparar dos magnitudes sobre las mismas categorías, por
     ejemplo membresías contra punto de venta mes a mes.
+
+    Cada barra lleva su valor encima y el subtítulo da el total, para no tener
+    que leer la altura contra el eje y estimar a ojo. `moneda` cambia el formato
+    del resumen a importes.
     """
     if not etiquetas or not series:
         return _sin_datos()
@@ -92,14 +132,25 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
         return _sin_datos("Sin importes registrados en el periodo")
 
     d = Drawing(ANCHO, alto)
+    y_grafico = 40
     if titulo:
         _titulo(d, titulo, alto - 12)
 
+    # Resumen: total de cada serie y, con varias, el total conjunto.
+    totales = [(s[0], sum(v or 0 for v in s[1])) for s in series]
+    fmt = _dinero if moneda else (lambda v: f"{v:,.0f}".replace(",", " "))
+    if len(totales) == 1:
+        resumen = f"Total: {fmt(totales[0][1])}  ·  {len(etiquetas)} categorías"
+    else:
+        partes = [f"{n}: {fmt(t)}" for n, t in totales]
+        resumen = "  ·  ".join(partes) + f"  ·  Total: {fmt(sum(t for _, t in totales))}"
+    _subtitulo(d, resumen, alto - 25)
+
     g = VerticalBarChart()
     g.x = 40
-    g.y = 35
+    g.y = y_grafico
     g.width  = ANCHO - 60
-    g.height = alto - 70
+    g.height = alto - 88
     g.data = [s[1] for s in series]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
@@ -115,6 +166,15 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
     g.barSpacing = 1
     g.groupSpacing = 8
 
+    # Valor encima de cada barra. Con muchas categorías se omite: los números
+    # se solaparían entre sí y estorbarían más de lo que informan.
+    if len(etiquetas) * len(series) <= 14:
+        g.barLabels.fontName = "Helvetica-Bold"
+        g.barLabels.fontSize = 7
+        g.barLabels.fillColor = COLOR_TINTA
+        g.barLabels.dy = 5
+        g.barLabelFormat = lambda v: _formato_corto(v) if v else ""
+
     for i, (_, _, color) in enumerate(series):
         g.bars[i].fillColor = color
         g.bars[i].strokeColor = None
@@ -125,34 +185,71 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7 * cm):
     if len(series) > 1:
         leyenda = Legend()
         leyenda.x = 40
-        leyenda.y = 8
+        leyenda.y = 10
         leyenda.alignment = "right"
         leyenda.columnMaximum = 1
         leyenda.fontName = "Helvetica"
         leyenda.fontSize = 8
         leyenda.dxTextSpace = 4
-        leyenda.deltax = 90
-        leyenda.colorNamePairs = [(s[2], s[0]) for s in series]
+        leyenda.deltax = 100
+        # La leyenda lleva el total de cada serie: así se sabe cuál pesa más sin
+        # sumar sus barras.
+        leyenda.colorNamePairs = [
+            (s[2], f"{s[0]} ({fmt(t)})") for s, (_, t) in zip(series, totales)
+        ]
         d.add(leyenda)
 
     return d
 
 
-def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS, alto=6.5 * cm):
-    """Línea simple sobre el tiempo: evolución de una sola magnitud."""
-    if not etiquetas or not valores or not any(valores):
+def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS,
+                   alto=7.2 * cm, moneda=True):
+    """
+    Línea simple sobre el tiempo: evolución de una sola magnitud.
+
+    El subtítulo resume la serie —total, promedio, mejor y peor punto— y la
+    línea lleva el valor sobre cada vértice. Una curva sin cifras dice si sube o
+    baja, pero no cuánto, y ese "cuánto" es justo lo que se busca al mirar los
+    ingresos de un mes.
+    """
+    limpios = [float(v or 0) for v in valores]
+    if not etiquetas or not limpios or not any(limpios):
         return _sin_datos()
 
     d = Drawing(ANCHO, alto)
     if titulo:
         _titulo(d, titulo, alto - 12)
 
+    fmt = _dinero if moneda else (lambda v: f"{v:,.0f}".replace(",", " "))
+    total   = sum(limpios)
+    promedio = total / len(limpios)
+    i_max = limpios.index(max(limpios))
+    i_min = limpios.index(min(limpios))
+
+    partes = [f"Total: {fmt(total)}", f"Promedio: {fmt(promedio)}",
+              f"Máximo: {etiquetas[i_max]} ({fmt(limpios[i_max])})"]
+    # El mínimo solo aporta si es distinto del máximo; con un único punto
+    # repetirlo sería ruido.
+    if i_min != i_max:
+        partes.append(f"Mínimo: {etiquetas[i_min]} ({fmt(limpios[i_min])})")
+    _subtitulo(d, "  ·  ".join(partes), alto - 25)
+
+    # Variación entre el primer y el último punto: la lectura que casi siempre
+    # se busca en una serie temporal.
+    if len(limpios) > 1 and limpios[0] > 0:
+        cambio = (limpios[-1] - limpios[0]) / limpios[0] * 100
+        signo = "+" if cambio >= 0 else ""
+        d.add(String(0, alto - 37,
+                     f"Del primero al último punto: {signo}{cambio:.1f}%",
+                     fontName="Helvetica-Oblique", fontSize=7.5,
+                     fillColor=COLOR_REAL if cambio >= 0 else COLOR_POS))
+
     g = HorizontalLineChart()
     g.x = 40
     g.y = 25
     g.width  = ANCHO - 60
-    g.height = alto - 55
-    g.data = [list(valores)]
+    g.height = alto - 75
+    g.data = [limpios]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
     g.categoryAxis.labels.fontSize = 7
@@ -164,14 +261,27 @@ def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS, alto=6.5
     g.valueAxis.visibleGrid = 1
     g.lines[0].strokeColor = color
     g.lines[0].strokeWidth = 2
-    g.lines[0].symbol = None
+    g.lines[0].symbol = makeMarker("FilledCircle", size=4, fillColor=color)
+
+    # Con demasiados puntos las etiquetas se pisan entre sí.
+    if len(limpios) <= 8:
+        g.lineLabels.fontName = "Helvetica-Bold"
+        g.lineLabels.fontSize = 7
+        g.lineLabels.fillColor = COLOR_TINTA
+        g.lineLabels.dy = 7
+        g.lineLabelFormat = lambda v: _formato_corto(v) if v else ""
+
     d.add(g)
     return d
 
 
-def pastel(etiquetas, valores, titulo="", alto=7 * cm):
+def pastel(etiquetas, valores, titulo="", alto=7.6 * cm, moneda=True, unidad=""):
     """
     Reparto porcentual. Se usa para métodos de pago y similares.
+
+    La leyenda muestra el porcentaje Y la cifra. Solo con el porcentaje se sabe
+    cómo se reparte el pastel pero no de cuánto es: "PayPal 79.5 %" no dice si
+    son ochocientos pesos o cien mil.
 
     Las porciones por debajo del 2 % se agrupan en "Otros": rebanadas
     minúsculas con su etiqueta encima vuelven el gráfico ilegible.
@@ -183,18 +293,30 @@ def pastel(etiquetas, valores, titulo="", alto=7 * cm):
     total = sum(v for _, v in pares) or 1
     grandes = [(e, v) for e, v in pares if v / total >= 0.02]
     resto   = sum(v for e, v in pares if v / total < 0.02)
+    n_agrupados = sum(1 for e, v in pares if v / total < 0.02)
     if resto > 0:
-        grandes.append(("Otros", resto))
+        grandes.append((f"Otros ({n_agrupados})", resto))
     grandes.sort(key=lambda p: p[1], reverse=True)
+
+    fmt = _dinero if moneda else (lambda v: f"{v:,.0f}{unidad}".replace(",", " "))
 
     d = Drawing(ANCHO, alto)
     if titulo:
         _titulo(d, titulo, alto - 12)
 
+    lider, valor_lider = grandes[0]
+    _subtitulo(
+        d,
+        f"Total: {fmt(total)}  ·  {len(pares)} "
+        f"{'categoría' if len(pares) == 1 else 'categorías'}  ·  "
+        f"Predomina {_abreviar(lider, 22)} con {valor_lider / total * 100:.1f}%",
+        alto - 25,
+    )
+
     p = Pie()
     p.x = 20
-    p.y = 12
-    p.width = p.height = alto - 45
+    p.y = 10
+    p.width = p.height = alto - 52
     p.data = [v for _, v in grandes]
     p.labels = None          # las etiquetas van en la leyenda, no sobre el pastel
     p.slices.strokeColor = rl_colors.white
@@ -204,8 +326,8 @@ def pastel(etiquetas, valores, titulo="", alto=7 * cm):
     d.add(p)
 
     leyenda = Legend()
-    leyenda.x = alto - 10
-    leyenda.y = alto - 40
+    leyenda.x = alto - 14
+    leyenda.y = alto - 46
     leyenda.alignment = "right"
     leyenda.columnMaximum = 8
     leyenda.fontName = "Helvetica"
@@ -213,48 +335,83 @@ def pastel(etiquetas, valores, titulo="", alto=7 * cm):
     leyenda.dxTextSpace = 5
     leyenda.colorNamePairs = [
         (PALETA_CATEGORIAS[i % len(PALETA_CATEGORIAS)],
-         f"{_abreviar(e, 18)}  {v / total * 100:.1f}%")
+         f"{_abreviar(e, 16)}  {v / total * 100:.1f}%  ·  {fmt(v)}")
         for i, (e, v) in enumerate(grandes)
     ]
     d.add(leyenda)
     return d
 
 
-def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA, alto=None):
+def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA,
+                        alto=None, moneda=True, max_filas=8):
     """
     Ranking: productos más vendidos, clientes con más sesiones.
 
     Se dibuja a mano y no con VerticalBarChart girado porque así las etiquetas
     quedan a la izquierda, legibles, sin rotar el texto.
+
+    Cada fila muestra su posición, el valor y qué porcentaje del total
+    representa. El porcentaje importa: saber que un producto vendió 4 800 no
+    dice nada hasta saber si eso es la mitad del negocio o una migaja.
     """
     pares = [(e, float(v or 0)) for e, v in zip(etiquetas, valores)]
     pares = [p for p in pares if p[1] > 0]
     if not pares:
         return _sin_datos()
 
-    pares = pares[:8]
+    total_general = sum(v for _, v in pares)
+    n_total = len(pares)
+    pares = sorted(pares, key=lambda p: p[1], reverse=True)[:max_filas]
+
     maximo = max(v for _, v in pares) or 1
-    fila   = 0.62 * cm
-    alto   = alto or (len(pares) * fila + 1.4 * cm)
+    fila   = 0.66 * cm
+    alto   = alto or (len(pares) * fila + 2.1 * cm)
+
+    fmt = _dinero if moneda else (lambda v: f"{v:,.0f}".replace(",", " "))
 
     d = Drawing(ANCHO, alto)
     if titulo:
         _titulo(d, titulo, alto - 12)
 
+    mostrados = sum(v for _, v in pares)
+    resumen = f"Total: {fmt(total_general)}"
+    if n_total > len(pares):
+        # Si el ranking se recorta hay que decirlo, o el lector suma las barras
+        # y no le cuadra con el total.
+        resumen += (f"  ·  Se muestran los {len(pares)} primeros de {n_total} "
+                    f"({mostrados / total_general * 100:.0f}% del total)")
+    else:
+        resumen += f"  ·  {n_total} {'elemento' if n_total == 1 else 'elementos'}"
+    _subtitulo(d, resumen, alto - 25)
+
     x_etiqueta = 0
-    x_barra    = 5.2 * cm
-    ancho_max  = ANCHO - x_barra - 2.4 * cm
+    x_barra    = 5.6 * cm
+    # Se reserva más hueco a la derecha: ahí van el valor y el porcentaje.
+    ancho_max  = ANCHO - x_barra - 3.6 * cm
 
     for i, (etiqueta, valor) in enumerate(pares):
-        y = alto - 1.2 * cm - (i + 1) * fila + 6
-        d.add(String(x_etiqueta, y, _abreviar(etiqueta, 30),
+        y = alto - 1.9 * cm - (i + 1) * fila + 6
+
+        # Posición en el ranking: ordena la lectura de un vistazo.
+        d.add(String(x_etiqueta, y, f"{i + 1}.",
+                     fontName="Helvetica-Bold", fontSize=7.5, fillColor=COLOR_GRIS))
+        d.add(String(x_etiqueta + 0.45 * cm, y, _abreviar(etiqueta, 28),
                      fontName="Helvetica", fontSize=8, fillColor=COLOR_TINTA))
+
         ancho = max(1.0, ancho_max * (valor / maximo))
-        d.add(Rect(x_barra, y - 3, ancho, fila * 0.6,
+        # Riel de fondo: hace visible cuánto le falta a cada barra respecto al
+        # primero, que sin él hay que estimar a ojo.
+        d.add(Rect(x_barra, y - 3, ancho_max, fila * 0.58,
+                   fillColor=COLOR_SUAVE, strokeColor=None, rx=2, ry=2))
+        d.add(Rect(x_barra, y - 3, ancho, fila * 0.58,
                    fillColor=color, strokeColor=None, rx=2, ry=2))
-        d.add(String(x_barra + ancho + 5, y,
-                     f"{valor:,.0f}".replace(",", " "),
-                     fontName="Helvetica-Bold", fontSize=8, fillColor=COLOR_GRIS))
+
+        d.add(String(x_barra + ancho_max + 5, y, fmt(valor),
+                     fontName="Helvetica-Bold", fontSize=7.5, fillColor=COLOR_TINTA))
+        if total_general > 0:
+            d.add(String(ANCHO, y, f"{valor / total_general * 100:.0f}%",
+                         textAnchor="end",
+                         fontName="Helvetica", fontSize=7, fillColor=COLOR_GRIS))
 
     return d
 
@@ -285,11 +442,32 @@ def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
     if titulo:
         _titulo(d, titulo, alto - 12)
 
+    # Resumen de la proyección: dónde está hoy y hacia dónde va. Es la lectura
+    # que se busca al mirar una predicción, y obligaba a comparar dos puntos de
+    # la curva a ojo.
+    med = [float(v) for v in reales if v is not None]
+    pre = [float(v) for v in predichos if v is not None]
+    if med and pre:
+        actual, futuro = med[-1], pre[-1]
+        delta = futuro - actual
+        signo = "+" if delta >= 0 else ""
+        _subtitulo(
+            d,
+            f"Última medición: {actual:.1f}  ·  Proyección: {futuro:.1f}  ·  "
+            f"Cambio estimado: {signo}{delta:.1f}  ·  "
+            f"{len(med)} {'medición' if len(med) == 1 else 'mediciones'}",
+            alto - 25,
+        )
+    elif med:
+        _subtitulo(d, f"Última medición: {med[-1]:.1f}  ·  "
+                      f"{len(med)} {'medición' if len(med) == 1 else 'mediciones'}",
+                   alto - 25)
+
     g = HorizontalLineChart()
     g.x = 40
     g.y = 32
     g.width  = ANCHO - 60
-    g.height = alto - 62
+    g.height = alto - 78
     g.data = [_limpiar(reales), _limpiar(predichos)]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
@@ -303,9 +481,24 @@ def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
     g.valueAxis.visibleGrid = 1
     g.lines[0].strokeColor = COLOR_REAL
     g.lines[0].strokeWidth = 2
+    # Círculo relleno en lo medido y hueco en lo proyectado: aunque el PDF se
+    # imprima en blanco y negro, la forma del punto distingue el dato real del
+    # estimado, cosa que el color por sí solo no logra.
+    g.lines[0].symbol = makeMarker("FilledCircle", size=4, fillColor=COLOR_REAL)
     g.lines[1].strokeColor = rl_colors.HexColor("#A855F7")
     g.lines[1].strokeWidth = 2
     g.lines[1].strokeDashArray = (3, 2)
+    g.lines[1].symbol = makeMarker("Circle", size=4,
+                                   strokeColor=rl_colors.HexColor("#A855F7"),
+                                   fillColor=rl_colors.white)
+
+    if len(etiquetas) <= 9:
+        g.lineLabels.fontName = "Helvetica-Bold"
+        g.lineLabels.fontSize = 6.5
+        g.lineLabels.fillColor = COLOR_TINTA
+        g.lineLabels.dy = 7
+        g.lineLabelFormat = lambda v: f"{v:.1f}" if v else ""
+
     d.add(g)
 
     leyenda = Legend()

@@ -381,14 +381,14 @@ def reporte_pdf():
                     Spacer(1, 0.5 * cm),
                     gpdf.pastel([m for m, _ in ordenados],
                                 [v["total"] for _, v in ordenados],
-                                "Reparto por metodo de pago"),
+                                "Reparto por metodo de pago", moneda=True),
                     Spacer(1, 0.4 * cm),
                     gpdf.barras_comparadas(
                         ["Membresias", "Punto de venta"],
                         [("Importe cobrado",
                           [datos["ingresos_membresias"], datos["ingresos_pos"]],
                           gpdf.COLOR_INGRESOS)],
-                        "Origen de los ingresos"),
+                        "Origen de los ingresos", moneda=True),
                 ]
         else:
             story.append(Paragraph("Sin ingresos registrados en el periodo.", st_texto))
@@ -410,7 +410,8 @@ def reporte_pdf():
                     gpdf.barras_horizontales([c for c, _ in ordenadas],
                                              [v["total"] for _, v in ordenadas],
                                              "Importe por tipo de membresia",
-                                             color=gpdf.COLOR_MEMBRESIAS),
+                                             color=gpdf.COLOR_MEMBRESIAS,
+                                             moneda=True),
                 ]
         else:
             story.append(Paragraph("No se cobraron membresías en el periodo.", st_texto))
@@ -435,7 +436,8 @@ def reporte_pdf():
                     gpdf.barras_horizontales([p["nombre"] for p in datos["productos"]],
                                              [p["importe"] for p in datos["productos"]],
                                              "Productos por importe vendido",
-                                             color=gpdf.COLOR_POS),
+                                             color=gpdf.COLOR_POS,
+                                             moneda=True),
                 ]
         else:
             story.append(Paragraph("No hubo ventas en el periodo.", st_texto))

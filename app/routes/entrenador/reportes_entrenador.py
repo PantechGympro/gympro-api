@@ -286,11 +286,12 @@ def reporte_pdf():
                     canceladas.append(m["canceladas"])
                 story += [
                     Spacer(1, 0.5 * cm),
+                    # moneda=False: aquí las cifras son sesiones, no pesos.
                     gpdf.barras_comparadas(
                         etiquetas,
                         [("Completadas", completadas, gpdf.COLOR_REAL),
                          ("Canceladas",  canceladas,  gpdf.COLOR_POS)],
-                        "Sesiones mes a mes"),
+                        "Sesiones mes a mes", moneda=False),
                 ]
         else:
             story.append(Paragraph("Sin sesiones registradas en el periodo.", st_nota))
@@ -310,7 +311,8 @@ def reporte_pdf():
                         [c["nombre"] for c in datos["lista_clientes"]],
                         [c["sesiones"] for c in datos["lista_clientes"]],
                         "Clientes con mas sesiones",
-                        color=gpdf.COLOR_ASISTENCIA),
+                        color=gpdf.COLOR_ASISTENCIA,
+                        moneda=False),
                 ]
         else:
             story.append(Paragraph("Ningún cliente completó sesiones en el periodo.", st_nota))
@@ -334,7 +336,8 @@ def reporte_pdf():
                     Spacer(1, 0.5 * cm),
                     gpdf.pastel([t.get("_id") or "Sin tipo" for t in datos["tipos"]],
                                 [t["count"] for t in datos["tipos"]],
-                                "Reparto por tipo de sesion"),
+                                "Reparto por tipo de sesion",
+                                moneda=False, unidad=" ses."),
                 ]
         else:
             story.append(Paragraph("Sin sesiones completadas en el periodo.", st_nota))
