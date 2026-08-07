@@ -104,6 +104,9 @@ def get_alertas():
     """
     db      = get_db()
     gym_id  = g.tenant_id
+    # Las alertas NO llevan icono en el payload: el icono es decision de
+    # presentacion y cada cliente (web y movil) elige el suyo segun `nivel` y
+    # `tipo`. Antes viajaban emojis, que se veian distintos en cada sistema.
     alertas = []
 
     # ── Productos sin stock ───────────────────────────────────────────────────
@@ -116,7 +119,6 @@ def get_alertas():
             "tipo":    "sin_stock",
             "titulo":  f"{p['nombre']} — Sin stock",
             "detalle": "El producto está agotado. Reabastecer urgente.",
-            "icono":   "📦",
         })
 
     # ── Productos con stock bajo ──────────────────────────────────────────────
@@ -131,7 +133,6 @@ def get_alertas():
             "tipo":    "stock_bajo",
             "titulo":  f"{p['nombre']} — Stock bajo",
             "detalle": f"Quedan {p['stock']} unidad(es). Considera reabastecer.",
-            "icono":   "⚠️",
         })
 
     # ── Membresías por vencer (próximos 7 días) ───────────────────────────────
@@ -149,7 +150,6 @@ def get_alertas():
             "tipo":    "membresias_por_vencer",
             "titulo":  f"{por_vencer} membresía(s) vencen esta semana",
             "detalle": "Próximos 7 días. Notifica a los miembros para renovar.",
-            "icono":   "🗓️",
         })
 
     # ── Membresías vencidas con estado aún "activa" ───────────────────────────
@@ -164,7 +164,6 @@ def get_alertas():
             "tipo":    "membresias_vencidas",
             "titulo":  f"{vencidas} membresía(s) vencida(s) sin actualizar",
             "detalle": "Revisar y marcar como vencidas o renovar.",
-            "icono":   "❌",
         })
 
     return jsonify({"alertas": alertas, "total": len(alertas)}), 200

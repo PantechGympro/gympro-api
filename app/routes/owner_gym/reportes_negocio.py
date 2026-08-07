@@ -264,6 +264,12 @@ def reporte_pdf():
     pedidas = [s.strip() for s in (request.args.get("secciones") or "").split(",") if s.strip()]
     secciones = [s for s in pedidas if s in SECCIONES_VALIDAS] or SECCIONES_VALIDAS
 
+    # Las graficas van desactivadas por omision: un reporte que se imprime para
+    # archivar suele querer solo las cifras, y dibujarlas cuesta tiempo de CPU.
+    con_graficas = request.args.get("graficas") == "1"
+    if con_graficas:
+        from app.utils import graficas_pdf as gpdf
+
     datos = _recolectar(gym_id, desde, hasta)
     previo = None
     if comparar:
@@ -386,6 +392,22 @@ def reporte_pdf():
                 filas.append([metodo, str(v["n"]), dinero(v["total"]),
                               f'{(v["total"] / total) * 100:.1f}%'])
             story.append(tabla(filas, [6 * cm, 3.5 * cm, 4 * cm, 3.5 * cm]))
+
+            if con_graficas:
+                ordenados = sorted(datos["metodos"].items(), key=lambda x: -x[1]["total"])
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.pastel([m for m, _ in ordenados],
+                                [v["total"] for _, v in ordenados],
+                                "Reparto por metodo de pago"),
+                    Spacer(1, 0.4 * cm),
+                    gpdf.barras_comparadas(
+                        ["Membresias", "Punto de venta"],
+                        [("Importe cobrado",
+                          [datos["ingresos_membresias"], datos["ingresos_pos"]],
+                          gpdf.COLOR_INGRESOS)],
+                        "Origen de los ingresos"),
+                ]
         else:
             story.append(Paragraph("Sin ingresos registrados en el periodo.", st_texto))
 
@@ -397,6 +419,16 @@ def reporte_pdf():
             for concepto, v in sorted(datos["por_membresia"].items(), key=lambda x: -x[1]["total"]):
                 filas.append([concepto[:52], str(v["n"]), dinero(v["total"])])
             story.append(tabla(filas, [9 * cm, 3.5 * cm, 4.5 * cm]))
+
+            if con_graficas:
+                ordenadas = sorted(datos["por_membresia"].items(), key=lambda x: -x[1]["total"])[:8]
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.barras_horizontales([c for c, _ in ordenadas],
+                                             [v["total"] for _, v in ordenadas],
+                                             "Importe por tipo de membresia",
+                                             color=gpdf.COLOR_MEMBRESIAS),
+                ]
         else:
             story.append(Paragraph("No se cobraron membresías en el periodo.", st_texto))
 
@@ -412,6 +444,15 @@ def reporte_pdf():
             for p in datos["productos"]:
                 filas.append([p["nombre"][:52], str(p["unidades"]), dinero(p["importe"])])
             story.append(tabla(filas, [9 * cm, 3.5 * cm, 4.5 * cm]))
+
+            if con_graficas:
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.barras_horizontales([p["nombre"] for p in datos["productos"]],
+                                             [p["importe"] for p in datos["productos"]],
+                                             "Productos por importe vendido",
+                                             color=gpdf.COLOR_POS),
+                ]
         else:
             story.append(Paragraph("No hubo ventas en el periodo.", st_texto))
 

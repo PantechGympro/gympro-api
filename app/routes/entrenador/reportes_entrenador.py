@@ -195,6 +195,11 @@ def reporte_pdf():
     pedidas   = [s.strip() for s in (request.args.get("secciones") or "").split(",") if s.strip()]
     secciones = [s for s in pedidas if s in SECCIONES_VALIDAS] or SECCIONES_VALIDAS
 
+    # Desactivadas por omision, igual que en el reporte del gimnasio.
+    con_graficas = request.args.get("graficas") == "1"
+    if con_graficas:
+        from app.utils import graficas_pdf as gpdf
+
     datos = _recolectar(trainer_id, gym_id, desde, hasta)
 
     # ── Identidad visual: la misma del reporte del gimnasio ──────────────────
@@ -266,6 +271,22 @@ def reporte_pdf():
                     str(m["completadas"]), str(m["canceladas"]), str(m["total"]),
                 ])
             story.append(tabla(filas, [6 * cm, 3.2 * cm, 3.2 * cm, 2.6 * cm]))
+
+            if con_graficas:
+                etiquetas, completadas, canceladas = [], [], []
+                for m in datos["por_mes"]:
+                    anio_txt, mes_txt = m["_id"].split("-")
+                    etiquetas.append(f"{_MESES[int(mes_txt) - 1][:3]} {anio_txt[-2:]}")
+                    completadas.append(m["completadas"])
+                    canceladas.append(m["canceladas"])
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.barras_comparadas(
+                        etiquetas,
+                        [("Completadas", completadas, gpdf.COLOR_REAL),
+                         ("Canceladas",  canceladas,  gpdf.COLOR_POS)],
+                        "Sesiones mes a mes"),
+                ]
         else:
             story.append(Paragraph("Sin sesiones registradas en el periodo.", st_nota))
 
@@ -275,6 +296,16 @@ def reporte_pdf():
             filas = [["Cliente", "Sesiones completadas"]]
             filas += [[c["nombre"], str(c["sesiones"])] for c in datos["lista_clientes"]]
             story.append(tabla(filas, [10 * cm, 5 * cm]))
+
+            if con_graficas:
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.barras_horizontales(
+                        [c["nombre"] for c in datos["lista_clientes"]],
+                        [c["sesiones"] for c in datos["lista_clientes"]],
+                        "Clientes con mas sesiones",
+                        color=gpdf.COLOR_ASISTENCIA),
+                ]
         else:
             story.append(Paragraph("Ningún cliente completó sesiones en el periodo.", st_nota))
 
@@ -290,6 +321,14 @@ def reporte_pdf():
                     f'{t["count"] / total * 100:.1f}%',
                 ])
             story.append(tabla(filas, [7 * cm, 4 * cm, 4 * cm]))
+
+            if con_graficas:
+                story += [
+                    Spacer(1, 0.5 * cm),
+                    gpdf.pastel([t.get("_id") or "Sin tipo" for t in datos["tipos"]],
+                                [t["count"] for t in datos["tipos"]],
+                                "Reparto por tipo de sesion"),
+                ]
         else:
             story.append(Paragraph("Sin sesiones completadas en el periodo.", st_nota))
 

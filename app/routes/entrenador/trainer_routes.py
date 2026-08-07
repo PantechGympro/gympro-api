@@ -93,6 +93,42 @@ def get_trainer_dashboard():
 #  RUTAS — CLIENTES DEL ENTRENADOR
 # ═══════════════════════════════════════════════════════════════
 
+def _iso(valor):
+    """Fecha en ISO 8601, o None. Tolera datetime, date y cadena."""
+    if not valor:
+        return None
+    if hasattr(valor, "isoformat"):
+        return valor.isoformat()
+    return str(valor)
+
+
+def _edad_de(valor):
+    """
+    Edad en anos a partir de una fecha de nacimiento.
+
+    Acepta datetime, date o cadena ISO porque el campo se ha guardado de las
+    tres formas segun por donde se diera de alta al miembro. Devuelve None si
+    no hay fecha o es ilegible: la pantalla debe poder distinguir "sin dato" de
+    "cero anos", que antes se mostraban igual con un signo de interrogacion.
+    """
+    if not valor:
+        return None
+    fn = valor
+    if isinstance(fn, str):
+        try:
+            fn = datetime.fromisoformat(fn.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    fn = getattr(fn, "date", lambda: fn)()
+    try:
+        hoy = date.today()
+        edad = hoy.year - fn.year - ((hoy.month, hoy.day) < (fn.month, fn.day))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    # Una fecha corrupta puede dar edades imposibles; mejor no mostrar nada.
+    return edad if 0 < edad < 120 else None
+
+
 @trainer_bp.route('/clients', methods=['GET'])
 @jwt_required()
 @require_tenant
@@ -194,6 +230,14 @@ def get_trainer_clients():
             tasa          = calcular_tasa_asistencia(mdb, miembro_id)
             estado        = determinar_estado_cliente(None, tasa)
 
+            # Ultimo registro de progreso: da el peso actual sin una consulta
+            # por cliente en el frontend.
+            ultimo_progreso = mdb.progreso_fisico.find_one(
+                {"id_miembro": miembro_id, "peso": {"$ne": None}},
+                {"peso": 1, "imc": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
+                sort=[("fecha_registro", -1)],
+            ) or {}
+
             clients_data.append({
                 "id":           str(miembro_id),          # MongoDB ObjectId (para lookups internos)
                 "pg_id":        r.get("id_usuario_pg"),   # PostgreSQL int (para asignaciones de dieta/rutina)
@@ -203,7 +247,19 @@ def get_trainer_clients():
                 "sessionsTotal":r.get("total_sesiones", 0),
                 "attendance":   tasa,
                 "streak":       racha,
-                "status":       estado
+                "status":       estado,
+                # Datos de ficha. Antes no viajaban y la tarjeta pintaba un "?"
+                # en la edad porque el campo sencillamente no existia.
+                "age":          _edad_de(r.get("fecha_nacimiento")),
+                "email":        r.get("email") or "",
+                "phone":        r.get("telefono") or "",
+                "sex":          r.get("sexo") or "",
+                "memberSince":  _iso(r.get("fecha_registro")),
+                "weight":       ultimo_progreso.get("peso"),
+                "bmi":          ultimo_progreso.get("imc"),
+                "bodyFat":      ultimo_progreso.get("grasa_corporal"),
+                "lastMeasured": _iso(ultimo_progreso.get("fecha_registro")),
+                "monthAttendance": r.get("asistencias_mes", 0),
             })
 
         if status != "all":
