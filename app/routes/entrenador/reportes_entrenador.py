@@ -291,7 +291,7 @@ def reporte_pdf():
                         etiquetas,
                         [("Completadas", completadas, gpdf.COLOR_REAL),
                          ("Canceladas",  canceladas,  gpdf.COLOR_POS)],
-                        "Sesiones mes a mes", moneda=False,
+                        f"Sesiones mes a mes — {etiqueta}", moneda=False,
                         eje_x="Mes", eje_y="Numero de sesiones"),
                 ]
         else:
@@ -311,7 +311,7 @@ def reporte_pdf():
                     gpdf.barras_horizontales(
                         [c["nombre"] for c in datos["lista_clientes"]],
                         [c["sesiones"] for c in datos["lista_clientes"]],
-                        "Clientes con mas sesiones",
+                        f"Clientes con mas sesiones — {etiqueta}",
                         color=gpdf.COLOR_ASISTENCIA,
                         moneda=False,
                         eje_y="Cliente",
@@ -339,7 +339,7 @@ def reporte_pdf():
                     Spacer(1, 0.5 * cm),
                     gpdf.pastel([t.get("_id") or "Sin tipo" for t in datos["tipos"]],
                                 [t["count"] for t in datos["tipos"]],
-                                "Reparto por tipo de sesion",
+                                f"Reparto por tipo de sesion — {etiqueta}",
                                 moneda=False, unidad=" ses."),
                 ]
         else:
