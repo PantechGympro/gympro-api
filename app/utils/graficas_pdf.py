@@ -16,7 +16,7 @@ para que el reporte impreso y la pantalla usen el mismo color para lo mismo.
 """
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.units import cm
-from reportlab.graphics.shapes import Drawing, String, Rect, Line
+from reportlab.graphics.shapes import Drawing, String, Rect, Line, Group
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.graphics.charts.piecharts import Pie
@@ -82,6 +82,35 @@ def _dinero(valor: float) -> str:
     return f"${float(valor or 0):,.2f}"
 
 
+def _rotular_ejes(dibujo: Drawing, grafico, eje_x: str = "", eje_y: str = "") -> None:
+    """
+    Escribe qué mide cada eje.
+
+    Sin rótulo, un "8k" en el eje vertical puede ser pesos, visitas o miembros;
+    hay que deducirlo del título y no siempre alcanza. El eje Y va girado 90°
+    junto al margen izquierdo, como es costumbre en cualquier gráfica.
+
+    Se dibujan como texto suelto sobre el Drawing y no como propiedad del eje
+    porque ReportLab no ofrece un rótulo de eje propiamente dicho.
+    """
+    if eje_x:
+        # Centrado bajo el área de trazado, por debajo de las etiquetas de
+        # categoría para no pisarlas.
+        dibujo.add(String(grafico.x + grafico.width / 2, max(2, grafico.y - 26),
+                          eje_x, textAnchor="middle",
+                          fontName="Helvetica-Bold", fontSize=7.5,
+                          fillColor=COLOR_GRIS))
+    if eje_y:
+        etiqueta = String(0, 0, eje_y, textAnchor="middle",
+                          fontName="Helvetica-Bold", fontSize=7.5,
+                          fillColor=COLOR_GRIS)
+        etiqueta.textAnchor = "middle"
+        grupo = Group(etiqueta)
+        grupo.translate(10, grafico.y + grafico.height / 2)
+        grupo.rotate(90)
+        dibujo.add(grupo)
+
+
 def _sin_datos(texto: str = "Sin datos en el periodo") -> Drawing:
     """Recuadro discreto para cuando una serie viene vacía."""
     d = Drawing(ANCHO, 2 * cm)
@@ -115,7 +144,8 @@ def _limite_eje(n_categorias: int) -> int:
     return 8
 
 
-def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False):
+def barras_comparadas(etiquetas, series, titulo="", alto=8.2 * cm, moneda=False,
+                      eje_x="", eje_y=""):
     """
     Barras agrupadas. `series` es [(nombre, [valores], color), ...].
 
@@ -132,7 +162,9 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False)
         return _sin_datos("Sin importes registrados en el periodo")
 
     d = Drawing(ANCHO, alto)
-    y_grafico = 40
+    # Con rótulo de eje X hace falta una franja extra abajo para que no se
+    # solape con las etiquetas de categoría.
+    y_grafico = 56 if eje_x else 40
     if titulo:
         _titulo(d, titulo, alto - 12)
 
@@ -147,10 +179,10 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False)
     _subtitulo(d, resumen, alto - 25)
 
     g = VerticalBarChart()
-    g.x = 40
+    g.x = 52 if eje_y else 40
     g.y = y_grafico
-    g.width  = ANCHO - 60
-    g.height = alto - 88
+    g.width  = ANCHO - g.x - 20
+    g.height = alto - y_grafico - 48
     g.data = [s[1] for s in series]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
@@ -180,12 +212,13 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False)
         g.bars[i].strokeColor = None
 
     d.add(g)
+    _rotular_ejes(d, g, eje_x, eje_y)
 
     # Leyenda: sin ella dos barras de colores no dicen qué es cada una.
     if len(series) > 1:
         leyenda = Legend()
-        leyenda.x = 40
-        leyenda.y = 10
+        leyenda.x = g.x
+        leyenda.y = 8
         leyenda.alignment = "right"
         leyenda.columnMaximum = 1
         leyenda.fontName = "Helvetica"
@@ -203,7 +236,7 @@ def barras_comparadas(etiquetas, series, titulo="", alto=7.6 * cm, moneda=False)
 
 
 def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS,
-                   alto=7.2 * cm, moneda=True):
+                   alto=7.8 * cm, moneda=True, eje_x="", eje_y=""):
     """
     Línea simple sobre el tiempo: evolución de una sola magnitud.
 
@@ -245,10 +278,10 @@ def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS,
                      fillColor=COLOR_REAL if cambio >= 0 else COLOR_POS))
 
     g = HorizontalLineChart()
-    g.x = 40
-    g.y = 25
-    g.width  = ANCHO - 60
-    g.height = alto - 75
+    g.x = 52 if eje_y else 40
+    g.y = 42 if eje_x else 25
+    g.width  = ANCHO - g.x - 20
+    g.height = alto - g.y - 50
     g.data = [limpios]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
@@ -272,6 +305,7 @@ def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS,
         g.lineLabelFormat = lambda v: _formato_corto(v) if v else ""
 
     d.add(g)
+    _rotular_ejes(d, g, eje_x, eje_y)
     return d
 
 
@@ -343,7 +377,8 @@ def pastel(etiquetas, valores, titulo="", alto=7.6 * cm, moneda=True, unidad="")
 
 
 def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA,
-                        alto=None, moneda=True, max_filas=8):
+                        alto=None, moneda=True, max_filas=8,
+                        eje_x="", eje_y=""):
     """
     Ranking: productos más vendidos, clientes con más sesiones.
 
@@ -365,7 +400,9 @@ def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA,
 
     maximo = max(v for _, v in pares) or 1
     fila   = 0.66 * cm
-    alto   = alto or (len(pares) * fila + 2.1 * cm)
+    # Franja extra abajo si hay que rotular el eje horizontal.
+    margen_inferior = 0.75 * cm if eje_x else 0
+    alto   = alto or (len(pares) * fila + 2.1 * cm + margen_inferior)
 
     fmt = _dinero if moneda else (lambda v: f"{v:,.0f}".replace(",", " "))
 
@@ -388,6 +425,15 @@ def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA,
     x_barra    = 5.6 * cm
     # Se reserva más hueco a la derecha: ahí van el valor y el porcentaje.
     ancho_max  = ANCHO - x_barra - 3.6 * cm
+
+    # Rótulo del eje vertical: aquí las categorías van a la izquierda, así que
+    # se escribe encima de esa columna en lugar de girarlo.
+    if eje_y:
+        d.add(String(x_etiqueta, alto - 1.55 * cm, eje_y.upper(),
+                     fontName="Helvetica-Bold", fontSize=6.5, fillColor=COLOR_GRIS))
+    if eje_x:
+        d.add(String(x_barra, alto - 1.55 * cm, eje_x.upper(),
+                     fontName="Helvetica-Bold", fontSize=6.5, fillColor=COLOR_GRIS))
 
     for i, (etiqueta, valor) in enumerate(pares):
         y = alto - 1.9 * cm - (i + 1) * fila + 6
@@ -416,7 +462,8 @@ def barras_horizontales(etiquetas, valores, titulo="", color=COLOR_ASISTENCIA,
     return d
 
 
-def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
+def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7.8 * cm,
+                         eje_x="Fecha", eje_y="Peso (kg)"):
     """
     Historial medido y proyección, en el mismo eje.
 
@@ -464,10 +511,10 @@ def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
                    alto - 25)
 
     g = HorizontalLineChart()
-    g.x = 40
-    g.y = 32
-    g.width  = ANCHO - 60
-    g.height = alto - 78
+    g.x = 52 if eje_y else 40
+    g.y = 48 if eje_x else 32
+    g.width  = ANCHO - g.x - 20
+    g.height = alto - g.y - 50
     g.data = [_limpiar(reales), _limpiar(predichos)]
     g.categoryAxis.categoryNames = [_abreviar(e, _limite_eje(len(etiquetas))) for e in etiquetas]
     g.categoryAxis.labels.fontName = "Helvetica"
@@ -500,9 +547,10 @@ def linea_con_prediccion(etiquetas, reales, predichos, titulo="", alto=7 * cm):
         g.lineLabelFormat = lambda v: f"{v:.1f}" if v else ""
 
     d.add(g)
+    _rotular_ejes(d, g, eje_x, eje_y)
 
     leyenda = Legend()
-    leyenda.x = 40
+    leyenda.x = g.x
     leyenda.y = 6
     leyenda.alignment = "right"
     leyenda.columnMaximum = 1

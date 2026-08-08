@@ -388,7 +388,8 @@ def reporte_pdf():
                         [("Importe cobrado",
                           [datos["ingresos_membresias"], datos["ingresos_pos"]],
                           gpdf.COLOR_INGRESOS)],
-                        "Origen de los ingresos", moneda=True),
+                        "Origen de los ingresos", moneda=True,
+                        eje_x="Origen del ingreso", eje_y="Importe cobrado (MXN)"),
                 ]
         else:
             story.append(Paragraph("Sin ingresos registrados en el periodo.", st_texto))
@@ -411,7 +412,9 @@ def reporte_pdf():
                                              [v["total"] for _, v in ordenadas],
                                              "Importe por tipo de membresia",
                                              color=gpdf.COLOR_MEMBRESIAS,
-                                             moneda=True),
+                                             moneda=True,
+                                             eje_y="Tipo de membresia",
+                                             eje_x="Importe cobrado (MXN)"),
                 ]
         else:
             story.append(Paragraph("No se cobraron membresías en el periodo.", st_texto))
@@ -437,7 +440,9 @@ def reporte_pdf():
                                              [p["importe"] for p in datos["productos"]],
                                              "Productos por importe vendido",
                                              color=gpdf.COLOR_POS,
-                                             moneda=True),
+                                             moneda=True,
+                                             eje_y="Producto",
+                                             eje_x="Importe vendido (MXN)"),
                 ]
         else:
             story.append(Paragraph("No hubo ventas en el periodo.", st_texto))

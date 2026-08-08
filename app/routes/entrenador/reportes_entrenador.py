@@ -291,7 +291,8 @@ def reporte_pdf():
                         etiquetas,
                         [("Completadas", completadas, gpdf.COLOR_REAL),
                          ("Canceladas",  canceladas,  gpdf.COLOR_POS)],
-                        "Sesiones mes a mes", moneda=False),
+                        "Sesiones mes a mes", moneda=False,
+                        eje_x="Mes", eje_y="Numero de sesiones"),
                 ]
         else:
             story.append(Paragraph("Sin sesiones registradas en el periodo.", st_nota))
@@ -312,7 +313,9 @@ def reporte_pdf():
                         [c["sesiones"] for c in datos["lista_clientes"]],
                         "Clientes con mas sesiones",
                         color=gpdf.COLOR_ASISTENCIA,
-                        moneda=False),
+                        moneda=False,
+                        eje_y="Cliente",
+                        eje_x="Sesiones completadas"),
                 ]
         else:
             story.append(Paragraph("Ningún cliente completó sesiones en el periodo.", st_nota))
