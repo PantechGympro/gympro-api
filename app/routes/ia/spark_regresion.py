@@ -300,6 +300,129 @@ def _resolver_id_miembro_mongo(id_entrada: str):
 MIN_REGISTROS_PERSONALES = 3
 
 
+# ── Límites fisiológicos de la proyección ───────────────────────────────────
+#
+# Una recta ajustada a tres mediciones extrapolada a 90 días puede dar
+# cualquier cosa: el caso que motivó esto proyectaba 18 kg a tres meses para
+# alguien de 90 kg. Matemáticamente es lo que dice el modelo; como información
+# para una persona no solo es falsa, es dañina.
+#
+# El cambio de peso se acota a un ritmo plausible. Un 1 % del peso corporal por
+# semana es el techo que suele citarse como pérdida sostenible; por encima de
+# eso ya no se está describiendo una tendencia sino un artefacto de
+# extrapolación. Se aplica sobre el ÚLTIMO peso medido, de modo que la
+# proyección arranca donde acaban los datos reales y no da un salto.
+RITMO_MAX_SEMANAL = 0.01      # fracción del peso corporal por semana
+PESO_MIN_HUMANO   = 30.0
+PESO_MAX_HUMANO   = 300.0
+
+
+# ── Rango de peso saludable (criterio OMS) ──────────────────────────────────
+#
+# La OMS clasifica el estado nutricional del adulto por índice de masa corporal
+# (IMC = peso / estatura²): <18.5 bajo peso, 18.5-24.9 normal, 25-29.9
+# sobrepeso, >=30 obesidad.
+#
+# Se devuelve un RANGO y no un "peso ideal" único: el IMC es una herramienta de
+# cribado poblacional, no un diagnóstico individual, y no distingue masa
+# muscular de grasa. Un mismo cuerpo puede estar sano en varios puntos del
+# intervalo.
+IMC_LIMITES = ((18.5, "Bajo peso"), (25.0, "Normal"), (30.0, "Sobrepeso"))
+IMC_SALUDABLE_MIN = 18.5
+IMC_SALUDABLE_MAX = 24.9
+
+
+def _categoria_imc(imc: float) -> str:
+    for tope, nombre in IMC_LIMITES:
+        if imc < tope:
+            return nombre
+    return "Obesidad"
+
+
+def _rango_saludable(estatura_m: float, peso_actual: float | None = None):
+    """
+    Rango de peso saludable segun el IMC de la OMS, para una estatura dada.
+
+    Devuelve None si la estatura no es utilizable: sin ella el IMC no se puede
+    calcular y es preferible no mostrar nada a mostrar una cifra inventada.
+    """
+    try:
+        h = float(estatura_m or 0)
+    except (TypeError, ValueError):
+        return None
+
+    # La estatura se guarda unas veces en metros y otras en centimetros.
+    if h > 3:
+        h = h / 100.0
+    if h <= 0.5 or h > 2.6:
+        return None
+
+    minimo = round(IMC_SALUDABLE_MIN * h * h, 1)
+    maximo = round(IMC_SALUDABLE_MAX * h * h, 1)
+
+    datos = {
+        "estatura_m":   round(h, 2),
+        "peso_min_kg":  minimo,
+        "peso_max_kg":  maximo,
+        "imc_min":      IMC_SALUDABLE_MIN,
+        "imc_max":      IMC_SALUDABLE_MAX,
+        "criterio":     "Clasificacion de la OMS por indice de masa corporal en adultos",
+        "advertencia": (
+            "El IMC es una medida de cribado poblacional, no un diagnostico. "
+            "No distingue masa muscular de grasa ni tiene en cuenta la edad, el "
+            "sexo o la complexion. Cualquier objetivo de peso conviene fijarlo "
+            "con un profesional de la salud."
+        ),
+    }
+
+    if peso_actual:
+        try:
+            p = float(peso_actual)
+            imc = round(p / (h * h), 1)
+            datos["imc_actual"]  = imc
+            datos["categoria"]   = _categoria_imc(imc)
+            datos["dentro_del_rango"] = minimo <= p <= maximo
+            # Diferencia hasta el borde mas cercano del rango saludable. Es la
+            # cifra util: cuanto falta, no un "peso ideal" arbitrario.
+            if p > maximo:
+                datos["diferencia_kg"] = round(p - maximo, 1)
+                datos["direccion"]     = "bajar"
+            elif p < minimo:
+                datos["diferencia_kg"] = round(minimo - p, 1)
+                datos["direccion"]     = "subir"
+            else:
+                datos["diferencia_kg"] = 0.0
+                datos["direccion"]     = "mantener"
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    return datos
+
+
+def _acotar_proyeccion(peso_predicho: float, peso_ultimo: float, dias: int):
+    """
+    Acota una predicción al rango que el cuerpo puede recorrer en ese plazo.
+
+    Devuelve (peso_acotado, fue_acotado) para que la interfaz pueda avisar de
+    que la cifra es un tope y no la salida cruda del modelo.
+    """
+    try:
+        peso  = float(peso_predicho)
+        base  = float(peso_ultimo)
+    except (TypeError, ValueError):
+        return None, False
+
+    if base <= 0:
+        return round(max(PESO_MIN_HUMANO, min(PESO_MAX_HUMANO, peso)), 2), False
+
+    margen = base * RITMO_MAX_SEMANAL * (max(0, dias) / 7.0)
+    techo  = min(PESO_MAX_HUMANO, base + margen)
+    suelo  = max(PESO_MIN_HUMANO, base - margen)
+
+    acotado = max(suelo, min(techo, peso))
+    return round(acotado, 2), abs(acotado - peso) > 0.01
+
+
 def _regresion_personal(historial: list, dias_futuro: int):
     """
     Ajusta una recta al peso del propio miembro y proyecta hacia adelante.
@@ -356,18 +479,19 @@ def _regresion_personal(historial: list, dias_futuro: int):
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
 
     dias_hasta_hoy = max(0, (datetime.now() - base).days)
+    peso_ultimo = float(puntos[-1][1])
+
     predicciones = []
     for d in (30, 60, 90, 120, 150, 180):
         if d > dias_futuro:
             continue
         peso = interseccion + pendiente * (dias_hasta_hoy + d)
+        acotado, fue_acotado = _acotar_proyeccion(peso, peso_ultimo, d)
         predicciones.append({
             "dias_desde_hoy":   d,
             "fecha_estimada":   (datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d"),
-            # Un modelo lineal extrapolado a 6 meses puede dar cifras absurdas
-            # (pesos negativos o de 300 kg). Se acota a un rango humano para no
-            # mostrarle al miembro una proyeccion imposible.
-            "peso_predicho_kg": round(max(30.0, min(300.0, float(peso))), 2),
+            "peso_predicho_kg": acotado,
+            "acotado":          fue_acotado,
         })
 
     return predicciones, round(float(r2), 4)
@@ -484,21 +608,34 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
     bmi     = float(ultimo.get("imc") or 25.0)
 
     coef = coeficientes
+    peso_ultimo = float(historial[-1]["peso"])
+
+    # El modelo del gimnasio devuelve un peso ABSOLUTO a partir de coeficientes
+    # promedio, que no tiene por qué pasar por la última medición de este
+    # miembro: la proyección arrancaba con un salto respecto a su peso real.
+    # Se toma solo la VARIACIÓN que predice el modelo y se aplica sobre su
+    # último peso medido, de modo que la línea sea continua.
+    def _peso_modelo(dias_total):
+        return (
+            coef["intercepto"]
+            + coef["dias"]           * dias_total
+            + coef["cintura"]        * cintura
+            + coef["grasa_corporal"] * grasa
+            + coef["bmi"]            * bmi
+        )
+
+    peso_hoy_modelo = _peso_modelo(dias_actuales)
+
     predicciones_futuras = []
     for d in [30, 60, 90, 120, 150, 180]:
         if d <= dias_futuro:
-            dias_total = dias_actuales + d
-            peso_pred = (
-                coef["intercepto"]
-                + coef["dias"]           * dias_total
-                + coef["cintura"]        * cintura
-                + coef["grasa_corporal"] * grasa
-                + coef["bmi"]            * bmi
-            )
+            variacion = _peso_modelo(dias_actuales + d) - peso_hoy_modelo
+            acotado, fue_acotado = _acotar_proyeccion(peso_ultimo + variacion, peso_ultimo, d)
             predicciones_futuras.append({
                 "dias_desde_hoy":   d,
                 "fecha_estimada":   (datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d"),
-                "peso_predicho_kg": round(float(peso_pred), 2),
+                "peso_predicho_kg": acotado,
+                "acotado":          fue_acotado,
             })
 
     return historial, predicciones_futuras
@@ -727,6 +864,26 @@ def predecir_peso_miembro(id_entrada: str):
         # para el calculo y no es serializable a JSON.
         historial_limpio = [{"fecha": h["fecha"], "peso": h["peso"]} for h in historial]
 
+        # ── Rango de peso saludable (OMS) ────────────────────────────────────
+        # Da una referencia con criterio clinico frente a la que leer la
+        # proyeccion. Sin ella, "bajaras 5 kg" no dice si eso acerca o aleja al
+        # miembro de un peso saludable para su estatura.
+        peso_actual_kg = historial_limpio[-1]["peso"] if historial_limpio else None
+        rango_saludable = None
+        try:
+            from bson import ObjectId as _OID
+            doc_miembro = get_mongo_db().miembros.find_one(
+                {"_id": _OID(id_miembro_real)}, {"estatura": 1, "_id": 0}
+            ) or {}
+            rango_saludable = _rango_saludable(doc_miembro.get("estatura"), peso_actual_kg)
+        except Exception as ex:
+            # Sin estatura no hay IMC. Es preferible omitir el bloque a mostrar
+            # una referencia inventada, asi que no se interrumpe la respuesta.
+            print(f"[regresion] rango saludable no disponible: {ex}")
+
+        # ¿Alguna proyeccion tuvo que acotarse al ritmo maximo plausible?
+        proyeccion_acotada = any(p.get("acotado") for p in predicciones)
+
         return jsonify({
             "id_entrada":           id_entrada,
             "id_miembro_resuelto":  id_miembro_real,
@@ -744,8 +901,15 @@ def predecir_peso_miembro(id_entrada: str):
             "tendencia":            tendencia_str,
             "historial_peso":       historial_limpio,
             "predicciones_futuras": predicciones,
-            "advertencia": ("Proyeccion basada en la tendencia registrada. "
-                            "La dieta, la rutina y el descanso pueden cambiar el resultado."),
+            "rango_saludable":      rango_saludable,
+            "proyeccion_acotada":   proyeccion_acotada,
+            "advertencia": (
+                "Proyeccion basada en la tendencia registrada. "
+                "La dieta, la rutina y el descanso pueden cambiar el resultado."
+                + (" El ritmo se ha limitado a un maximo plausible: con pocas "
+                   "mediciones la tendencia se dispara al extrapolarla."
+                   if proyeccion_acotada else "")
+            ),
             "ejecutado_en":         datetime.now().isoformat(),
         }), 200
 
