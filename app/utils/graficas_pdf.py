@@ -62,10 +62,11 @@ def _subtitulo(dibujo: Drawing, texto: str, y: float) -> None:
 
 def _formato_corto(valor: float) -> str:
     """
-    Cifra compacta para las etiquetas dentro del gráfico.
+    Cifra compacta, para rótulos donde no cabe el importe completo.
 
-    Encima de una barra no caben "7,298.00" y sus vecinas: se abrevia a 7.3k.
-    El importe exacto sigue estando en la tabla que acompaña a cada gráfica.
+    Ya no se usa en las etiquetas de las gráficas: estas rotulan solo el máximo
+    y el mínimo, y con el importe exacto (véase `_formato_extremos`). Se
+    conserva para rótulos futuros con restricción de espacio.
     """
     v = float(valor or 0)
     if abs(v) >= 1_000_000:
@@ -80,6 +81,59 @@ def _formato_corto(valor: float) -> str:
 def _dinero(valor: float) -> str:
     """Importe con separador de miles, para los subtítulos."""
     return f"${float(valor or 0):,.2f}"
+
+
+def _dinero_entero(valor: float) -> str:
+    """Importe sin centavos, para las etiquetas dentro del gráfico."""
+    return f"${float(valor or 0):,.0f}"
+
+
+def _formato_extremos(valores, moneda=False, unidad=""):
+    """
+    Formateador que rotula únicamente el valor más alto y el más bajo.
+
+    Antes se etiquetaba cada punto con la cifra abreviada (7.3k) y se omitían
+    todas cuando había muchas categorías, con lo que el pico —que es el dato
+    que se busca— quedaba justo sin rotular en las series largas. Ahora se
+    escriben solo dos etiquetas, y con el importe completo, de modo que caben
+    siempre y no hace falta deducir la cifra del eje.
+
+    ReportLab pasa a estos formateadores el valor y no su posición, así que el
+    extremo se reconoce por su propio valor: si se repite, se rotulan ambas
+    apariciones, que muestran la misma cifra.
+
+    Los ceros quedan fuera: un mes sin cobros es ausencia de dato y no el
+    mínimo del periodo.
+    """
+    nums = [
+        float(v) for v in _aplanar(valores)
+        if isinstance(v, (int, float)) and float(v) != 0
+    ]
+    if not nums:
+        return lambda v: ""
+
+    alto, bajo = max(nums), min(nums)
+    fmt = _dinero_entero if moneda else (
+        lambda v: f"{v:,.0f}{unidad}".replace(",", " ")
+    )
+
+    def etiqueta(valor):
+        if not valor:
+            return ""
+        v = float(valor)
+        return fmt(v) if v in (alto, bajo) else ""
+
+    return etiqueta
+
+
+def _aplanar(valores):
+    """Aplana una lista de series en una sola secuencia de valores."""
+    for v in valores or []:
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                yield x
+        else:
+            yield v
 
 
 def _rotular_ejes(dibujo: Drawing, grafico, eje_x: str = "", eje_y: str = "") -> None:
@@ -198,14 +252,14 @@ def barras_comparadas(etiquetas, series, titulo="", alto=8.2 * cm, moneda=False,
     g.barSpacing = 1
     g.groupSpacing = 8
 
-    # Valor encima de cada barra. Con muchas categorías se omite: los números
-    # se solaparían entre sí y estorbarían más de lo que informan.
-    if len(etiquetas) * len(series) <= 14:
-        g.barLabels.fontName = "Helvetica-Bold"
-        g.barLabels.fontSize = 7
-        g.barLabels.fillColor = COLOR_TINTA
-        g.barLabels.dy = 5
-        g.barLabelFormat = lambda v: _formato_corto(v) if v else ""
+    # Importe exacto sobre la barra más alta y la más baja del gráfico. Solo
+    # esas dos: rotular todas las barras las solapaba en cuanto había varias
+    # categorías, y obligaba a omitirlas justo cuando más falta hacían.
+    g.barLabels.fontName = "Helvetica-Bold"
+    g.barLabels.fontSize = 7
+    g.barLabels.fillColor = COLOR_TINTA
+    g.barLabels.dy = 5
+    g.barLabelFormat = _formato_extremos([s[1] for s in series], moneda=moneda)
 
     for i, (_, _, color) in enumerate(series):
         g.bars[i].fillColor = color
@@ -296,13 +350,13 @@ def linea_temporal(etiquetas, valores, titulo="", color=COLOR_INGRESOS,
     g.lines[0].strokeWidth = 2
     g.lines[0].symbol = makeMarker("FilledCircle", size=4, fillColor=color)
 
-    # Con demasiados puntos las etiquetas se pisan entre sí.
-    if len(limpios) <= 8:
-        g.lineLabels.fontName = "Helvetica-Bold"
-        g.lineLabels.fontSize = 7
-        g.lineLabels.fillColor = COLOR_TINTA
-        g.lineLabels.dy = 7
-        g.lineLabelFormat = lambda v: _formato_corto(v) if v else ""
+    # Importe exacto en el pico y en el valle de la serie, con independencia de
+    # cuántos puntos tenga: al ser solo dos etiquetas no llegan a pisarse.
+    g.lineLabels.fontName = "Helvetica-Bold"
+    g.lineLabels.fontSize = 7
+    g.lineLabels.fillColor = COLOR_TINTA
+    g.lineLabels.dy = 7
+    g.lineLabelFormat = _formato_extremos(limpios, moneda=moneda)
 
     d.add(g)
     _rotular_ejes(d, g, eje_x, eje_y)

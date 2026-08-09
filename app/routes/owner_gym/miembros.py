@@ -271,3 +271,79 @@ def reactivar_miembro(id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ==============================================================================
+# 6. HISTORIAL DE ASISTENCIAS DE UN MIEMBRO (PAGINADO)
+# ==============================================================================
+def _fecha_iso(valor):
+    """Normaliza la fecha de una asistencia a 'YYYY-MM-DD'.
+
+    La colección mezcla documentos legacy (fecha como string) con los nuevos
+    (datetime), así que se normaliza aquí para que el cliente reciba siempre
+    el mismo formato y pueda darle formato local sin adivinar.
+    """
+    if isinstance(valor, datetime):
+        return valor.strftime("%Y-%m-%d")
+    if isinstance(valor, str):
+        return valor[:10]
+    return None
+
+
+@miembros_bp.route("/api/miembros/<id>/asistencias", methods=["GET"])
+@jwt_required()
+@require_tenant
+def listar_asistencias_miembro(id):
+    """Días en los que el miembro asistió al gimnasio, del más reciente al más antiguo.
+
+    Query params:
+        page      (int) — página, base 1. Default 1.
+        per_page  (int) — registros por página, máximo 50. Default 10.
+
+    Aislamiento: se valida que el miembro pertenezca al gimnasio del token antes
+    de consultar sus asistencias; nunca se filtra sólo por id_miembro sin ese
+    chequeo previo.
+    """
+    import math
+    try:
+        db     = get_db()
+        gym_id = g.tenant_id
+
+        try:
+            oid = ObjectId(id)
+        except Exception:
+            return jsonify({"error": "Id de miembro inválido"}), 400
+
+        miembro = db.miembros.find_one({"_id": oid, "id_gimnasio_pg": gym_id}, {"_id": 1})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        page     = max(request.args.get("page", 1, type=int), 1)
+        per_page = min(max(request.args.get("per_page", 10, type=int), 1), 50)
+        skip     = (page - 1) * per_page
+
+        filtro = {"id_miembro": oid}
+        total  = db.asistencias.count_documents(filtro)
+        cursor = (db.asistencias.find(filtro)
+                  .sort("fecha", -1)
+                  .skip(skip)
+                  .limit(per_page))
+
+        asistencias = [{
+            "id":           str(a["_id"]),
+            "fecha":        _fecha_iso(a.get("fecha")),
+            "hora_entrada": a.get("hora_entrada"),
+            "hora_salida":  a.get("hora_salida"),
+            "origen":       a.get("origen", "checkin"),
+        } for a in cursor]
+
+        return jsonify({
+            "asistencias":  asistencias,
+            "total":        total,
+            "pages":        math.ceil(total / per_page) if total else 0,
+            "current_page": page,
+            "per_page":     per_page,
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
