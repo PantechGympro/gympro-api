@@ -135,11 +135,56 @@ def get_body_progress():
             "planActual": (plan_doc or {}).get("nombre"),
         }
 
+        # ── Cuándo se midió por última vez ────────────────────────────────────
+        # El peso se captura solo al registrar un entrenamiento; las medidas con
+        # cinta, no. Se devuelven ambas fechas para que la interfaz avise cuándo
+        # toca volver a medirse, en vez de dejarlo a la memoria del miembro.
+        CAMPOS_MEDIDA = ("cintura", "cadera", "pecho", "brazo_derecho",
+                         "brazo_izquierdo", "muslo_derecho", "muslo_izquierdo",
+                         "pantorrilla_derecha", "pantorrilla_izquierda")
+
+        def _tiene_medidas(p):
+            return any(_get_medida(p, c) for c in CAMPOS_MEDIDA)
+
+        def _fecha_iso(p):
+            f = (p or {}).get("fecha_registro")
+            return f.strftime('%Y-%m-%d') if isinstance(f, datetime) else None
+
+        # `progresos` viene ordenado de más reciente a más antiguo, así que el
+        # primero que cumpla la condición es el último registro que la cumple.
+        ultimo_con_medidas = next((p for p in progresos if _tiene_medidas(p)), None)
+        ultimo_peso_doc    = next((p for p in progresos if p.get("peso")), None)
+
+        def _dias_desde(p):
+            f = (p or {}).get("fecha_registro")
+            return (datetime.now() - f).days if isinstance(f, datetime) else None
+
+        medicion = {
+            "medidas_fecha": _fecha_iso(ultimo_con_medidas),
+            "medidas_dias":  _dias_desde(ultimo_con_medidas),
+            "peso_fecha":    _fecha_iso(ultimo_peso_doc),
+            "peso_dias":     _dias_desde(ultimo_peso_doc),
+            # Referencia habitual en seguimiento de composición corporal: las
+            # circunferencias cambian despacio y medirlas a diario solo añade
+            # ruido de medición.
+            "cadencia_dias": 14,
+        }
+        medicion["medidas_al_dia"] = (
+            medicion["medidas_dias"] is not None
+            and medicion["medidas_dias"] <= medicion["cadencia_dias"]
+        )
+
         return jsonify({
             "bodyMetrics": body_metrics,
             "progressHistory": progreso_mensual,
             "gender": gender,
             "nutricion": nutricion,
+            "medicion": medicion,
+            # Última medición conocida, para precargar el formulario y no
+            # obligar a teclear de nuevo lo que no ha cambiado.
+            "ultimasMedidas": {
+                c: _get_medida(ultimo_con_medidas, c) for c in CAMPOS_MEDIDA
+            } if ultimo_con_medidas else None,
             "hasDatos": len(progresos) > 0
         }), 200
         

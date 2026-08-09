@@ -347,7 +347,15 @@ def complete_workout():
 def list_workouts():
     """
     Bitácora de entrenamientos del miembro (más recientes primero) + resumen.
-    Query: limit (default 30).
+
+    Query:
+        page      página, 1-based (default 1)
+        per_page  tamaño de página, máx. 50 (default 10)
+        limit     alias de per_page, por compatibilidad con clientes anteriores
+
+    El resumen se calcula sobre TODOS los entrenamientos, no sobre la página:
+    antes se sumaba lo que venía en la respuesta, de modo que "volumen total"
+    cambiaba según cuántos se hubieran traído.
     """
     try:
         mdb        = get_db()
@@ -357,10 +365,21 @@ def list_workouts():
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
 
-        limit = min(100, request.args.get("limit", 30, type=int))
-        cursor = mdb.entrenamientos_realizados.find(
-            {"id_miembro": miembro["_id"]}
-        ).sort("fecha", -1).limit(limit)
+        filtro   = {"id_miembro": miembro["_id"]}
+        per_page = request.args.get("per_page", type=int) or request.args.get("limit", type=int) or 10
+        per_page = max(1, min(50, per_page))
+        page     = max(1, request.args.get("page", 1, type=int))
+
+        total_docs = mdb.entrenamientos_realizados.count_documents(filtro)
+        paginas    = max(1, -(-total_docs // per_page))   # techo de la división
+        # Si piden una página que ya no existe (p. ej. tras borrar registros),
+        # se devuelve la última en lugar de una lista vacía sin explicación.
+        page       = min(page, paginas)
+
+        cursor = mdb.entrenamientos_realizados.find(filtro) \
+            .sort("fecha", -1) \
+            .skip((page - 1) * per_page) \
+            .limit(per_page)
 
         items = []
         for w in cursor:
@@ -380,21 +399,183 @@ def list_workouts():
                 "notas":           w.get("notas"),
             })
 
-        # Resumen
-        ahora        = datetime.now()
-        inicio_mes   = datetime(ahora.year, ahora.month, 1)
-        total        = mdb.entrenamientos_realizados.count_documents({"id_miembro": miembro["_id"]})
-        este_mes     = mdb.entrenamientos_realizados.count_documents({
-            "id_miembro": miembro["_id"], "fecha": {"$gte": inicio_mes}
-        })
+        # ── Resumen sobre el histórico completo ────────────────────────────────
+        ahora      = datetime.now()
+        inicio_mes = datetime(ahora.year, ahora.month, 1)
+        este_mes   = mdb.entrenamientos_realizados.count_documents(
+            {**filtro, "fecha": {"$gte": inicio_mes}}
+        )
+
+        agregado = list(mdb.entrenamientos_realizados.aggregate([
+            {"$match": filtro},
+            {"$group": {
+                "_id": None,
+                "volumen":  {"$sum": {"$ifNull": ["$volumen_total", 0]}},
+                "calorias": {"$sum": {"$ifNull": ["$calorias_estimadas", 0]}},
+            }},
+        ]))
+        totales = agregado[0] if agregado else {}
+
+        # ── Último peso conocido ───────────────────────────────────────────────
+        # La pantalla de registro precarga con él el campo de peso corporal: el
+        # miembro solo confirma o corrige, en lugar de dejarlo vacío y quedarse
+        # sin registros de progreso (y por tanto sin predicción).
+        ult = mdb.progreso_fisico.find_one(
+            {"id_miembro": miembro["_id"], "peso": {"$ne": None}},
+            sort=[("fecha_registro", -1)],
+        )
+        if ult:
+            f_ult = ult.get("fecha_registro")
+            ultimo_peso = {
+                "valor":  round(float(ult["peso"]), 1),
+                "fecha":  f_ult.strftime('%Y-%m-%d') if isinstance(f_ult, datetime) else None,
+                "origen": ult.get("origen") or "progreso",
+            }
+        elif miembro.get("peso_inicial"):
+            # Sin historial todavía: se ofrece el peso del perfil como punto de
+            # partida, marcado como tal para no confundirlo con una medición.
+            ultimo_peso = {
+                "valor":  round(float(miembro["peso_inicial"]), 1),
+                "fecha":  None,
+                "origen": "perfil",
+            }
+        else:
+            ultimo_peso = None
 
         return jsonify({
             "workouts": items,
+            "ultimo_peso": ultimo_peso,
+            "paginacion": {
+                "page":     page,
+                "per_page": per_page,
+                "total":    total_docs,
+                "paginas":  paginas,
+            },
             "resumen": {
-                "total":      total,
-                "este_mes":   este_mes,
-                "volumen_total": round(sum(i["volumen_total"] or 0 for i in items), 1),
-                "calorias_total": int(sum(i["calorias_estimadas"] or 0 for i in items)),
+                "total":          total_docs,
+                "este_mes":       este_mes,
+                "volumen_total":  round(float(totales.get("volumen") or 0), 1),
+                "calorias_total": int(totales.get("calorias") or 0),
+            },
+        }), 200
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ─── Trabajo por grupo muscular ─────────────────────────────────────────────
+
+# Nombres con los que puede llegar un mismo grupo desde las rutinas (propias,
+# importadas o del catálogo del gimnasio). Se normalizan para que "Bíceps",
+# "biceps" y "Brazo" no aparezcan como tres grupos distintos en la gráfica.
+_GRUPOS_CANONICOS = {
+    "pierna": "Piernas", "piernas": "Piernas", "cuadriceps": "Piernas",
+    "cuadricep": "Piernas", "femoral": "Piernas", "gluteo": "Piernas",
+    "gluteos": "Piernas", "pantorrilla": "Piernas", "pantorrillas": "Piernas",
+    "pecho": "Pecho", "pectoral": "Pecho", "pectorales": "Pecho",
+    "espalda": "Espalda", "dorsal": "Espalda", "dorsales": "Espalda",
+    "hombro": "Hombros", "hombros": "Hombros", "deltoides": "Hombros",
+    "biceps": "Brazos", "bicep": "Brazos", "triceps": "Brazos",
+    "tricep": "Brazos", "brazo": "Brazos", "brazos": "Brazos",
+    "antebrazo": "Brazos", "antebrazos": "Brazos",
+    "abdomen": "Core", "abdominales": "Core", "core": "Core",
+    "oblicuos": "Core", "lumbar": "Core",
+    "cardio": "Cardio",
+}
+
+
+def _canon_grupo(texto):
+    """Grupo muscular normalizado; 'General' si no se reconoce."""
+    import unicodedata
+    t = (texto or "").strip().lower()
+    if not t:
+        return "General"
+    t = "".join(c for c in unicodedata.normalize("NFD", t)
+                if unicodedata.category(c) != "Mn")
+    if t in _GRUPOS_CANONICOS:
+        return _GRUPOS_CANONICOS[t]
+    # Coincidencia parcial: "Día 1 · Piernas y glúteos" → Piernas.
+    for clave, canon in _GRUPOS_CANONICOS.items():
+        if clave in t:
+            return canon
+    return "General"
+
+
+@user_dashboard_bp.route('/api/user/workouts/muscle-groups', methods=['GET'])
+@jwt_required()
+@require_tenant
+def workouts_por_grupo():
+    """
+    Trabajo acumulado por grupo muscular, derivado de la bitácora.
+
+    Es la métrica que SÍ se puede deducir de un entrenamiento registrado:
+    cuántas sesiones, series y kilos de volumen ha movido el miembro en cada
+    grupo. Las circunferencias corporales no se derivan de aquí —entrenar
+    pierna no dice cuánto mide el muslo— y siguen midiéndose a mano.
+
+    Query: dias (ventana en días; 0 = todo el histórico, default 90).
+    """
+    try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        miembro    = mdb.miembros.find_one({"id_usuario_pg": user_pg_id, "id_gimnasio_pg": gym_id})
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        dias   = request.args.get("dias", 90, type=int)
+        filtro = {"id_miembro": miembro["_id"]}
+        desde  = None
+        if dias and dias > 0:
+            desde = datetime.now() - timedelta(days=dias)
+            filtro["fecha"] = {"$gte": desde}
+
+        acumulado = {}
+        for w in mdb.entrenamientos_realizados.find(filtro).sort("fecha", -1):
+            # El grupo se toma del entrenamiento y, si no viene, del nombre del
+            # día de la rutina ("Mi Rutina - piernas").
+            crudo = w.get("grupo_muscular") or w.get("nombre_rutina") or ""
+            grupo = _canon_grupo(crudo)
+
+            g_acc = acumulado.setdefault(grupo, {
+                "grupo": grupo, "sesiones": 0, "series": 0,
+                "volumen": 0.0, "ultima_fecha": None,
+            })
+            g_acc["sesiones"] += 1
+            g_acc["series"]   += int(w.get("total_series") or 0)
+            g_acc["volumen"]  += float(w.get("volumen_total") or 0)
+
+            f = w.get("fecha")
+            if isinstance(f, datetime):
+                iso = f.strftime('%Y-%m-%d')
+                if not g_acc["ultima_fecha"] or iso > g_acc["ultima_fecha"]:
+                    g_acc["ultima_fecha"] = iso
+
+        grupos = sorted(acumulado.values(), key=lambda x: -x["volumen"])
+        for gr in grupos:
+            gr["volumen"] = round(gr["volumen"], 1)
+
+        vol_total = sum(gr["volumen"] for gr in grupos)
+        for gr in grupos:
+            gr["porcentaje"] = round(gr["volumen"] / vol_total * 100, 1) if vol_total else 0.0
+
+        con_trabajo = [gr for gr in grupos if gr["volumen"] > 0 or gr["series"] > 0]
+
+        return jsonify({
+            "grupos": grupos,
+            "resumen": {
+                "dias":            dias,
+                "desde":           desde.strftime('%Y-%m-%d') if desde else None,
+                "sesiones":        sum(gr["sesiones"] for gr in grupos),
+                "series":          sum(gr["series"] for gr in grupos),
+                "volumen_total":   round(vol_total, 1),
+                # Solo se comparan grupos con trabajo real: un "Entrenamiento
+                # libre" sin series entra en la lista como General con cero
+                # volumen y saldría siempre como el menos trabajado, que no
+                # dice nada útil.
+                "grupo_mas_trabajado": con_trabajo[0]["grupo"] if con_trabajo else None,
+                "grupo_menos_trabajado": con_trabajo[-1]["grupo"] if len(con_trabajo) > 1 else None,
             },
         }), 200
 
