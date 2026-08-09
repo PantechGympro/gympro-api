@@ -440,6 +440,11 @@ def rutinas_asignadas():
                         "series":          e.get("series", "3"),
                         "reps":            e.get("repeticiones", "12"),
                         "peso":            e.get("peso", ""),
+                        # grupo y unidad se exponen igual que en /routines: la
+                        # bitácora agrupa los ejercicios por grupo muscular y
+                        # necesita la unidad para convertir libras a kilos.
+                        "grupo":           e.get("grupo_muscular", ""),
+                        "unidad":          e.get("unidad", "kg"),
                         "notas":           e.get("notas", ""),
                         "instrucciones":   inst,
                         "imagenes":        imgs,
@@ -454,6 +459,10 @@ def rutinas_asignadas():
 
         resultado.append({
             "id":               str(doc["_id"]),
+            # Rutina del catálogo a la que apunta la asignación. `id` es el
+            # documento de asignación, que no sirve como referencia al guardar
+            # un entrenamiento en la bitácora.
+            "id_rutina":        str(rutina_id) if rutina_id else None,
             "nombre":           doc.get("nombre", "Rutina sin nombre"),
             "descripcion":      doc.get("descripcion", ""),
             "categoria":        doc.get("categoria", "General"),
