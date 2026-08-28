@@ -33,12 +33,12 @@ class Usuario(db.Model):
     )
 
     # FK hacia Rol (roles.id)
-    id_rol = db.Column(db.Integer, db.ForeignKey("roles.id"), nullable=False)
+    id_rol = db.Column(db.Integer, db.ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False)
     rol    = db.relationship("Rol", back_populates="usuarios")
 
     # FK hacia Gimnasio (gimnasios.id)
     # nullable=True durante Sprint 2 para compatibilidad con usuarios sin gimnasio asignado
-    id_gimnasio = db.Column(db.Integer, db.ForeignKey("gimnasios.id"), nullable=True, index=True)
+    id_gimnasio = db.Column(db.Integer, db.ForeignKey("gimnasios.id", ondelete="SET NULL"), nullable=True, index=True)
     gimnasio    = db.relationship("Gimnasio", back_populates="usuarios")
 
     # Onboarding: True = primer login, debe completar configuración del gimnasio
