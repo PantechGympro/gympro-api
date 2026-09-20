@@ -4,14 +4,15 @@ superadmin/suscripciones.py — Gestión de suscripciones SaaS de la plataforma.
 Endpoints:
     GET    /api/superadmin/suscripciones              todas las suscripciones con filtros
     GET    /api/superadmin/suscripciones/<id>         detalle con historial de facturas
-    PATCH  /api/superadmin/suscripciones/<id>/plan    cambiar plan manualmente
-    PATCH  /api/superadmin/suscripciones/<id>/estado  cambiar estado (pausar, cancelar, activar)
+
+Plan y estado ya NO se pueden cambiar manualmente desde el superadmin: ambos
+se actualizan automáticamente a partir de los eventos de pago de Stripe
+(ver app/routes/owner_gym/billing_stripe.py::_dispatch_event). Esto evita que
+un cambio manual quede desincronizado con lo que Stripe realmente cobró.
 """
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required, get_jwt
-from datetime import datetime
+from flask_jwt_extended import jwt_required
 
-from app.extensions import db
 from app.models.pg.suscripcion import Suscripcion, EstadoSuscripcionEnum
 from app.models.pg.plan_suscripcion import PlanSuscripcion
 from app.models.pg.gimnasio import Gimnasio
@@ -116,87 +117,3 @@ def detalle_suscripcion(sub_id: int):
     """Detalle completo con historial de facturas."""
     sub = Suscripcion.query.get_or_404(sub_id)
     return jsonify(_sub_to_dict(sub, include_facturas=True)), 200
-
-
-@suscripciones_admin_bp.route("/suscripciones/<int:sub_id>/plan", methods=["PATCH"])
-@jwt_required()
-@require_role("superadmin")
-def cambiar_plan(sub_id: int):
-    """
-    Cambia el plan de una suscripción manualmente (sin pasar por Stripe).
-    Útil para ajustes de cortesía o correcciones de soporte.
-
-    Body JSON:
-        { "plan_id": 2 }
-    """
-    sub  = Suscripcion.query.get_or_404(sub_id)
-    data = request.get_json() or {}
-
-    plan_id = data.get("plan_id")
-    if not plan_id:
-        return jsonify({"msg": "plan_id es requerido"}), 400
-
-    plan = PlanSuscripcion.query.get(plan_id)
-    if not plan or not plan.activo:
-        return jsonify({"msg": "Plan no encontrado o inactivo"}), 404
-
-    plan_anterior = sub.plan.nombre if sub.plan else None
-    sub.id_plan = plan_id
-
-    # Actualizar el plan del gimnasio para que los claims JWT sean consistentes
-    if sub.gimnasio:
-        sub.gimnasio.plan = plan.nombre.lower()
-
-    db.session.commit()
-
-    return jsonify({
-        "msg":          "Plan actualizado correctamente.",
-        "sub_id":       sub.id,
-        "plan_anterior": plan_anterior,
-        "plan_nuevo":   plan.nombre,
-    }), 200
-
-
-@suscripciones_admin_bp.route("/suscripciones/<int:sub_id>/estado", methods=["PATCH"])
-@jwt_required()
-@require_role("superadmin")
-def cambiar_estado(sub_id: int):
-    """
-    Cambia el estado de una suscripción manualmente.
-
-    Body JSON:
-        { "estado": "paused", "razon": "Solicitud del cliente" }
-
-    Estados válidos: active | trialing | past_due | unpaid | cancelled | paused
-    """
-    sub  = Suscripcion.query.get_or_404(sub_id)
-    data = request.get_json() or {}
-
-    nuevo_estado = data.get("estado")
-    if not nuevo_estado or nuevo_estado not in _ESTADOS_VALIDOS:
-        return jsonify({
-            "msg":    "Estado inválido.",
-            "validos": _ESTADOS_VALIDOS,
-        }), 400
-
-    estado_anterior = sub.estado if isinstance(sub.estado, str) else sub.estado.value
-    sub.estado      = nuevo_estado
-    sub.updated_at  = datetime.utcnow()
-
-    # Si se cancela la suscripción, desactivar también el gimnasio
-    if nuevo_estado == "cancelled" and sub.gimnasio:
-        sub.gimnasio.activo = False
-
-    # Si se reactiva, activar el gimnasio
-    if nuevo_estado in ("active", "trialing") and sub.gimnasio:
-        sub.gimnasio.activo = True
-
-    db.session.commit()
-
-    return jsonify({
-        "msg":             "Estado actualizado correctamente.",
-        "sub_id":          sub.id,
-        "estado_anterior": estado_anterior,
-        "estado_nuevo":    nuevo_estado,
-        "gimnasio_activo": sub.gimnasio.activo if sub.gimnasio else None,
-    }), 200

@@ -12,10 +12,14 @@ Endpoints exclusivos del rol Recepcionista:
   PATCH /api/recepcionista/citas/<id> — actualizar estado de cita
   DELETE /api/recepcionista/citas/<id>— eliminar cita
   GET  /api/recepcionista/trainers    — lista de entrenadores del gimnasio
+  GET  /api/recepcionista/tasks       — lista de tareas (filtros: mine, sin_asignar)
+  POST /api/recepcionista/tasks       — crear tarea
+  PATCH /api/recepcionista/tasks/<id> — actualizar tarea (texto/meta, responsable, completada)
+  DELETE /api/recepcionista/tasks/<id>— eliminar tarea
 """
 
 from flask import Blueprint, jsonify, request, g
-from flask_jwt_extended import jwt_required, get_jwt
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 
@@ -749,3 +753,203 @@ def get_trainers():
     return jsonify({
         "trainers": [{"id": t.id, "nombre": t.nombre} for t in trainers]
     }), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tareas de recepción — checklist operativo del turno (colección tareas_recepcion)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PRIORIDADES_VALIDAS = {"alta", "media", "baja"}
+_TURNOS_VALIDOS = {"matutino", "vespertino", "nocturno"}
+
+
+def _current_identity():
+    """(id_usuario, nombre) de quien hace la petición, para trazabilidad de auditoría."""
+    claims = get_jwt()
+    return get_jwt_identity(), claims.get("nombre", "")
+
+
+@recepcionista_bp.route("/tasks", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_tasks():
+    """
+    Lista las tareas del gimnasio.
+    Query params:
+      mine=true         — solo tareas asignadas al usuario autenticado
+      sin_asignar=true  — solo tareas sin responsable (disponibles para tomar)
+    """
+    err = _require_receptionist()
+    if err:
+        return err
+
+    db     = get_db()
+    gym_id = g.tenant_id
+    query  = {"id_gimnasio_pg": gym_id}
+
+    if request.args.get("mine", "").lower() == "true":
+        user_id, _ = _current_identity()
+        query["responsable_id"] = user_id
+    elif request.args.get("sin_asignar", "").lower() == "true":
+        query["responsable_id"] = None
+
+    tasks = list(db.tareas_recepcion.find(query).sort("creado_en", -1))
+    return jsonify({"tasks": [_serialize(t) for t in tasks]}), 200
+
+
+@recepcionista_bp.route("/tasks", methods=["POST"])
+@jwt_required()
+@require_tenant
+def create_task():
+    err = _require_receptionist()
+    if err:
+        return err
+
+    db     = get_db()
+    gym_id = g.tenant_id
+    data   = request.get_json() or {}
+
+    texto = (data.get("texto") or "").strip()
+    if not texto:
+        return jsonify({"error": "Campo requerido: texto"}), 400
+
+    prioridad = data.get("prioridad") or "media"
+    if prioridad not in _PRIORIDADES_VALIDAS:
+        return jsonify({"error": f"Prioridad inválida. Usa: {', '.join(sorted(_PRIORIDADES_VALIDAS))}"}), 400
+
+    turno = data.get("turno") or None
+    if turno and turno not in _TURNOS_VALIDOS:
+        return jsonify({"error": f"Turno inválido. Usa: {', '.join(sorted(_TURNOS_VALIDOS))}"}), 400
+
+    user_id, user_nombre = _current_identity()
+
+    # Asignación inicial: "self" toma la tarea de una vez; cualquier otro id
+    # deja la tarea sin responsable hasta que alguien la reclame ("Sin asignar").
+    responsable_id     = user_id if data.get("asignar_a") == "self" else None
+    responsable_nombre = user_nombre if responsable_id else None
+
+    doc = {
+        "id_gimnasio_pg":       gym_id,
+        "texto":                texto[:500],
+        "prioridad":            prioridad,
+        "categoria":            (data.get("categoria") or "General").strip()[:60],
+        "fecha":                data.get("fecha") or None,
+        "turno":                turno,
+        "responsable_id":       responsable_id,
+        "responsable_nombre":   responsable_nombre,
+        "completada":           False,
+        "completada_por_id":    None,
+        "completada_por_nombre":None,
+        "completada_en":        None,
+        "creado_por_id":        user_id,
+        "creado_por_nombre":    user_nombre,
+        "creado_en":            datetime.now(timezone.utc),
+    }
+
+    result = db.tareas_recepcion.insert_one(doc)
+    doc["_id"] = result.inserted_id
+
+    return jsonify({"task": _serialize(doc)}), 201
+
+
+@recepcionista_bp.route("/tasks/<task_id>", methods=["PATCH"])
+@jwt_required()
+@require_tenant
+def update_task(task_id):
+    err = _require_receptionist()
+    if err:
+        return err
+
+    try:
+        oid = ObjectId(task_id)
+    except Exception:
+        return jsonify({"error": "ID inválido"}), 400
+
+    db     = get_db()
+    gym_id = g.tenant_id
+    data   = request.get_json() or {}
+
+    existing = db.tareas_recepcion.find_one({"_id": oid, "id_gimnasio_pg": gym_id})
+    if not existing:
+        return jsonify({"error": "Tarea no encontrada"}), 404
+
+    user_id, user_nombre = _current_identity()
+    updates = {}
+
+    if "texto" in data:
+        texto = (data.get("texto") or "").strip()
+        if not texto:
+            return jsonify({"error": "El texto de la tarea no puede estar vacío"}), 400
+        updates["texto"] = texto[:500]
+
+    if "prioridad" in data:
+        if data["prioridad"] not in _PRIORIDADES_VALIDAS:
+            return jsonify({"error": f"Prioridad inválida. Usa: {', '.join(sorted(_PRIORIDADES_VALIDAS))}"}), 400
+        updates["prioridad"] = data["prioridad"]
+
+    if "categoria" in data:
+        updates["categoria"] = (data.get("categoria") or "General").strip()[:60]
+
+    if "fecha" in data:
+        updates["fecha"] = data.get("fecha") or None
+
+    if "turno" in data:
+        turno = data.get("turno") or None
+        if turno and turno not in _TURNOS_VALIDOS:
+            return jsonify({"error": f"Turno inválido. Usa: {', '.join(sorted(_TURNOS_VALIDOS))}"}), 400
+        updates["turno"] = turno
+
+    # Reclamar / liberar una tarea ("Mis tareas" / "Sin asignar")
+    if "responsable_id" in data:
+        nuevo_responsable = data.get("responsable_id")
+        if nuevo_responsable in (None, ""):
+            updates["responsable_id"]     = None
+            updates["responsable_nombre"] = None
+        elif nuevo_responsable == "self":
+            updates["responsable_id"]     = user_id
+            updates["responsable_nombre"] = user_nombre
+        else:
+            return jsonify({"error": "Solo puedes asignarte la tarea a ti mismo o dejarla sin asignar"}), 400
+
+    if "completada" in data:
+        completada = bool(data["completada"])
+        updates["completada"] = completada
+        if completada:
+            updates["completada_por_id"]     = user_id
+            updates["completada_por_nombre"] = user_nombre
+            updates["completada_en"]         = datetime.now(timezone.utc)
+        else:
+            updates["completada_por_id"]     = None
+            updates["completada_por_nombre"] = None
+            updates["completada_en"]         = None
+
+    if not updates:
+        return jsonify({"error": "Nada que actualizar"}), 400
+
+    db.tareas_recepcion.update_one({"_id": oid, "id_gimnasio_pg": gym_id}, {"$set": updates})
+    updated = db.tareas_recepcion.find_one({"_id": oid, "id_gimnasio_pg": gym_id})
+
+    return jsonify({"task": _serialize(updated)}), 200
+
+
+@recepcionista_bp.route("/tasks/<task_id>", methods=["DELETE"])
+@jwt_required()
+@require_tenant
+def delete_task(task_id):
+    err = _require_receptionist()
+    if err:
+        return err
+
+    try:
+        oid = ObjectId(task_id)
+    except Exception:
+        return jsonify({"error": "ID inválido"}), 400
+
+    db     = get_db()
+    gym_id = g.tenant_id
+
+    res = db.tareas_recepcion.delete_one({"_id": oid, "id_gimnasio_pg": gym_id})
+    if res.deleted_count == 0:
+        return jsonify({"error": "Tarea no encontrada"}), 404
+
+    return jsonify({"message": "Tarea eliminada"}), 200

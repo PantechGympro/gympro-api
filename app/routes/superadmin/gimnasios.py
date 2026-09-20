@@ -199,19 +199,21 @@ def listar_gimnasios():
     if q_param:
         like = f"%{q_param}%"
         query = query.filter(
-            db.or_(Gimnasio.nombre.ilike(like), Gimnasio.email.ilike(like))
+            db.or_(Gimnasio.nombre.ilike(like), Gimnasio.email_contacto.ilike(like))
         )
 
     query = query.order_by(Gimnasio.created_at.desc())
     paginado = query.paginate(page=page, per_page=per_page, error_out=False)
 
+    mdb = get_db()
     items = []
     for gym in paginado.items:
         sub = _suscripcion_activa(gym.id)
         items.append({
             **gym.to_dict(),
-            "total_usuarios": Usuario.query.filter_by(id_gimnasio=gym.id).count(),
-            "suscripcion":    sub,
+            "total_usuarios":  Usuario.query.filter_by(id_gimnasio=gym.id).count(),
+            "total_miembros":  mdb.miembros.count_documents({"id_gimnasio_pg": gym.id}),
+            "suscripcion":     sub,
         })
 
     return jsonify({
