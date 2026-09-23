@@ -377,9 +377,7 @@ def reporte_pdf():
     buf.seek(0)
 
     crudo = (entrenador.nombre if entrenador else "entrenador")
-    slug  = "".join(c for c in crudo if c.isalnum() or c in " -_").strip()
-    slug  = slug.replace(" ", "_")[:40] or "entrenador"
-    nombre_archivo = f"Reporte_{slug}_{desde.strftime('%Y%m')}.pdf"
+    nombre_archivo = ep.nombre_archivo_reporte(crudo, desde)
 
     return Response(
         buf.read(),

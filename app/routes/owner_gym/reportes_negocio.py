@@ -505,9 +505,7 @@ def reporte_pdf():
     )
     buf.seek(0)
 
-    slug = "".join(c for c in (gym.nombre or "gimnasio") if c.isalnum() or c in " -_").strip()
-    slug = slug.replace(" ", "_")[:40] or "gimnasio"
-    nombre_archivo = f"Reporte_{slug}_{desde.strftime('%Y%m')}.pdf"
+    nombre_archivo = ep.nombre_archivo_reporte(gym.nombre or "gimnasio", desde)
 
     return Response(
         buf.read(),

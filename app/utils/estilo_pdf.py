@@ -17,7 +17,9 @@ Piezas principales:
     tarjetas_kpi()    fila de indicadores destacados
     tabla()           tabla con cebra y cabecera de color
     seccion()         título de sección con línea de acento
+    nombre_archivo_reporte()  nombre de descarga sin acentos, único por periodo
 """
+import unicodedata
 from datetime import datetime
 
 from reportlab.lib import colors as rl_colors
@@ -44,6 +46,25 @@ ACENTO_POS      = rl_colors.HexColor("#F59E0B")
 ACENTO_ALERTA   = rl_colors.HexColor("#EF4444")
 
 ANCHO_UTIL = 17 * cm    # A4 menos los márgenes de 2 cm
+
+
+def nombre_archivo_reporte(base: str, desde: datetime, prefijo: str = "Reporte") -> str:
+    """
+    Nombre de descarga del PDF: '<prefijo>_<base-normalizada>_<YYYYMM>.pdf'.
+
+    `base` suele ser el nombre del gimnasio o del entrenador. Se le quitan
+    acentos (NFKD separa la letra de su diacrítico y el segundo filtro
+    descarta los combinantes) y cualquier carácter fuera de ASCII alfa-
+    numérico, espacio, guión o guión bajo, para que el archivo no rompa la
+    descarga en Windows. La fecha va en formato AAAAMM para que dos reportes
+    del mismo tipo y periodo nunca colisionen, y para que el explorador de
+    archivos los ordene solos.
+    """
+    limpio = unicodedata.normalize("NFKD", base or "")
+    limpio = "".join(c for c in limpio if not unicodedata.combining(c))
+    slug = "".join(c for c in limpio if c.isascii() and (c.isalnum() or c in " -_")).strip()
+    slug = slug.replace(" ", "_")[:40] or "reporte"
+    return f"{prefijo}_{slug}_{desde.strftime('%Y%m')}.pdf"
 
 
 def estilos() -> dict:
