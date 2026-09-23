@@ -15,7 +15,7 @@ Label (target):
   - 1 = en riesgo (dias_sin_asistir > 21 O membresía vencida)
   - 0 = activo y estable
 """
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime, timedelta, timezone
 
@@ -244,6 +244,41 @@ def _ejecutar_cancelaciones(gym_id=None) -> dict:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+def _paginar_en_riesgo(payload: dict) -> dict:
+    """
+    Recorta la lista de miembros en riesgo (alto/medio) a la página solicitada.
+    La paginación se resuelve aquí, del lado del servidor, sobre el resultado ya
+    calculado (y cacheado) por _ejecutar_cancelaciones — el navegador nunca
+    recibe la lista completa, solo la página que va a mostrar.
+    """
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = min(50, max(1, int(request.args.get("per_page", 15))))
+    except (TypeError, ValueError):
+        per_page = 15
+
+    en_riesgo = [p for p in payload.get("predicciones", []) if p["riesgo"] in ("alto", "medio")]
+    total   = len(en_riesgo)
+    paginas = max(1, -(-total // per_page))  # ceil division
+    page    = min(page, paginas)
+    inicio  = (page - 1) * per_page
+
+    out = {**payload}
+    out["predicciones_pagina"] = en_riesgo[inicio:inicio + per_page]
+    out["pagina"]              = page
+    out["paginas"]             = paginas
+    out["per_page"]            = per_page
+    out["total_en_riesgo"]     = total
+    # La lista completa (ya acotada a 200 por _ejecutar_cancelaciones) se
+    # conserva bajo otro nombre solo para el export a PDF, que es una acción
+    # explícita del usuario y no la vista principal que se pagina.
+    out["predicciones_export"] = out.pop("predicciones", [])
+    return out
+
+
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones", methods=["GET"])
 @jwt_required()
 def cancelaciones_analytics():
@@ -253,13 +288,13 @@ def cancelaciones_analytics():
 
         cached = cache_get(key)
         if cached:
-            cached["desde_cache"] = True
-            return jsonify(cached), 200
+            resultado = {**cached, "desde_cache": True}
+            return jsonify(_paginar_en_riesgo(resultado)), 200
 
         payload = _ejecutar_cancelaciones(gym_id)
         payload["desde_cache"] = False
         cache_set(key, payload)
-        return jsonify(payload), 200
+        return jsonify(_paginar_en_riesgo(payload)), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -274,7 +309,7 @@ def cancelaciones_train():
         payload = _ejecutar_cancelaciones(gym_id)
         payload["desde_cache"] = False
         cache_set(_cache_key(gym_id), payload)
-        return jsonify({**payload, "reentrenado": True}), 200
+        return jsonify({**_paginar_en_riesgo(payload), "reentrenado": True}), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()

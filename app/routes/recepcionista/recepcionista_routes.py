@@ -5,7 +5,7 @@ Endpoints exclusivos del rol Recepcionista:
   GET  /api/recepcionista/dashboard   — KPIs del turno
   GET  /api/recepcionista/checkins    — check-ins de hoy
   POST /api/recepcionista/checkins    — registrar check-in por id_usuario_pg
-  GET  /api/recepcionista/members     — lista de miembros con estado de membresía
+  GET  /api/recepcionista/members     — lista de miembros con estado de membresía (paginada)
   GET  /api/recepcionista/payments    — historial de pagos (solo lectura)
   GET  /api/recepcionista/citas       — citas del día / rango
   POST /api/recepcionista/citas       — crear cita (+ notificaciones + email)
@@ -261,18 +261,45 @@ def register_checkin():
 # Members — lista con estado de membresía
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _mem_status(fecha_fin, now):
+    """Estado de membresía a partir de la fecha de fin, ya normalizada a UTC."""
+    if fecha_fin is None:
+        return "sin_membresia"
+    if isinstance(fecha_fin, str):
+        fecha_fin = datetime.fromisoformat(fecha_fin)
+    if fecha_fin.tzinfo is None:
+        fecha_fin = fecha_fin.replace(tzinfo=timezone.utc)
+    days_left = (fecha_fin - now).days
+    if days_left < 0:
+        return "vencida"
+    if days_left <= 7:
+        return "por_vencer"
+    return "activa"
+
+
 @recepcionista_bp.route("/members", methods=["GET"])
 @jwt_required()
 @require_tenant
 def get_members():
+    """
+    Lista de miembros con estado de membresía, paginada del lado del servidor.
+
+    La búsqueda (`q`) y los contadores del resumen se calculan sobre el padrón
+    completo del gimnasio, no sobre la página cargada: el navegador nunca
+    recibe más de `per_page` miembros por petición, pero "activos"/"vencidos"/
+    etc. siguen contando a todo el gimnasio y una búsqueda por nombre o correo
+    encuentra coincidencias fuera de la página visible.
+    """
     err = _require_receptionist()
     if err:
         return err
 
-    db     = get_db()
-    gym_id = g.tenant_id
-    search = request.args.get("q", "").strip()
-    now    = datetime.now(timezone.utc)
+    db      = get_db()
+    gym_id  = g.tenant_id
+    search  = request.args.get("q", "").strip()
+    now     = datetime.now(timezone.utc)
+    page    = max(1, int(request.args.get("page", 1)))
+    per_page = min(100, max(1, int(request.args.get("per_page", 20))))
 
     query = {"id_gimnasio_pg": gym_id, "estado": "Activo"}
     if search:
@@ -281,10 +308,33 @@ def get_members():
             {"email":  {"$regex": search, "$options": "i"}},
         ]
 
-    miembros = list(db.miembros.find(query, {
-        "_id": 1, "nombre": 1, "email": 1, "telefono": 1,
-        "id_usuario_pg": 1, "fecha_registro": 1,
-    }).limit(100))
+    total = db.miembros.count_documents(query)
+
+    # ── Resumen por estado sobre TODO el padrón que cumple el filtro ─────────
+    # Un solo pase ligero (solo _id + fecha_fin de la membresía activa, sin el
+    # resto de los campos) para que el contador de arriba no dependa de qué
+    # página está viendo la recepcionista.
+    resumen = {"activa": 0, "vencida": 0, "por_vencer": 0, "sin_membresia": 0}
+    ids_todos = [m["_id"] for m in db.miembros.find(query, {"_id": 1})]
+    if ids_todos:
+        activas_por_miembro = {
+            mm["id_miembro"]: mm.get("fecha_fin")
+            for mm in db.miembro_membresia.find(
+                {"id_miembro": {"$in": ids_todos}, "estado": "Activa"},
+                {"id_miembro": 1, "fecha_fin": 1},
+            )
+        }
+        for mid in ids_todos:
+            resumen[_mem_status(activas_por_miembro.get(mid), now)] += 1
+
+    # ── Página solicitada, con el detalle completo por miembro ───────────────
+    skip = (page - 1) * per_page
+    miembros = list(
+        db.miembros.find(query, {
+            "_id": 1, "nombre": 1, "email": 1, "telefono": 1,
+            "id_usuario_pg": 1, "fecha_registro": 1,
+        }).sort("nombre", 1).skip(skip).limit(per_page)
+    )
 
     result = []
     for m in miembros:
@@ -306,18 +356,11 @@ def get_members():
                     if tm_obj: tipo = tm_obj.nombre
                 except Exception:
                     pass
-            if fecha_fin:
-                if isinstance(fecha_fin, str):
-                    fecha_fin = datetime.fromisoformat(fecha_fin)
-                if fecha_fin.tzinfo is None:
-                    fecha_fin = fecha_fin.replace(tzinfo=timezone.utc)
-                days_left = (fecha_fin - now).days
-                if days_left < 0:
-                    mem_status = "vencida"
-                elif days_left <= 7:
-                    mem_status = "por_vencer"
-                else:
-                    mem_status = "activa"
+            mem_status = _mem_status(fecha_fin, now)
+            if isinstance(fecha_fin, str):
+                fecha_fin = datetime.fromisoformat(fecha_fin)
+            if fecha_fin and fecha_fin.tzinfo is None:
+                fecha_fin = fecha_fin.replace(tzinfo=timezone.utc)
 
         result.append({
             "id":             str(m["_id"]),
@@ -330,7 +373,14 @@ def get_members():
             "fecha_fin":      fecha_fin.isoformat() if isinstance(fecha_fin, datetime) else fecha_fin,
         })
 
-    return jsonify({"miembros": result, "total": len(result)}), 200
+    return jsonify({
+        "miembros":   result,
+        "total":      total,
+        "page":       page,
+        "per_page":   per_page,
+        "pages":      max(1, -(-total // per_page)),
+        "resumen":    resumen,
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -45,9 +45,9 @@ def _staff_filter(gym_id):
 def listar_staff():
     """Lista entrenadores y recepcionistas del gimnasio con filtros opcionales."""
     gym_id = g.tenant_id
-    rol_filter  = request.args.get("rol")          # "Entrenador" | "Recepcionista"
-    solo_activos = request.args.get("activos", "true").lower() == "true"
-    search       = request.args.get("q", "").strip()
+    rol_filter    = request.args.get("rol")          # "Entrenador" | "Recepcionista"
+    activos_param = request.args.get("activos", "true").strip().lower()
+    search        = request.args.get("q", "").strip()
 
     role_ids = _staff_filter(gym_id)
     if not role_ids:
@@ -57,8 +57,12 @@ def listar_staff():
         Usuario.id_gimnasio == gym_id,
         Usuario.id_rol.in_(role_ids),
     )
-    if solo_activos:
+    # "true"/"false" filtran explícitamente por el estatus solicitado; cualquier
+    # otro valor (p. ej. "" o "all") devuelve activos e inactivos sin filtrar.
+    if activos_param == "true":
         q = q.filter_by(activo=True)
+    elif activos_param == "false":
+        q = q.filter_by(activo=False)
     if rol_filter:
         rol_obj = Rol.query.filter_by(nombre=rol_filter).first()
         if rol_obj:

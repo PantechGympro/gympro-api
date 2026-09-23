@@ -13,6 +13,38 @@ echo "==> Aplicando migraciones Alembic..."
 alembic upgrade head
 echo "==> Migraciones OK"
 
+# ── Seed automático de datos de demostración (SOLO gympro-server) ───────────
+# RUN_SEED_ON_START no se define en el docker-compose.yml de desarrollo ni en
+# el override local, así que este bloque es un no-op para cualquier
+# desarrollador que levante el stack normal: cero cambio de comportamiento.
+# docker-compose.server.yml es el único lugar que la pone en "true", para que
+# la imagen del servidor quede cargada con los 3 gimnasios de demo (SCRUM-163)
+# desde el primer arranque.
+#
+# Se verifica primero si ya existe al menos un Gimnasio en Postgres: el seed
+# es destructivo (TRUNCATE + drop de colecciones Mongo), así que si el
+# contenedor se reinicia después del primer arranque —o alguien hace
+# `docker compose restart` tras cargar datos reales de demo en vivo— NO se
+# vuelve a ejecutar y no se pierde nada.
+if [ "${RUN_SEED_ON_START:-false}" = "true" ]; then
+    echo "==> RUN_SEED_ON_START=true: verificando si la base ya tiene datos..."
+    GIMNASIOS_EXISTENTES=$(python -c "
+from app import create_app
+from app.models.pg.gimnasio import Gimnasio
+app = create_app()
+with app.app_context():
+    print(Gimnasio.query.count())
+" 2>/dev/null || echo "0")
+
+    if [ "$GIMNASIOS_EXISTENTES" = "0" ]; then
+        echo "==> Base vacia: ejecutando seed de servidor (3 gimnasios de demo)..."
+        python -m app.seeds.seed_server
+        echo "==> Seed de servidor OK"
+    else
+        echo "==> Base ya tiene ${GIMNASIOS_EXISTENTES} gimnasio(s): se omite el seed (evita perder datos en reinicios)."
+    fi
+fi
+
 echo "==> Iniciando gunicorn..."
 # Optimización para VPS con poca RAM (8 GB):
 #   - 2 workers gthread × 4 threads = 8 requests concurrentes con ~la mitad de
