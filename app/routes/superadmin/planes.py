@@ -68,12 +68,18 @@ def crear_plan():
     if precio is None or not isinstance(precio, int) or precio < 0:
         return jsonify({"msg": "precio_mensual_mxn debe ser un entero positivo en centavos"}), 400
 
+    caracteristicas = data.get("caracteristicas")
+    if caracteristicas is not None and not isinstance(caracteristicas, list):
+        return jsonify({"msg": "caracteristicas debe ser una lista de beneficios"}), 400
+
     plan = PlanSuscripcion(
         nombre              = nombre,
         precio_mensual_mxn  = precio,
         max_miembros        = data.get("max_miembros"),   # None = ilimitado
         descripcion         = data.get("descripcion", ""),
         stripe_price_id     = data.get("stripe_price_id"),
+        titulo_comercial    = data.get("titulo_comercial"),
+        caracteristicas     = caracteristicas or [],
         activo              = True,
     )
     db.session.add(plan)
@@ -123,6 +129,15 @@ def editar_plan(plan_id: int):
 
     if "stripe_price_id" in data:
         plan.stripe_price_id = data["stripe_price_id"]
+
+    if "titulo_comercial" in data:
+        plan.titulo_comercial = data["titulo_comercial"]
+
+    if "caracteristicas" in data:
+        caracteristicas = data["caracteristicas"]
+        if caracteristicas is not None and not isinstance(caracteristicas, list):
+            return jsonify({"msg": "caracteristicas debe ser una lista de beneficios"}), 400
+        plan.caracteristicas = caracteristicas or []
 
     db.session.commit()
     return jsonify(plan.to_dict()), 200
