@@ -12,12 +12,12 @@ Postgres 12 (el proyecto corre Postgres 16), así que no se necesita
 autocommit especial aqui.
 
 Revision ID: 016
-Revises: 015
+Revises: 09bcc26b2064
 """
 from alembic import op
 
 revision      = "016"
-down_revision = "015"
+down_revision = "09bcc26b2064"
 branch_labels = None
 depends_on    = None
 
