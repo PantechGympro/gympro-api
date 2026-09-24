@@ -6,6 +6,7 @@ Todo dato operacional en MongoDB y financiero en PostgreSQL referencia
 a un id_gimnasio que se propaga desde el JWT via tenant middleware.
 
 Planes:
+  starter     → gratuito, hasta 25 miembros activos (SCRUM-163)
   basico      → hasta 50 miembros activos
   pro         → hasta 200 miembros + analytics
   enterprise  → ilimitado + SLA + soporte dedicado
@@ -17,14 +18,15 @@ from app.extensions import db
 
 
 class PlanEnum(enum.Enum):
+    starter    = "starter"
     basico     = "basico"
     pro        = "pro"
     enterprise = "enterprise"
 
 
 # create_type=False: SQLAlchemy no intenta CREATE TYPE en db.create_all().
-# El tipo lo gestiona Alembic en la migración 001. Esto hace create_all idempotente.
-_plan_enum_type = PGEnum("basico", "pro", "enterprise", name="plan_enum", create_type=False)
+# El tipo lo gestiona Alembic (migraciones 001 y 016). Esto hace create_all idempotente.
+_plan_enum_type = PGEnum("starter", "basico", "pro", "enterprise", name="plan_enum", create_type=False)
 
 
 class Gimnasio(db.Model):

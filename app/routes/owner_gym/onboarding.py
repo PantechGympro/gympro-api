@@ -5,7 +5,8 @@ Flujo completo en un solo endpoint:
   1. Valida datos del gimnasio y del administrador.
   2. Crea Gimnasio en PG.
   3. Crea Usuario administrador vinculado al gimnasio.
-  4. Crea Suscripcion en estado trialing (14 dias) con plan basico por defecto.
+  4. Crea Suscripcion en estado trialing (14 dias) con el plan elegido
+     (o starter -- el gratuito -- si no se especifica ninguno).
   5. Genera factura pendiente por el primer periodo.
   6. Envia email de bienvenida al admin.
   7. Devuelve JWT listo para usar (el admin queda logueado).
@@ -37,7 +38,7 @@ onboarding_bp = Blueprint("onboarding", __name__, url_prefix="/api/onboarding")
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str) -> None:
+def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str, nombre_plan: str = "Starter") -> None:
     """Envia email de bienvenida. Falla silenciosamente si Mail no esta configurado."""
     try:
         msg = Message(
@@ -52,7 +53,7 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str) -> None:
   <div style="background:#f9f9f9;padding:32px;border-radius:0 0 12px 12px">
     <h2>Bienvenido, {nombre_admin}!</h2>
     <p>Tu gimnasio <strong>{nombre_gym}</strong> ha sido registrado exitosamente en GymPro SaaS.</p>
-    <p>Tu cuenta esta en <strong>periodo de prueba de 14 dias</strong> con el plan Basico.
+    <p>Tu cuenta esta en <strong>periodo de prueba de 14 dias</strong> con el plan {nombre_plan}.
        Durante este tiempo podras explorar todas las funciones sin costo alguno.</p>
     <div style="background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:20px;margin:24px 0">
       <h3 style="margin-top:0">Proximos pasos</h3>
@@ -96,6 +97,23 @@ def list_gym_types():
     return jsonify({"tipos": tipos}), 200
 
 
+@onboarding_bp.route("/planes", methods=["GET"])
+def list_planes_publico():
+    """
+    Catálogo publico de planes SaaS para el selector del wizard de registro
+    (sin JWT: en este paso el gimnasio todavia no existe, no hay token que
+    validar). Solo expone los planes activos, ordenados como se muestran en
+    la pagina de precios.
+    """
+    planes = (
+        PlanSuscripcion.query
+        .filter_by(activo=True)
+        .order_by(PlanSuscripcion.orden)
+        .all()
+    )
+    return jsonify({"planes": [p.to_dict() for p in planes]}), 200
+
+
 @onboarding_bp.route("/register-gym", methods=["POST"])
 @limiter.limit("3 per hour; 10 per day")
 def register_gym():
@@ -114,7 +132,7 @@ def register_gym():
         "email":    "juan@fitzone.mx",
         "password": "Segura1234!"
       },
-      "id_plan": 1   (opcional -- default: plan basico)
+      "id_plan": 1   (opcional -- default: plan starter, el gratuito)
     }
 
     Response 201:
@@ -169,9 +187,11 @@ def register_gym():
         if not plan:
             return jsonify({"msg": "Plan no encontrado"}), 404
     else:
-        plan = PlanSuscripcion.query.filter_by(nombre="basico", activo=True).first()
+        # Default: plan starter (gratuito) -- es el que el wizard de registro
+        # preselecciona cuando el usuario no elige uno explicitamente.
+        plan = PlanSuscripcion.query.filter_by(nombre="starter", activo=True).first()
         if not plan:
-            return jsonify({"msg": "Plan basico no configurado en la plataforma"}), 500
+            return jsonify({"msg": "Plan starter no configurado en la plataforma"}), 500
 
     try:
         ahora = datetime.now(timezone.utc)
@@ -233,7 +253,8 @@ def register_gym():
         db.session.commit()
 
         # 5. Email de bienvenida (no bloquea si falla)
-        _enviar_bienvenida(adm_email, gym_nombre, adm_nombre)
+        _enviar_bienvenida(adm_email, gym_nombre, adm_nombre,
+                            nombre_plan=plan.titulo_comercial or plan.nombre.capitalize())
 
         # 6. Generar JWT para login inmediato (primer_login=True → fuerza onboarding)
         _plan_val = nuevo_gym.plan if isinstance(nuevo_gym.plan, str) else nuevo_gym.plan.value

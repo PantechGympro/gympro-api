@@ -15,6 +15,19 @@ from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resol
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
 
 
+class DatosInsuficientesError(ValueError):
+    """
+    ValueError especializado: ademas del mensaje, carga cuantos registros hay
+    actualmente y cuantos se necesitan como minimo, para que el frontend pueda
+    mostrar un estado de "faltan N datos" con barra de progreso en vez de un
+    error crudo.
+    """
+    def __init__(self, mensaje: str, n_actual: int = 0, n_minimo: int = 0):
+        super().__init__(mensaje)
+        self.n_actual = n_actual
+        self.n_minimo = n_minimo
+
+
 def _trainer_scope():
     """
     Si el usuario autenticado es Entrenador, devuelve su id para acotar el
@@ -73,7 +86,10 @@ def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=Non
         "peso_inicial": 1, "estatura": 1, "sexo": 1,
     }))
     if not miembros:
-        raise ValueError("No hay miembros con datos suficientes para clustering.")
+        raise DatosInsuficientesError(
+            "No hay miembros con datos suficientes para clustering.",
+            n_actual=0, n_minimo=k,
+        )
 
     # 2. Cargar último registro de progreso por miembro (para peso/imc/grasa/musculo actuales)
     member_oids = [m["_id"] for m in miembros]
@@ -124,7 +140,10 @@ def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=Non
 
     n = len(records)
     if n < k:
-        raise ValueError(f"Datos insuficientes: {n} miembros con datos, se necesitan al menos {k}.")
+        raise DatosInsuficientesError(
+            f"Datos insuficientes: {n} miembros con datos, se necesitan al menos {k}.",
+            n_actual=n, n_minimo=k,
+        )
 
     X = np.array([[r["peso"], r["imc"], r["grasa"], r["musculo"]] for r in records])
 
@@ -282,7 +301,10 @@ def _optimo(gym_id=None, trainer_id=None, kmax=8):
     X = _load_X(gym_id, trainer_id)
     n = len(X)
     if n < 3:
-        raise ValueError("Se necesitan al menos 3 miembros con datos para el análisis.")
+        raise DatosInsuficientesError(
+            "Se necesitan al menos 3 miembros con datos para el análisis.",
+            n_actual=n, n_minimo=3,
+        )
     Xs = StandardScaler().fit_transform(X)
     kmax = min(kmax, n - 1)
     res = []
@@ -319,7 +341,12 @@ def kmeans_optimo():
         cache_set(key, payload)
         return jsonify(payload), 200
     except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
+        payload_error = {"error": str(ve)}
+        if isinstance(ve, DatosInsuficientesError):
+            payload_error["datos_insuficientes"] = True
+            payload_error["n_actual"] = ve.n_actual
+            payload_error["n_minimo"] = ve.n_minimo
+        return jsonify(payload_error), 400
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -356,7 +383,12 @@ def kmeans_analytics():
         return jsonify(payload), 200
 
     except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
+        payload_error = {"error": str(ve)}
+        if isinstance(ve, DatosInsuficientesError):
+            payload_error["datos_insuficientes"] = True
+            payload_error["n_actual"] = ve.n_actual
+            payload_error["n_minimo"] = ve.n_minimo
+        return jsonify(payload_error), 400
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -390,7 +422,12 @@ def kmeans_train():
                         "mensaje": f"K-Means k={k} reentrenado para {ambito}."}), 200
 
     except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
+        payload_error = {"error": str(ve)}
+        if isinstance(ve, DatosInsuficientesError):
+            payload_error["datos_insuficientes"] = True
+            payload_error["n_actual"] = ve.n_actual
+            payload_error["n_minimo"] = ve.n_minimo
+        return jsonify(payload_error), 400
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
