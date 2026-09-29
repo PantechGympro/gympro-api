@@ -22,15 +22,74 @@ import requests as _requests
 OLLAMA_BASE  = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL",    "phi3:mini")
 
+# ── Tuning del ETL de IA ───────────────────────────────────────────────────────
+# Antes: chunks de 3500 caracteres y timeout de 270s atado al limite de 300s de
+# gunicorn (el ETL corria sincrono dentro del request). Ahora el ETL corre en un
+# hilo de background (ver utils/ia_jobs.py) y ya no compite con el timeout HTTP,
+# pero se mantienen limites sanos por bloque para no dejar un chunk colgado
+# para siempre y para que cada llamada a Ollama sea mas rapida:
+#   - Chunks mas chicos (2000 vs 3500) = menos tokens de entrada por llamada =
+#     inferencia mas rapida y menos ruido para el modelo.
+#   - Timeout por chunk configurable via env (OLLAMA_TIMEOUT), default 240s.
+LLM_CHUNK_MAX_CHARS = int(os.getenv("OLLAMA_CHUNK_MAX_CHARS", "2000"))
+LLM_CALL_TIMEOUT     = int(os.getenv("OLLAMA_TIMEOUT", "240"))
+
 
 # ─── Extracción de texto ──────────────────────────────────────────────────────
 
-def extract_text(contenido: bytes, ext: str) -> str:
-    """Extrae texto plano de un PDF o Excel."""
+def _table_to_compact_rows(tabla: list) -> str:
+    """Convierte una tabla de pdfplumber en filas "col | col | col" con
+    espacios internos colapsados. Mucho mas compacto en tokens que el texto
+    alineado con espacios que produce extract_text() sobre una tabla."""
+    filas = []
+    for row in tabla:
+        celdas = [" ".join(str(c).split()) if c else "" for c in row]
+        if any(celdas):
+            filas.append(" | ".join(celdas))
+    return "\n".join(filas)
+
+
+def extract_text(contenido: bytes, ext: str, *, structured: bool = False) -> str:
+    """
+    Extrae texto plano de un PDF o Excel.
+
+    structured=False (default): comportamiento original -- pdfplumber
+    extract_text() tal cual. Lo usa el parser deterministico basado en regex
+    (parse_routines_from_text), que espera columnas separadas por espacios,
+    no debe tocarse o se rompe ese parser rapido.
+
+    structured=True: SOLO para el fallback LLM (cuando el parser
+    deterministico ya no reconocio el documento). Aqui conviene compactar
+    las tablas detectadas a "celda | celda" y no repetir encabezados de
+    columna que pdfplumber ve en cada pagina -- menos tokens de entrada para
+    Ollama, inferencia mas rapida y menos ruido para el modelo.
+    """
     if ext == "pdf":
         import pdfplumber  # noqa: PLC0415
         with pdfplumber.open(io.BytesIO(contenido)) as pdf:
-            return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+            if not structured:
+                return "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+
+            partes: list[str] = []
+            encabezados_vistos: set[tuple] = set()
+            for page in pdf.pages:
+                tablas = page.extract_tables()
+                if tablas:
+                    for tabla in tablas:
+                        if not tabla:
+                            continue
+                        header = tuple(tabla[0]) if tabla[0] else None
+                        filas = tabla[1:] if header in encabezados_vistos else tabla
+                        if header:
+                            encabezados_vistos.add(header)
+                        compacto = _table_to_compact_rows(filas)
+                        if compacto:
+                            partes.append(compacto)
+                else:
+                    txt = page.extract_text() or ""
+                    if txt.strip():
+                        partes.append(txt)
+            return "\n\n".join(partes)
 
     if ext in {"xlsx", "xls"}:
         import openpyxl  # noqa: PLC0415
@@ -229,15 +288,19 @@ def call_ollama(
     system_prompt: str,
     document_text: str,
     max_tokens: int = 4096,
-    timeout: int = 270,  # segundos — bajo el límite de gunicorn (300s)
+    timeout: int | None = None,
 ) -> str:
     """
     Envía el documento al LLM local vía Ollama y devuelve el JSON crudo.
     `format='json'` fuerza salida JSON válido — característica nativa de Ollama.
 
-    `timeout` debe ser menor que el gunicorn --timeout (300s) para que el worker
-    no sea SIGKILLed antes de que requests pueda devolver el TimeoutError controlado.
+    El ETL corre en un hilo de background (utils/ia_jobs.py), no dentro del
+    request sincrono, así que este timeout ya no está atado al de gunicorn —
+    solo evita que un chunk colgado bloquee el job para siempre. Default:
+    LLM_CALL_TIMEOUT (env OLLAMA_TIMEOUT, 240s).
     """
+    if timeout is None:
+        timeout = LLM_CALL_TIMEOUT
     payload = {
         "model":  OLLAMA_MODEL,
         "prompt": f"{system_prompt}\n\nDOCUMENTO A PROCESAR:\n{document_text}",
@@ -260,16 +323,21 @@ def call_ollama(
 
 # ─── Troceado y parseo robusto para documentos largos ────────────────────────
 
-def chunk_text(text: str, max_chars: int = 3500, max_chunks: int = 8) -> tuple[list[str], bool]:
+def chunk_text(text: str, max_chars: int | None = None, max_chunks: int = 8) -> tuple[list[str], bool]:
     """
     Divide el texto en bloques de ~max_chars respetando saltos de línea, para
     no perder ejercicios al enviar documentos largos al LLM (antes se cortaba
     duro en 4.000 caracteres).
 
+    Default de max_chars: LLM_CHUNK_MAX_CHARS (env OLLAMA_CHUNK_MAX_CHARS,
+    2000) — bloques chicos = llamadas a Ollama mas rapidas y mas precisas.
+
     Returns:
         (chunks, truncado) — `truncado` es True si el documento superó
         max_chunks bloques y quedó contenido sin procesar.
     """
+    if max_chars is None:
+        max_chars = LLM_CHUNK_MAX_CHARS
     lines = text.splitlines()
     chunks: list[str] = []
     cur: list[str] = []

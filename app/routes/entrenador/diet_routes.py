@@ -28,6 +28,7 @@ import io
 import json
 import os
 import traceback
+import requests
 from datetime import datetime, timezone
 
 from bson.objectid import ObjectId
@@ -699,6 +700,18 @@ def import_diet_ai():
 
     except ImportError as exc:
         return jsonify({"error": f"Dependencia faltante: {exc}"}), 500
+    except requests.exceptions.Timeout:
+        # Distingue timeout de Ollama de "el modelo no entendio el documento"
+        # (antes ambos casos caian en el 500 generico de abajo). Ver el mismo
+        # fix aplicado al ETL de rutinas (utils/ia_jobs.py).
+        return jsonify({
+            "error": "La IA tardo demasiado en procesar el documento",
+            "detalle": (
+                "Ollama no respondio a tiempo. Si el archivo es largo o el "
+                "servidor esta bajo de recursos, prueba con uno mas corto o "
+                "intentalo de nuevo."
+            ),
+        }), 504
     except Exception as exc:
         import traceback
         return jsonify({"error": str(exc), "trace": traceback.format_exc()[-500:]}), 500

@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request, g
+from flask import Blueprint, jsonify, request, g, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from bson.objectid import ObjectId
 from datetime import datetime, date, timedelta, timezone
@@ -2149,58 +2149,6 @@ def _format_fecha(ts):
 #    Retorna  — JSON para previsualizar y confirmar antes de guardar
 # ═════════════════════════════════════════════════════════════════════════════
 
-_ROUTINE_ETL_PROMPT = """
-Eres un experto en entrenamiento físico y planificación de rutinas de gimnasio.
-Tu tarea es extraer la información del documento y devolver ÚNICAMENTE un objeto JSON
-válido, sin explicaciones, sin markdown, sin texto extra.
-
-La estructura JSON que debes devolver es exactamente:
-{
-  "rutinas": [
-    {
-      "name": "nombre de la rutina",
-      "category": "Fuerza|Hipertrofia|Cardio|Funcional|Movilidad|General",
-      "difficulty": "Principiante|Intermedio|Avanzado",
-      "duration_minutes": <número entero o 60>,
-      "description": "descripción breve de la rutina",
-      "days": [
-        {
-          "day": "Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo",
-          "muscleGroup": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Full Body|Cardio",
-          "exercises": [
-            {
-              "name": "nombre del ejercicio",
-              "sets": "3",
-              "reps": "12",
-              "peso": "descripción del peso o intensidad",
-              "notes": "notas técnicas o de ejecución"
-            }
-          ]
-        }
-      ]
-    }
-  ],
-  "ejercicios": [
-    {
-      "nombre": "nombre del ejercicio",
-      "grupo_muscular": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Glúteos|Cuádriceps|Isquiotibiales|Full Body",
-      "tipo": "Fuerza|Cardio|Flexibilidad|Funcional|Potencia",
-      "series": <número entero o null>,
-      "repeticiones": "descripción de repeticiones",
-      "descripcion": "descripción o instrucciones del ejercicio"
-    }
-  ]
-}
-
-Reglas importantes:
-- Extrae TODAS las rutinas y días que encuentres en el documento
-- Si no hay estructura de días, agrupa los ejercicios en un solo día "Lunes"
-- Para ejercicios sin número de series usa 3 como default
-- Para ejercicios sin repeticiones usa "12" como default
-- El array "ejercicios" debe contener ejercicios únicos del documento para la biblioteca
-- Si no encuentras rutinas estructuradas, devuelve "rutinas": []
-- Si no encuentras ejercicios individuales, devuelve "ejercicios": []
-- RESPONDE SOLO CON EL JSON, nada más"""
 
 
 @trainer_bp.route("/routines/ai-status", methods=["GET"])
@@ -2217,163 +2165,69 @@ def routine_ai_status():
 @require_tenant
 def import_routines_ai():
     """
-    ETL híbrido para importar rutinas desde PDF o Excel.
+    Encola el ETL de importacion de rutinas como job en background y
+    responde de inmediato (202) con un job_id.
 
-    Estrategia en dos pasos:
-      1. Parser determinístico — reconoce el formato "Sesión N: Título ⏱ X min"
-         con tabla de ejercicios. Instantáneo, sin dependencias externas.
-      2. Fallback Ollama — si el PDF no sigue la estructura reconocida,
-         se envía al LLM local para extracción flexible.
+    Antes este endpoint corria el ETL completo (parser deterministico +
+    fallback Ollama, hasta 8 bloques) de forma sincrona dentro del propio
+    request -- si Ollama no alcanzaba a responder en el timeout configurado,
+    el request entero tronaba con un ReadTimeout (ver SCRUM-203 y su
+    seguimiento). Ahora el trabajo real vive en utils/ia_jobs.py y corre en
+    un hilo de background: el entrenador no se queda bloqueado esperando y
+    puede seguir usando el resto del sistema mientras se procesa.
 
-    El entrenador puede subir:
-      - El historial de entrenamiento de un cliente de otro gimnasio/app
-      - Su propia biblioteca de rutinas en cualquier formato
+    El resultado se consulta con GET /routines/import-ai/jobs/<job_id>.
     """
-    import json as _json  # noqa: PLC0415
-    try:
-        from app.utils.etl_ollama import (  # noqa: PLC0415
-            extract_text, parse_routines_from_text, check_ollama_ready, call_ollama,
-            chunk_text, parse_llm_json,
-        )
+    from app.utils.ia_jobs import create_job, start_routines_import_job  # noqa: PLC0415
 
-        archivo = request.files.get("archivo")
-        if not archivo:
-            return jsonify({"error": "No se recibió archivo"}), 400
+    archivo = request.files.get("archivo")
+    if not archivo:
+        return jsonify({"error": "No se recibió archivo"}), 400
 
-        nombre_archivo = archivo.filename or ""
-        ext = nombre_archivo.rsplit(".", 1)[-1].lower()
-        if ext not in {"pdf", "xlsx", "xls"}:
-            return jsonify({
-                "error": "Formato no soportado",
-                "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
-            }), 400
-
-        # ── Extract ──────────────────────────────────────────────────────────
-        try:
-            contenido = archivo.read()
-            raw_text  = extract_text(contenido, ext)
-        except Exception as e:
-            return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
-
-        if not raw_text.strip():
-            return jsonify({
-                "error": "El archivo no contiene texto extraíble",
-                "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
-            }), 422
-
-        # ── Transform: parser determinístico (rápido, sin LLM) ───────────────
-        resultado = parse_routines_from_text(raw_text)
-        aviso_truncado: str | None = None
-
-        if resultado is None:
-            # ── Fallback: LLM local (Ollama), por bloques ────────────────────
-            # Antes se cortaba el documento a 4.000 caracteres y se perdían
-            # ejercicios en silencio. Ahora se trocea y se procesa cada bloque,
-            # fusionando los resultados (la deduplicación posterior limpia los
-            # ejercicios repetidos entre bloques).
-            ready, msg = check_ollama_ready()
-            if not ready:
-                return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
-
-            bloques, truncado = chunk_text(raw_text)
-            combinado: dict = {"rutinas": [], "ejercicios": []}
-            for bloque in bloques:
-                try:
-                    parsed = parse_llm_json(call_ollama(_ROUTINE_ETL_PROMPT, bloque))
-                except Exception:
-                    print(traceback.format_exc())
-                    continue
-                if not isinstance(parsed, dict):
-                    continue
-                combinado["rutinas"].extend(parsed.get("rutinas") or [])
-                combinado["ejercicios"].extend(parsed.get("ejercicios") or [])
-
-            if not combinado["rutinas"] and not combinado["ejercicios"]:
-                return jsonify({
-                    "error": "La IA no pudo estructurar el documento",
-                    "detalle": (
-                        "El archivo tiene un formato no reconocido. "
-                        "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
-                    ),
-                }), 422
-
-            resultado = combinado
-            if truncado:
-                aviso_truncado = (
-                    "El documento es muy largo: se procesó solo la primera parte. "
-                    "Para no perder ejercicios, divídelo en archivos más pequeños."
-                )
-
-        rutinas    = resultado.get("rutinas",   [])
-        ejercicios = resultado.get("ejercicios", [])
-
-        # ── Deduplicación contra la biblioteca del entrenador ────────────────
-        # Omite ejercicios que ya existen (por entrenador) y los repetidos dentro
-        # del mismo archivo; complementa los días de rutina con datos almacenados.
-        from app.utils.rutina_helpers import (  # noqa: PLC0415
-            dedupe_ejercicios, normalizar_nombre,
-        )
-        trainer_id = int(get_jwt_identity())
-        gym_id     = g.tenant_id
-        existentes = {
-            normalizar_nombre(e.nombre): {
-                "series":         e.series,
-                "repeticiones":   e.repeticiones,
-                "grupo_muscular": e.grupo_muscular,
-                "tipo":           e.tipo,
-                "activo":         e.activo,
-            }
-            for e in Ejercicio.query.filter_by(
-                id_gimnasio=gym_id, id_entrenador=trainer_id
-            ).all()
-        }
-        dedup = dedupe_ejercicios(ejercicios, rutinas, existentes)
-        ejercicios = dedup["nuevos"]          # solo los que realmente se agregarán
-
-        # ── Avisos legibles para el usuario ──────────────────────────────────
-        avisos: list[str] = []
-        if aviso_truncado:
-            avisos.append(aviso_truncado)
-        if dedup["omitidos"]:
-            muestra = ", ".join(dedup["omitidos"][:5])
-            extra   = f" y {len(dedup['omitidos']) - 5} más" if len(dedup["omitidos"]) > 5 else ""
-            avisos.append(
-                f"{len(dedup['omitidos'])} ejercicio(s) ya existían en tu biblioteca "
-                f"y se omitieron: {muestra}{extra}. Se reutilizarán los ya guardados."
-            )
-        if dedup.get("reactivar"):
-            muestra = ", ".join(dedup["reactivar"][:5])
-            extra   = f" y {len(dedup['reactivar']) - 5} más" if len(dedup["reactivar"]) > 5 else ""
-            avisos.append(
-                f"{len(dedup['reactivar'])} ejercicio(s) que habías eliminado se "
-                f"reactivarán al importar: {muestra}{extra}."
-            )
-        if dedup["duplicados_archivo"]:
-            avisos.append(
-                f"{dedup['duplicados_archivo']} ejercicio(s) venían repetidos dentro "
-                f"del archivo y se consolidaron en uno solo."
-            )
-        if dedup["nuevos"]:
-            avisos.append(f"{len(dedup['nuevos'])} ejercicio(s) nuevo(s) se agregarán a tu biblioteca.")
-
+    nombre_archivo = archivo.filename or ""
+    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+    if ext not in {"pdf", "xlsx", "xls"}:
         return jsonify({
-            "success":            True,
-            "rutinas":            rutinas,
-            "ejercicios":         ejercicios,            # nuevos (deduplicados)
-            "ejercicios_omitidos": dedup["omitidos"],    # ya existían → reutilizar
-            "avisos":             avisos,
-            "archivo":            nombre_archivo,
-            "resumen": {
-                "total_rutinas":         len(rutinas),
-                "ejercicios_nuevos":     len(dedup["nuevos"]),
-                "ejercicios_omitidos":   len(dedup["omitidos"]),
-                "ejercicios_reactivados": len(dedup.get("reactivar", [])),
-                "duplicados_archivo":    dedup["duplicados_archivo"],
-                "total_dias": sum(len(r.get("days", [])) for r in rutinas),
-            },
-        }), 200
+            "error": "Formato no soportado",
+            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+        }), 400
 
-    except Exception as e:
-        # Cualquier error inesperado del ETL termina aquí (log + 500 controlado)
-        print(traceback.format_exc())
-        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
+    # Leer el archivo AHORA -- el stream de request.files deja de ser válido
+    # en cuanto termina este request, y el ETL real corre después, en el hilo.
+    contenido = archivo.read()
+
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+
+    job_id = create_job(
+        tipo="rutinas", id_gimnasio=gym_id, id_entrenador=trainer_id,
+        archivo=nombre_archivo,
+    )
+    start_routines_import_job(
+        current_app._get_current_object(),
+        job_id=job_id, contenido=contenido, ext=ext, nombre_archivo=nombre_archivo,
+        id_gimnasio=gym_id, id_entrenador=trainer_id,
+    )
+
+    return jsonify({
+        "success": True,
+        "job_id":  job_id,
+        "estado":  "procesando",
+    }), 202
+
+
+@trainer_bp.route("/routines/import-ai/jobs/<job_id>", methods=["GET"])
+@jwt_required()
+@require_tenant
+def routine_import_job_status(job_id: str):
+    """Consulta el estado de un job de importacion de rutinas (polling)."""
+    from app.utils.ia_jobs import get_job  # noqa: PLC0415
+
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+
+    job = get_job(job_id, id_gimnasio=gym_id, id_entrenador=trainer_id)
+    if not job:
+        return jsonify({"error": "Job no encontrado"}), 404
+    return jsonify(job), 200
+
