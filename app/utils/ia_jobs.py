@@ -118,6 +118,12 @@ def create_job(*, tipo: str, id_gimnasio: int, id_entrenador: int, archivo: str)
         "error":           None,
         "error_tipo":      None,
         "detalle":         None,
+        # progreso_total en None mientras no se sabe cuántos bloques hay que
+        # mandarle a Ollama (parser determinístico / lectura del archivo
+        # todavía en curso) -- el frontend muestra una barra indeterminada
+        # en ese momento y una barra real (actual/total) en cuanto se sabe.
+        "progreso_actual": None,
+        "progreso_total":  None,
         "creado_en":       _now(),
         "actualizado_en":  _now(),
     }
@@ -271,8 +277,14 @@ def _run_routines_import_job(app, job_id, contenido, ext, nombre_archivo,
                         raw_text_llm = raw_text
 
                 bloques, truncado = chunk_text(raw_text_llm)
+                total_bloques = len(bloques)
+                # Primer punto en el que se sabe cuántos bloques hay -- a partir
+                # de aquí el frontend puede pintar una barra de progreso real
+                # (antes solo tenía el spinner, sin forma de saber si de verdad
+                # avanzaba o estaba trabado).
+                _set_job(job_id, progreso_actual=0, progreso_total=total_bloques)
                 combinado: dict = {"rutinas": [], "ejercicios": []}
-                for bloque in bloques:
+                for i, bloque in enumerate(bloques):
                     try:
                         parsed = parse_llm_json(call_ollama(_ROUTINE_ETL_PROMPT, bloque))
                     except _requests.exceptions.Timeout:
@@ -289,6 +301,11 @@ def _run_routines_import_job(app, job_id, contenido, ext, nombre_archivo,
                     except Exception:
                         print(traceback.format_exc())
                         continue
+                    finally:
+                        # Se ejecuta siempre (éxito, timeout o excepción) antes de
+                        # cualquier `continue` de arriba -- el progreso refleja
+                        # bloques ya intentados, no solo los exitosos.
+                        _set_job(job_id, progreso_actual=i + 1, progreso_total=total_bloques)
                     if not isinstance(parsed, dict):
                         continue
                     combinado["rutinas"].extend(parsed.get("rutinas") or [])
