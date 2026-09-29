@@ -25,6 +25,7 @@ para leer/escribir el propio doc de job.
 """
 from __future__ import annotations
 
+import os
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -35,6 +36,14 @@ import requests as _requests
 from app.mongo import get_db
 
 COLLECTION = "ia_import_jobs"
+
+# Si el contenedor de la API se reinicia (crash, `docker compose up --build`,
+# deploy) mientras un job corre en su hilo de background, el hilo simplemente
+# desaparece -- nadie vuelve a escribir en su doc de Mongo, que se queda en
+# "procesando" para siempre y el frontend sigue mostrando "importando" sin fin
+# (el aviso de Layout.jsx nunca deja de aparecer). Se considera "huérfano"
+# cualquier job que lleve más de este umbral sin actualizarse.
+JOB_STALE_AFTER_SECONDS = int(os.getenv("IA_JOB_STALE_AFTER_SECONDS", str(30 * 60)))
 
 # Prompt del ETL de rutinas -- vivía en trainer_routes.py; se mueve aquí
 # porque ahora es este módulo el que hace las llamadas a Ollama.
@@ -128,6 +137,32 @@ def get_job(job_id: str, *, id_gimnasio: int, id_entrenador: int) -> dict | None
     })
     if not doc:
         return None
+
+    # ── Detectar job huérfano ────────────────────────────────────────────────
+    # Si sigue "procesando" pero no se actualizó en JOB_STALE_AFTER_SECONDS, el
+    # hilo que lo procesaba ya no existe (el contenedor se reinició, crasheó,
+    # o hubo un deploy a mitad del proceso) y nadie va a volver a escribir en
+    # este doc. Sin esto, el frontend haría polling para siempre y el aviso
+    # de "importando" nunca desaparecería aunque se reinicien los contenedores.
+    if doc.get("estado") == "procesando":
+        actualizado = doc.get("actualizado_en")
+        if isinstance(actualizado, datetime):
+            edad_seg = (_now() - actualizado).total_seconds()
+            if edad_seg > JOB_STALE_AFTER_SECONDS:
+                huerfano = {
+                    "estado":     "error",
+                    "error_tipo": "job_huerfano",
+                    "error":      "El proceso se interrumpió y no se completó",
+                    "detalle": (
+                        "Esto puede pasar si el servidor se reinició mientras se "
+                        "procesaba el archivo. Intenta importarlo de nuevo."
+                    ),
+                }
+                mdb[COLLECTION].update_one(
+                    {"_id": doc["_id"]}, {"$set": {**huerfano, "actualizado_en": _now()}},
+                )
+                doc.update(huerfano)
+
     doc["job_id"] = str(doc.pop("_id"))
     for k in ("creado_en", "actualizado_en"):
         if isinstance(doc.get(k), datetime):
@@ -135,8 +170,36 @@ def get_job(job_id: str, *, id_gimnasio: int, id_entrenador: int) -> dict | None
     return doc
 
 
+def cancel_job(job_id: str, *, id_gimnasio: int, id_entrenador: int) -> bool:
+    """
+    Marca un job como "cancelado" a pedido del entrenador (botón "Cancelar"
+    en la UI). No mata el hilo de background en sí -- Python no tiene forma
+    segura de interrumpir un hilo a mitad de una llamada HTTP a Ollama -- pero
+    _set_job() respeta este estado y ya no lo pisa con "listo"/"error" si el
+    hilo termina después. Sirve tanto para un job realmente colgado como para
+    uno huérfano que el chequeo de arriba aún no alcanzó a marcar.
+    """
+    try:
+        oid = ObjectId(job_id)
+    except Exception:
+        return False
+    mdb = get_db()
+    res = mdb[COLLECTION].update_one(
+        {"_id": oid, "id_gimnasio": id_gimnasio, "id_entrenador": id_entrenador,
+         "estado": "procesando"},
+        {"$set": {"estado": "cancelado", "actualizado_en": _now()}},
+    )
+    return res.matched_count > 0
+
+
 def _set_job(job_id: str, **fields) -> None:
     mdb = get_db()
+    # No pisar un job que el entrenador ya canceló: evita que un resultado o
+    # error que llega tarde (el hilo de background siguió corriendo después
+    # del cancel) lo revierta a "listo"/"error" cuando la UI ya lo descartó.
+    actual = mdb[COLLECTION].find_one({"_id": ObjectId(job_id)}, {"estado": 1})
+    if actual and actual.get("estado") == "cancelado":
+        return
     mdb[COLLECTION].update_one(
         {"_id": ObjectId(job_id)},
         {"$set": {**fields, "actualizado_en": _now()}},

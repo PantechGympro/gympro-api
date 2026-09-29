@@ -9,6 +9,7 @@ from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario
 from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
+from app.extensions import limiter
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
 
@@ -2219,6 +2220,12 @@ def import_routines_ai():
 @trainer_bp.route("/routines/import-ai/jobs/<job_id>", methods=["GET"])
 @jwt_required()
 @require_tenant
+# El límite global por defecto (300/día, 60/hora -- ver app/extensions.py) se
+# agota en ~4 minutos con el polling cada 4s del frontend (useRoutineImportJob.js)
+# y deja al entrenador recibiendo 429 en vez del resultado real, aunque el job
+# ya haya terminado. override_defaults=True reemplaza el límite global SOLO en
+# esta ruta -- 120/min da más de 8x margen sobre el ritmo real de polling.
+@limiter.limit("120 per minute", override_defaults=True)
 def routine_import_job_status(job_id: str):
     """Consulta el estado de un job de importacion de rutinas (polling)."""
     from app.utils.ia_jobs import get_job  # noqa: PLC0415
@@ -2230,4 +2237,31 @@ def routine_import_job_status(job_id: str):
     if not job:
         return jsonify({"error": "Job no encontrado"}), 404
     return jsonify(job), 200
+
+
+@trainer_bp.route("/routines/import-ai/jobs/<job_id>/cancel", methods=["POST"])
+@jwt_required()
+@require_tenant
+def routine_import_job_cancel(job_id: str):
+    """
+    Cancela (desde la UI) un job de importación de rutinas que quedó
+    procesando indefinidamente -- por ejemplo, tras reiniciar los
+    contenedores mientras corría. No mata el hilo de background en sí (no
+    hay forma segura de interrumpirlo a mitad de una llamada HTTP), pero
+    marca el job para que deje de reportarse como "procesando" y _set_job()
+    ya no lo sobreescriba si el hilo llega a terminar después.
+    """
+    from app.utils.ia_jobs import cancel_job  # noqa: PLC0415
+
+    trainer_id = int(get_jwt_identity())
+    gym_id     = g.tenant_id
+
+    ok = cancel_job(job_id, id_gimnasio=gym_id, id_entrenador=trainer_id)
+    if not ok:
+        # No existía, no era de este entrenador, o ya no estaba "procesando"
+        # (ya terminó/erroró/se canceló antes) -- no es un error real para la
+        # UI: de cualquier forma el resultado deseado (dejar de mostrarlo
+        # como pendiente) ya se cumple del lado del cliente.
+        return jsonify({"success": False, "detalle": "El job ya no estaba en curso"}), 200
+    return jsonify({"success": True}), 200
 
