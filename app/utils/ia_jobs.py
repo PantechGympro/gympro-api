@@ -229,8 +229,8 @@ def _run_routines_import_job(app, job_id, contenido, ext, nombre_archivo,
     with app.app_context():
         try:
             from app.utils.etl_ollama import (  # noqa: PLC0415
-                extract_text, parse_routines_from_text, check_ollama_ready,
-                call_ollama, chunk_text, parse_llm_json,
+                extract_text, parse_routines_from_text, parse_routines_from_app_export,
+                check_ollama_ready, call_ollama, chunk_text, parse_llm_json,
             )
             from app.utils.rutina_helpers import dedupe_ejercicios, normalizar_nombre  # noqa: PLC0415
             from app.models.pg.ejercicio import Ejercicio  # noqa: PLC0415
@@ -255,6 +255,21 @@ def _run_routines_import_job(app, job_id, contenido, ext, nombre_archivo,
 
             # ── Transform: parser determinístico (rápido, sin LLM) ────────────
             resultado = parse_routines_from_text(raw_text)
+
+            # Segundo intento determinístico: formato de dos columnas de apps
+            # de seguimiento (Hevy/Strong y similares) -- el parser de arriba
+            # opera sobre texto plano y nunca lo reconoce (pdfplumber
+            # intercala ambas columnas en la misma línea), así que sin esto
+            # CUALQUIER PDF con este formato caía siempre al fallback de
+            # Ollama, aunque el documento esté perfectamente estructurado.
+            # Necesita las posiciones de palabra (extract_words), por eso
+            # recibe `contenido` crudo en vez del texto ya extraído.
+            if resultado is None and ext == "pdf":
+                try:
+                    resultado = parse_routines_from_app_export(contenido)
+                except Exception:
+                    resultado = None
+
             aviso_truncado: str | None = None
             hubo_timeout = False
 
