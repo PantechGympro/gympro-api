@@ -712,6 +712,15 @@ def import_diet_ai():
                 "intentalo de nuevo."
             ),
         }), 504
+    except TimeoutError:
+        # _acquire_ollama_slot() no consiguio cupo (ver etl_ollama.py): ya hay
+        # OLLAMA_MAX_CONCURRENT llamadas a Ollama en curso y ninguna termino a
+        # tiempo. Distinto de un timeout de Ollama en si -- aqui ni siquiera
+        # llego a llamarlo.
+        return jsonify({
+            "error": "El servidor de IA esta saturado en este momento",
+            "detalle": "Hay otras importaciones con IA en curso. Intenta de nuevo en unos minutos.",
+        }), 503
     except Exception as exc:
         import traceback
         return jsonify({"error": str(exc), "trace": traceback.format_exc()[-500:]}), 500

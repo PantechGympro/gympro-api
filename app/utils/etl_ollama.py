@@ -35,6 +35,66 @@ LLM_CHUNK_MAX_CHARS = int(os.getenv("OLLAMA_CHUNK_MAX_CHARS", "2000"))
 LLM_CALL_TIMEOUT     = int(os.getenv("OLLAMA_TIMEOUT", "240"))
 
 
+# ── Límite de llamadas concurrentes a Ollama ────────────────────────────────
+# Sin esto, cada import/dieta que llega a call_ollama() dispara una inferencia
+# CPU-bound independiente. Antes del ETL en background (utils/ia_jobs.py) el
+# request síncrono ya limitaba esto de facto; ahora que importar rutinas ya
+# no bloquea al entrenador, nada impide que varios imports (de uno o varios
+# entrenadores) arranquen inferencias simultáneas -- en la máquina de
+# desarrollo esto llegó a saturar CPU/RAM del host al punto de reiniciarse
+# justo después de un `docker compose up -d --build` (build + inferencia sin
+# tiempo de recuperación entre medio). Se limita con un lock distribuido en
+# Redis (ya es dependencia de Flask-Limiter, ver config.py) en vez de un
+# semáforo en memoria: gunicorn corre con WEB_CONCURRENCY workers -- procesos
+# separados -- así que un semáforo in-process solo limitaría la concurrencia
+# POR WORKER, no la real contra el servicio `ollama` compartido por todos.
+OLLAMA_MAX_CONCURRENT = max(1, int(os.getenv("OLLAMA_MAX_CONCURRENT", "1")))
+_OLLAMA_LOCK_TTL      = 300  # seguro ante crash del holder: nunca deja un cupo tomado más que esto
+OLLAMA_WAIT_TIMEOUT   = int(os.getenv("OLLAMA_WAIT_TIMEOUT", "600"))  # cuanto esperar un cupo libre
+
+_redis_client = None
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        import redis as _redis_lib  # noqa: PLC0415 (ya es dependencia de Flask-Limiter)
+        _redis_client = _redis_lib.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    return _redis_client
+
+
+def _acquire_ollama_slot():
+    """
+    Bloquea hasta obtener uno de los OLLAMA_MAX_CONCURRENT cupos globales
+    para llamar a Ollama (across todos los workers/hilos), o levanta
+    TimeoutError si ninguno se libera en OLLAMA_WAIT_TIMEOUT segundos.
+    Devuelve el Lock ya adquirido -- liberarlo con _release_ollama_slot().
+    """
+    import time  # noqa: PLC0415
+
+    r = _get_redis()
+    deadline = time.monotonic() + OLLAMA_WAIT_TIMEOUT
+    while True:
+        for i in range(OLLAMA_MAX_CONCURRENT):
+            lock = r.lock(f"ollama:slot:{i}", timeout=_OLLAMA_LOCK_TTL)
+            if lock.acquire(blocking=False):
+                return lock
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"El servidor de IA está saturado: no se liberó ningún cupo "
+                f"(máx {OLLAMA_MAX_CONCURRENT} llamada(s) concurrente(s) a Ollama) "
+                f"en {OLLAMA_WAIT_TIMEOUT}s."
+            )
+        time.sleep(1)
+
+
+def _release_ollama_slot(lock) -> None:
+    try:
+        lock.release()
+    except Exception:
+        pass  # ya expiró solo por _OLLAMA_LOCK_TTL, no pasa nada
+
+
 # ─── Extracción de texto ──────────────────────────────────────────────────────
 
 def _table_to_compact_rows(tabla: list) -> str:
@@ -312,13 +372,17 @@ def call_ollama(
             "top_p":       0.9,
         },
     }
-    resp = _requests.post(
-        f"{OLLAMA_BASE}/api/generate",
-        json=payload,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json().get("response", "") or ""
+    lock = _acquire_ollama_slot()
+    try:
+        resp = _requests.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "") or ""
+    finally:
+        _release_ollama_slot(lock)
 
 
 # ─── Troceado y parseo robusto para documentos largos ────────────────────────

@@ -216,6 +216,13 @@ def _run_routines_import_job(app, job_id, contenido, ext, nombre_archivo,
                         hubo_timeout = True
                         print(f"[ia_jobs] timeout de Ollama procesando un bloque (job {job_id})")
                         continue
+                    except TimeoutError:
+                        # No se consiguio cupo en _acquire_ollama_slot() (ver etl_ollama.py):
+                        # Ollama ya esta saturado por otras importaciones en curso. Se trata
+                        # igual que un timeout de cara al mensaje final del job.
+                        hubo_timeout = True
+                        print(f"[ia_jobs] Ollama saturado (sin cupo libre) procesando un bloque (job {job_id})")
+                        continue
                     except Exception:
                         print(traceback.format_exc())
                         continue
