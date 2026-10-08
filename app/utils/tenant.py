@@ -31,16 +31,46 @@ from flask_jwt_extended import verify_jwt_in_request, get_jwt
 from flask_jwt_extended.exceptions import NoAuthorizationError, InvalidHeaderError
 from jwt.exceptions import ExpiredSignatureError, DecodeError
 
-# Rutas que no necesitan autenticación ni tenant
-_EXEMPT_PREFIXES = (
+class TenantNoResuelto(PermissionError):
+    """No se pudo determinar a qué gimnasio pertenece la petición.
+
+    Antes, get_tenant_filter() devolvía {} en este caso: un filtro vacío
+    no restringe nada y la consulta entregaba los registros de TODOS los
+    gimnasios (PR-01 — Actividad 09, F. Pérez Medina). Ahora la ausencia
+    de inquilino se señala con esta excepción y se traduce a 403 en el
+    errorhandler registrado más abajo.
+    """
+
+
+# Rutas EXACTAS que no requieren resolver un inquilino. Se comparan por
+# igualdad y no por prefijo: antes "/api/onboarding" (prefijo) eximía
+# también a PUT /api/onboarding/complete-setup -- que exige sesión y
+# nunca debió quedar exenta -- y cualquier endpoint nuevo que empezara
+# igual quedaba exento sin que nadie lo decidiera (PR-02).
+_RUTAS_PUBLICAS = frozenset({
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
     "/api/health",
+    "/api/onboarding/gym-types",     # catálogo público del selector
+    "/api/onboarding/planes",        # catálogo público de planes
+    "/api/onboarding/register-gym",  # alta inicial: aún no existe el gimnasio
+})
+
+# Webhooks sin parámetro en la ruta: la pasarela notifica sin JWT y se
+# autentica por la firma del propio proveedor dentro de cada handler.
+_RUTAS_WEBHOOK = frozenset({
     "/api/billing/webhook",
     "/api/billing/stripe/webhook",
-    "/api/onboarding",
-    # Webhooks de PayPal y Mercado Pago: la pasarela notifica sin token JWT.
-    # La transacción se identifica por la referencia incluida en el payload.
+})
+
+# Único caso que se conserva por PREFIJO, porque la ruta real lleva un
+# parámetro variable (<proveedor>): /api/pagos/webhook/paypal,
+# /api/pagos/webhook/mercadopago. Queda aparte y comentado a propósito,
+# para que cualquier adición futura sea una decisión visible y no un
+# efecto colateral de "empezar igual".
+_PREFIJOS_WEBHOOK = (
     "/api/pagos/webhook",
 )
 
@@ -53,9 +83,17 @@ def init_tenant_middleware(app):
 
     @app.before_request
     def _resolve_tenant():
-        # Saltar rutas exentas
-        if any(request.path.startswith(prefix) for prefix in _EXEMPT_PREFIXES):
-            g.tenant_id = None
+        ruta = request.path.rstrip("/") or "/"
+
+        # Saltar rutas exentas: exactas, o por prefijo solo para el
+        # webhook con parámetro variable (ver _PREFIJOS_WEBHOOK arriba).
+        if (
+            ruta in _RUTAS_PUBLICAS
+            or ruta in _RUTAS_WEBHOOK
+            or any(ruta.startswith(p) for p in _PREFIJOS_WEBHOOK)
+        ):
+            g.tenant_id     = None
+            g.is_superadmin = False
             return
 
         # Intentar extraer el JWT sin propagar excepciones al cliente aún
@@ -66,13 +104,16 @@ def init_tenant_middleware(app):
             # Sin token → solo aplica si la ruta es protegida
             # Los decoradores @jwt_required() en cada endpoint se encargan
             # de rechazar la request si falta el token.
-            g.tenant_id = None
+            g.tenant_id     = None
+            g.is_superadmin = False
             return
         except (ExpiredSignatureError, DecodeError):
-            g.tenant_id = None
+            g.tenant_id     = None
+            g.is_superadmin = False
             return
         except Exception:
-            g.tenant_id = None
+            g.tenant_id     = None
+            g.is_superadmin = False
             return
 
         # superadmin opera a nivel de plataforma — no está ligado a ningún gimnasio.
@@ -95,6 +136,14 @@ def init_tenant_middleware(app):
                 f"[Tenant] Request {request.method} {request.path} → gimnasio {tenant_id}"
             )
 
+    @app.errorhandler(TenantNoResuelto)
+    def _sin_inquilino(exc):
+        current_app.logger.warning(
+            "Petición rechazada sin inquilino resuelto: %s %s",
+            request.method, request.path,
+        )
+        return jsonify({"msg": "Token sin gimnasio asignado."}), 403
+
 
 def get_tenant_filter():
     """
@@ -108,13 +157,22 @@ def get_tenant_filter():
         # o con id_gimnasio directamente:
         Model.query.filter_by(id_gimnasio=g.tenant_id).all()
 
-    Si tenant_id es None (usuario legacy sin gimnasio asignado), retorna
-    diccionario vacío para no filtrar — comportamiento permisivo durante
-    la migración. Quitar este fallback al cortar el soporte legacy.
+    Falla en CERRADO (PR-01): antes, si no había inquilino resuelto, se
+    devolvía {} y un filtro vacío no restringe nada -- la consulta
+    entregaba los registros de TODOS los gimnasios. Ahora la ausencia de
+    inquilino es un error explícito, nunca un permiso implícito.
     """
+    if getattr(g, "is_superadmin", False):
+        # Vista transversal del superadministrador: decisión explícita,
+        # no un efecto colateral de tenant_id = None.
+        return {}
+
     tenant_id = getattr(g, "tenant_id", None)
     if tenant_id is None:
-        return {}
+        raise TenantNoResuelto(
+            "La petición no tiene gimnasio asignado; se rechaza por "
+            "aislamiento de datos entre inquilinos (RNF-03)."
+        )
     return {"id_gimnasio": tenant_id}
 
 
