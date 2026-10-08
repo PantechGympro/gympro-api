@@ -1,4 +1,5 @@
 from flask import Flask, send_from_directory
+from flask_jwt_extended import jwt_required
 import os
 from .config import Config
 from .extensions import db, migrate, jwt, mail, limiter
@@ -141,7 +142,25 @@ def create_app():
     # ── Ruta para servir fotos de perfil subidas ─────────────────────────────
     # Usa /app/storage/uploads/ (bind-mounted desde el host) para garantizar
     # persistencia entre rebuilds sin depender de named volumes ni permisos.
+    #
+    # Actividad 09, PR-01 (M. Hernández Cervantes): la ruta no exigía sesión,
+    # así que cualquiera que conociera o adivinara el nombre de un archivo
+    # podía descargarlo sin autenticarse. @jwt_required() cierra ese hueco.
+    #
+    # send_from_directory ya usa safe_join internamente (Flask/Werkzeug),
+    # así que ".." en el nombre no permite escapar del directorio: no hace
+    # falta secure_filename() aquí, y de hecho rompería la ruta real de los
+    # certificados de entrenador, que sí usan una subcarpeta a propósito
+    # (/api/uploads/certs/<archivo>, ver trainer_routes.py).
+    #
+    # El aislamiento POR GIMNASIO (que un gimnasio no pueda leer los
+    # archivos de otro) requiere reorganizar este directorio en subcarpetas
+    # por id_gimnasio, lo que a su vez exige migrar los archivos ya
+    # subidos tanto en local como en el VPS. Se deja pendiente a propósito:
+    # aplicarlo ahora sin esa migración rompería las fotos de perfil que ya
+    # están referenciadas en Mongo/PG. Queda registrado como seguimiento.
     @app.route("/api/uploads/<path:filename>")
+    @jwt_required()
     def serve_upload(filename):
         upload_dir = "/app/storage/uploads"
         return send_from_directory(upload_dir, filename)
