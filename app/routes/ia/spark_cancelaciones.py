@@ -256,9 +256,11 @@ def _paginar_en_riesgo(payload: dict) -> dict:
     except (TypeError, ValueError):
         page = 1
     try:
-        per_page = min(50, max(1, int(request.args.get("per_page", 15))))
+        # Default alineado con el frontend (web/src/pages/owner_gym/AdminAnalytics.jsx,
+        # TabCancelaciones): 6 por página para que la tarjeta no se alargue demasiado.
+        per_page = min(50, max(1, int(request.args.get("per_page", 6))))
     except (TypeError, ValueError):
-        per_page = 15
+        per_page = 6
 
     en_riesgo = [p for p in payload.get("predicciones", []) if p["riesgo"] in ("alto", "medio")]
     total   = len(en_riesgo)

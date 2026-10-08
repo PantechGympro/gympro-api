@@ -299,7 +299,9 @@ def get_members():
     search  = request.args.get("q", "").strip()
     now     = datetime.now(timezone.utc)
     page    = max(1, int(request.args.get("page", 1)))
-    per_page = min(100, max(1, int(request.args.get("per_page", 20))))
+    # Default alineado con el frontend (ReceptionistMembers.jsx, PER_PAGE): 10
+    # por página en el padrón de miembros del recepcionista.
+    per_page = min(100, max(1, int(request.args.get("per_page", 10))))
 
     query = {"id_gimnasio_pg": gym_id, "estado": "Activo"}
     if search:
