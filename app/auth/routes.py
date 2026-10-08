@@ -12,12 +12,14 @@ Sprint 3: una vez migrados todos los usuarios a PG, eliminar el bloque
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import (
     create_access_token, create_refresh_token, jwt_required, get_jwt_identity,
+    get_jwt, set_access_cookies, set_refresh_cookies, unset_jwt_cookies,
 )
 from flask_mail import Message
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import random
-from app.extensions import db, limiter, mail
+import uuid
+from app.extensions import db, limiter, mail, redis_cliente
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
 
@@ -226,15 +228,29 @@ def login():
         # Token de refresco de larga duración: permite que la sesión sobreviva
         # al cierre de la aplicación sin tener que alargar el access token, que
         # es el que viaja en cada petición y por eso conviene que caduque pronto.
+        #
+        # "fam" (Actividad 09, PR-02 — J. C. Pérez Nava): identifica la cadena
+        # de renovaciones. Cada refresco emite un refresh_token nuevo que
+        # conserva la misma familia; si un token ya canjeado vuelve a
+        # presentarse, se revoca la familia completa (ver /auth/refresh).
+        familia = str(uuid.uuid4())
         refresh = create_refresh_token(
             identity=payload["identity"],
-            additional_claims=payload["claims"],
+            additional_claims={**payload["claims"], "fam": familia},
         )
-        return jsonify({
+        respuesta = jsonify({
             "access_token":  token,
             "refresh_token": refresh,
             "user":          payload["user_response"],
-        }), 200
+        })
+        # Cookies HttpOnly (Actividad 09, PR-01 — M. Arriaga Mora): el portal
+        # web ya no necesita guardar el token en localStorage para mantener
+        # la sesión -- ver web/src/api/cliente.js. El cuerpo JSON de arriba
+        # se conserva para no romper al cliente móvil, que autentica por
+        # cabecera Authorization y no por cookies.
+        set_access_cookies(respuesta, token)
+        set_refresh_cookies(respuesta, refresh)
+        return respuesta, 200
 
     # ── 2. Fallback MongoDB (usuarios legacy — Sprint 2 transitorio) ──────────
     user_mongo = UserMongo.find_by_email(email)
@@ -256,11 +272,14 @@ def login():
             identity=payload["identity"],
             additional_claims=payload["claims"],
         )
-        return jsonify({
+        respuesta = jsonify({
             "access_token":  token,
             "refresh_token": refresh,
             "user":          payload["user_response"],
-        }), 200
+        })
+        set_access_cookies(respuesta, token)
+        set_refresh_cookies(respuesta, refresh)
+        return respuesta, 200
 
     # ── Usuario no encontrado en ninguna fuente ───────────────────────────────
     return jsonify({"msg": "Credenciales inválidas"}), 401
@@ -283,8 +302,29 @@ def refresh_token():
     Se vuelven a leer el rol y el gimnasio desde la base en lugar de copiarlos
     del token viejo: así, si al usuario le cambiaron el rol o lo dieron de baja,
     el cambio surte efecto en el siguiente refresco y no dentro de dos meses.
+
+    Actividad 09, PR-02 (J. C. Pérez Nava): el token de refresco se ROTA en
+    cada renovación. Antes, un mismo token de refresco servía un número
+    ilimitado de veces durante sus 90 días completos -- ni caducaba al
+    usarse ni el servidor distinguía entre el dispositivo legítimo y una
+    copia robada. Ahora cada canje invalida el token presentado, y si ese
+    mismo token vuelve a presentarse (señal de que hay dos copias en
+    circulación), se revoca la familia completa y se fuerza a iniciar
+    sesión de nuevo.
     """
-    user_id = get_jwt_identity()
+    claims_viejos = get_jwt()
+    jti_viejo     = claims_viejos.get("jti")
+    familia       = claims_viejos.get("fam") or jti_viejo
+    user_id       = get_jwt_identity()
+
+    if jti_viejo and redis_cliente.get(f"revocado:{jti_viejo}"):
+        if familia:
+            redis_cliente.setex(f"familia_revocada:{familia}", 90 * 86400, "1")
+        return jsonify({"msg": "Sesión revocada por seguridad."}), 401
+
+    restante = claims_viejos["exp"] - int(datetime.now(timezone.utc).timestamp())
+    if restante > 0 and jti_viejo:
+        redis_cliente.setex(f"revocado:{jti_viejo}", restante, "1")
 
     usuario = UsuarioPG.query.get(int(user_id)) if str(user_id).isdigit() else None
     if usuario:
@@ -293,22 +333,91 @@ def refresh_token():
         if usuario.gimnasio and not usuario.gimnasio.activo:
             return jsonify({"msg": "El gimnasio no está activo"}), 403
 
-        payload = _build_token_pg(usuario)
-        return jsonify({
-            "access_token": create_access_token(
-                identity=payload["identity"],
-                additional_claims=payload["claims"],
-            ),
-            "user": payload["user_response"],
-        }), 200
+        payload       = _build_token_pg(usuario)
+        access_nuevo  = create_access_token(
+            identity=payload["identity"], additional_claims=payload["claims"],
+        )
+        refresh_nuevo = create_refresh_token(
+            identity=payload["identity"],
+            additional_claims={**payload["claims"], "fam": familia},
+        )
+        respuesta = jsonify({
+            "access_token":  access_nuevo,
+            "refresh_token": refresh_nuevo,
+            "user":          payload["user_response"],
+        })
+        set_access_cookies(respuesta, access_nuevo)
+        set_refresh_cookies(respuesta, refresh_nuevo)
+        return respuesta, 200
 
     # Usuarios legacy de Mongo: se conservan los claims del token de refresco.
-    from flask_jwt_extended import get_jwt
-    claims = {k: v for k, v in get_jwt().items()
-              if k not in ("exp", "iat", "jti", "type", "sub", "nbf", "fresh")}
+    claims_legacy = {k: v for k, v in claims_viejos.items()
+                      if k not in ("exp", "iat", "jti", "type", "sub", "nbf", "fresh", "fam")}
+    access_nuevo  = create_access_token(identity=user_id, additional_claims=claims_legacy)
+    refresh_nuevo = create_refresh_token(
+        identity=user_id, additional_claims={**claims_legacy, "fam": familia},
+    )
+    respuesta = jsonify({
+        "access_token":  access_nuevo,
+        "refresh_token": refresh_nuevo,
+    })
+    set_access_cookies(respuesta, access_nuevo)
+    set_refresh_cookies(respuesta, refresh_nuevo)
+    return respuesta, 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESIÓN ACTUAL (rol verificado por el servidor)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/me", methods=["GET"])
+@jwt_required()
+def me():
+    """
+    Devuelve el rol y los datos mínimos de la sesión actual, leídos del JWT
+    firmado por el servidor -- nunca de lo que el cliente diga tener
+    guardado localmente.
+
+    Actividad 09, PR-02 (M. Arriaga Mora): Layout.jsx decidía qué panel
+    mostrar comparando contra el campo "role" del objeto "user" guardado en
+    localStorage, que el propio usuario puede editar desde la consola del
+    navegador. Este endpoint es la fuente de verdad que reemplaza esa
+    lectura: la guarda de navegación en Layout.jsx ahora espera esta
+    respuesta antes de montar cualquier panel.
+    """
+    claims = get_jwt()
     return jsonify({
-        "access_token": create_access_token(identity=user_id, additional_claims=claims),
+        "role":        claims.get("role"),
+        "id_gimnasio": claims.get("id_gimnasio"),
+        "email":       claims.get("email"),
     }), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGOUT
+# ─────────────────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/logout", methods=["POST"])
+@jwt_required(refresh=True)
+def logout():
+    """
+    Revoca el token de refresco presentado.
+
+    Actividad 09, PR-01 (J. C. Pérez Nava): antes, cerrar sesión solo
+    limpiaba el almacén del dispositivo -- no existía ninguna llamada a un
+    endpoint de cierre de sesión ni lista de revocación en el servidor, de
+    modo que el token de refresco seguía siendo válido durante sus 90 días
+    completos después de que el usuario creía haber cerrado la sesión.
+    """
+    claims   = get_jwt()
+    jti      = claims.get("jti")
+    restante = claims["exp"] - int(datetime.now(timezone.utc).timestamp())
+    if restante > 0 and jti:
+        redis_cliente.setex(f"revocado:{jti}", restante, "1")
+
+    respuesta = jsonify({"msg": "Sesión cerrada"})
+    unset_jwt_cookies(respuesta)
+    return respuesta, 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

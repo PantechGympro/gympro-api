@@ -20,6 +20,30 @@ class Config:
     # rol y estado del usuario contra la base.
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=90)
 
+    # Lista de revocación (Actividad 09 — J. C. Pérez Nava): sin esto el
+    # token_in_blocklist_loader registrado en extensions.py queda definido
+    # pero nunca se consulta, y /api/auth/logout no tendría ningún efecto.
+    JWT_BLOCKLIST_ENABLED      = True
+    JWT_BLOCKLIST_TOKEN_CHECKS = ["access", "refresh"]
+
+    # Cookies de sesión para el portal web (Actividad 09, PR-01 — M. Arriaga
+    # Mora). El móvil sigue mandando el token por cabecera Authorization
+    # (headers va primero); el portal web puede además recibirlo en una
+    # cookie HttpOnly que JavaScript no puede leer, para que un script
+    # inyectado no pueda robar la sesión leyendo localStorage.
+    JWT_TOKEN_LOCATION      = ["headers", "cookies"]
+    JWT_COOKIE_SECURE       = os.getenv("FLASK_DEBUG", "0") != "1"  # True salvo en dev local sin TLS
+    JWT_COOKIE_SAMESITE     = "Lax"
+    JWT_ACCESS_COOKIE_PATH  = "/"
+    JWT_REFRESH_COOKIE_PATH = "/"
+    # CSRF de las cookies de JWT desactivado por ahora: todas las peticiones
+    # mutantes del portal son JSON vía fetch desde el mismo origen (no hay
+    # formularios cross-site), y la cookie ya lleva SameSite=Lax, que un
+    # navegador moderno no envía en una petición cross-site que no sea una
+    # navegación de nivel superior. Queda anotado como mejora pendiente si
+    # se necesita soportar un origen distinto para el frontend.
+    JWT_COOKIE_CSRF_PROTECT = False
+
     # DEBUG siempre False en producción; run.py lo sobreescribe en desarrollo.
     # Gunicorn ignora esta variable, pero la dejamos explícita como salvaguarda.
     DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
@@ -63,4 +87,22 @@ class Config:
 
     RATELIMIT_STORAGE_URI  = os.getenv("REDIS_URL", "redis://redis:6379/0")
     RATELIMIT_HEADERS_ENABLED = True   # Agrega X-RateLimit-* headers a las respuestas
-    RATELIMIT_SWALLOW_ERRORS  = True   # Fail open: si Redis cae, no bloquea requests
+
+    # Falla en CERRADO en producción (Actividad 09, PR-02 — M. Hernández
+    # Cervantes). Antes era True ("swallow") sin condición: si Redis dejaba
+    # de responder, el contador desaparecía por completo y /api/auth/login
+    # aceptaba intentos ilimitados sin que nada lo advirtiera. Se conserva
+    # el comportamiento permisivo SOLO en desarrollo (FLASK_DEBUG=1) para
+    # no entorpecer las pruebas del equipo cuando Redis no está levantado.
+    RATELIMIT_SWALLOW_ERRORS = os.getenv("FLASK_DEBUG", "0") == "1"
+
+    # Respaldo en memoria: si Redis no responde, cada worker de Gunicorn
+    # sigue contando por su cuenta. El límite global se degrada (deja de
+    # ser compartido entre workers) pero no desaparece.
+    RATELIMIT_IN_MEMORY_FALLBACK_ENABLED = True
+
+    # Hacer visible la caída del almacén de límites (ver Flask-Limiter):
+    # @limiter.request_filter / signal "flask_limiter.redis_unreachable"
+    # no existe como tal; el propio Flask-Limiter registra un logger.warning
+    # al caer al respaldo en memoria. Se deja documentado aquí porque es el
+    # punto que explica por qué los registros muestran esa advertencia.
