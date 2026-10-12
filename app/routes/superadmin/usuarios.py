@@ -16,6 +16,7 @@ from app.models.pg.usuario import Usuario
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.rol import Rol
 from app.utils.security import require_role
+from app.constants.roles import normalizar_rol
 
 usuarios_admin_bp = Blueprint("usuarios_admin", __name__)
 
@@ -54,7 +55,11 @@ def listar_usuarios():
     if gym_id_param is not None:
         query = query.filter(Usuario.id_gimnasio == gym_id_param)
     if rol_param:
-        query = query.filter(Rol.nombre == rol_param)
+        # Comparación normalizada (SCRUM-107): el filtro acepta el valor
+        # canónico exacto ("Entrenador", "owner_gym", ...) y también alias
+        # o variantes de mayúsculas, en vez de exigir una coincidencia
+        # exacta sensible a mayúsculas.
+        query = query.filter(db.func.lower(Rol.nombre) == normalizar_rol(rol_param).lower())
     if activo_param is not None:
         query = query.filter(Usuario.activo == (activo_param.lower() == "true"))
     if q_param:
