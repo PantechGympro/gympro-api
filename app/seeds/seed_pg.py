@@ -32,6 +32,8 @@ from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.models.pg.tipo_membresia      import TipoMembresia
 from app.models.pg.ejercicio           import Ejercicio
 from app.models.pg.tipo_clase          import TipoClase
+from app.models.pg.pasarela_pago       import ConfiguracionPasarela
+from app.utils.crypto                  import cifrar_dict, CryptoNoConfigurado
 from app.mongo import get_db
 
 RNG = random.Random(42)
@@ -652,7 +654,44 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
 
     print(f"  Miembros: {cfg['n_miembros']}  Entrenadores: {cfg['n_trainers']}  Staff: {cfg['n_staff']}")
     print(f"  TipoMem: {len(tm_map)}  Ejercicios: {len(cfg['ejercicios'])} x {len(trainers)} entrenadores  Clases: {len(cfg['clases'])}")
+
+    seed_pasarelas_gimnasio(gym)
+
     return gym, miembros_pg, tm_map, idx
+
+
+def seed_pasarelas_gimnasio(gym):
+    """SCRUM-205: sin esto, ningun gimnasio recien sembrado tiene pasarelas
+    activas y tanto la app como el portal web solo muestran "Efectivo" como
+    metodo de pago (el catalogo que exponen es correcto, pero esta vacio).
+    Se activan PayPal y Mercado Pago en modo sandbox con credenciales de
+    prueba para que el flujo de cobro en linea sea demostrable de inicio a
+    fin. Si PAYMENTS_ENCRYPTION_KEY no esta configurada en el entorno, se
+    omite con un aviso claro en vez de tumbar el resto del seed.
+    """
+    try:
+        credenciales_paypal = cifrar_dict({
+            "client_id":     "sb-sandbox-paypal-client-id",
+            "client_secret": "sb-sandbox-paypal-client-secret",
+        })
+        credenciales_mp = cifrar_dict({
+            "access_token": "TEST-sandbox-mercadopago-access-token",
+            "public_key":   "TEST-sandbox-mercadopago-public-key",
+        })
+    except CryptoNoConfigurado as e:
+        print(f"  [pasarelas] omitido: {e}")
+        return
+
+    db.session.add(ConfiguracionPasarela(
+        id_gimnasio=gym.id, proveedor="paypal", modo="sandbox", activo=True,
+        credenciales=credenciales_paypal, moneda="MXN", titular_cuenta=gym.nombre,
+    ))
+    db.session.add(ConfiguracionPasarela(
+        id_gimnasio=gym.id, proveedor="mercadopago", modo="sandbox", activo=True,
+        credenciales=credenciales_mp, moneda="MXN", titular_cuenta=gym.nombre,
+    ))
+    db.session.commit()
+    print("  Pasarelas: PayPal + Mercado Pago (sandbox, activas)")
 
 
 def seed_mongo_gym(gym, miembros_pg, tm_map, cfg):
