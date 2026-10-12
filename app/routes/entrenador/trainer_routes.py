@@ -1806,6 +1806,16 @@ def calcular_racha_dias(mdb, id_miembro):
             f_asist = asistencia.get("fecha")
             if isinstance(f_asist, datetime):
                 f_asist = f_asist.date()
+            elif isinstance(f_asist, str):
+                # Compatibilidad con asistencias sembradas antes de SCRUM-106,
+                # cuando seed_pg.py guardaba "fecha" como string en vez de
+                # datetime. Sin esto, la racha de cualquier miembro con
+                # historial antiguo quedaba siempre en 0 (string nunca es
+                # igual a un date por == , aunque la fecha sea la misma).
+                try:
+                    f_asist = datetime.strptime(f_asist[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
             if f_asist == fecha_actual or f_asist == fecha_actual - timedelta(days=racha):
                 racha += 1
                 fecha_actual = f_asist
