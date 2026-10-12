@@ -235,7 +235,7 @@ def get_trainer_clients():
             # por cliente en el frontend.
             ultimo_progreso = mdb.progreso_fisico.find_one(
                 {"id_miembro": miembro_id, "peso": {"$ne": None}},
-                {"peso": 1, "imc": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
+                {"peso": 1, "imc": 1, "bmi": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
                 sort=[("fecha_registro", -1)],
             ) or {}
 
@@ -257,7 +257,7 @@ def get_trainer_clients():
                 "sex":          r.get("sexo") or "",
                 "memberSince":  _iso(r.get("fecha_registro")),
                 "weight":       ultimo_progreso.get("peso"),
-                "bmi":          ultimo_progreso.get("imc"),
+                "bmi":          ultimo_progreso.get("imc") or ultimo_progreso.get("bmi"),
                 "bodyFat":      ultimo_progreso.get("grasa_corporal"),
                 "lastMeasured": _iso(ultimo_progreso.get("fecha_registro")),
                 "monthAttendance": r.get("asistencias_mes", 0),

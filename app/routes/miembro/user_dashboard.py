@@ -135,10 +135,14 @@ def register_progress():
         }
 
         estatura = float(miembro.get("estatura") or 0)
+        if estatura > 3:  # talla en cm en algunos registros antiguos
+            estatura = estatura / 100
         bmi      = data.get('bmi')
         if not bmi and estatura > 0 and nuevo_progreso["peso"]:
             bmi = round(nuevo_progreso["peso"] / (estatura ** 2), 2)
-        nuevo_progreso["bmi"] = float(bmi) if bmi else None
+        # Campo canónico "imc" (no "bmi"): es el que leen los modelos de IA y
+        # los reportes de entrenador/dueño.
+        nuevo_progreso["imc"] = float(bmi) if bmi else None
 
         result = mdb.progreso_fisico.insert_one(nuevo_progreso)
 
@@ -310,11 +314,13 @@ def complete_workout():
         progreso_registrado = False
         if peso_corporal and peso_corporal > 0:
             estatura = float(miembro.get("estatura") or 0)
-            bmi = round(peso_corporal / (estatura ** 2), 2) if estatura > 0 else None
+            if estatura > 3:
+                estatura = estatura / 100
+            imc = round(peso_corporal / (estatura ** 2), 2) if estatura > 0 else None
             nuevo_progreso = {
                 "id_miembro":     miembro["_id"],
                 "peso":           peso_corporal,
-                "bmi":            bmi,
+                "imc":            imc,
                 "fecha_registro": ahora,
                 "origen":         "entrenamiento",
             }

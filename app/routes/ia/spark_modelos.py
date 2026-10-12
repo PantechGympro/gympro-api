@@ -74,7 +74,7 @@ def _build_regresion(db, member_oids):
 
     registros = list(db.progreso_fisico.find(
         {"id_miembro": {"$in": member_oids}},
-        {"id_miembro": 1, "peso": 1, "imc": 1, "grasa_corporal": 1,
+        {"id_miembro": 1, "peso": 1, "imc": 1, "bmi": 1, "grasa_corporal": 1,
          "cintura": 1, "fecha_registro": 1},
     ))
     primer = {}
@@ -98,7 +98,7 @@ def _build_regresion(db, member_oids):
             "peso": peso, "dias": dias,
             "cintura": float(r.get("cintura") or 0) or None,
             "grasa":   float(r.get("grasa_corporal") or 0) or None,
-            "bmi":     float(r.get("imc") or 0) or None,
+            "bmi":     float(r.get("imc") or r.get("bmi") or 0) or None,
         })
     if len(filas) < 5:
         return None
@@ -333,7 +333,7 @@ def _multiclase_lab(db, miembros, member_oids):
         {"$match": {"id_miembro": {"$in": member_oids}}},
         {"$sort": {"fecha_registro": -1}},
         {"$group": {"_id": "$id_miembro",
-                    "imc": {"$first": "$imc"}, "grasa": {"$first": "$grasa_corporal"},
+                    "imc": {"$first": {"$ifNull": ["$imc", "$bmi"]}}, "grasa": {"$first": "$grasa_corporal"},
                     "musculo": {"$first": "$masa_muscular"}, "peso": {"$first": "$peso"}}}])}
 
     X, y = [], []

@@ -113,7 +113,7 @@ def _regresion_global(gym_id=None, trainer_id=None):
     # debajo del minimo en gimnasios donde la gente registra su peso al entrenar.
     registros = list(db.progreso_fisico.find(
         {"id_miembro": {"$in": member_oids}},
-        {"id_miembro": 1, "peso": 1, "imc": 1, "grasa_corporal": 1,
+        {"id_miembro": 1, "peso": 1, "imc": 1, "bmi": 1, "grasa_corporal": 1,
          "cintura": 1, "fecha_registro": 1},
     ))
 
@@ -159,7 +159,7 @@ def _regresion_global(gym_id=None, trainer_id=None):
         dias = max(0, (dt - primer_fecha[mid]).days)
         cintura = r.get("cintura")
         grasa   = r.get("grasa_corporal")
-        bmi     = r.get("imc")
+        bmi     = r.get("imc") or r.get("bmi")
         rows.append({
             "peso": peso, "dias": dias,
             "cintura": float(cintura) if cintura else None,
@@ -575,7 +575,7 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
     registros = list(
         db.progreso_fisico.find(
             {"id_miembro": oid},
-            {"peso": 1, "imc": 1, "grasa_corporal": 1, "cintura": 1, "fecha_registro": 1, "_id": 0},
+            {"peso": 1, "imc": 1, "bmi": 1, "grasa_corporal": 1, "cintura": 1, "fecha_registro": 1, "_id": 0},
         ).sort("fecha_registro", 1)
     )
 
@@ -605,7 +605,7 @@ def _predecir_con_coeficientes(id_miembro: str, dias_futuro: int,
     ultimo  = registros[-1]
     cintura = float(ultimo.get("cintura") or medias.get("cintura", 80.0))
     grasa   = float(ultimo.get("grasa_corporal") or medias.get("grasa", 22.0))
-    bmi     = float(ultimo.get("imc") or 25.0)
+    bmi     = float(ultimo.get("imc") or ultimo.get("bmi") or 25.0)
 
     coef = coeficientes
     peso_ultimo = float(historial[-1]["peso"])

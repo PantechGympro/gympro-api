@@ -236,12 +236,18 @@ def add_body_progress():
             if campo in data and data[campo]:
                 nuevo_progreso[campo] = float(data[campo])
                 
-        # Calcular BMI automáticamente
+        # Calcular IMC automáticamente. Se guarda bajo el campo canónico "imc"
+        # (no "bmi"): es el que leen los modelos de IA y los reportes de
+        # entrenador/dueño (spark_kmeans, spark_modelos, spark_regresion,
+        # trainer_routes). Guardarlo como "bmi" los deja sin este dato y el
+        # cálculo cae a un IMC recalculado con el peso inicial en vez del actual.
         estatura = float(miembro.get("estatura") or 0)
+        if estatura > 3:  # algunos registros antiguos guardan la talla en cm
+            estatura = estatura / 100
         bmi = None
         if estatura > 0 and nuevo_progreso["peso"]:
             bmi = round(_calcular_imc(nuevo_progreso["peso"], estatura), 2)
-            nuevo_progreso["bmi"] = bmi
+            nuevo_progreso["imc"] = bmi
             
         db.progreso_fisico.insert_one(nuevo_progreso)
 
@@ -337,7 +343,7 @@ def _append_historial_metricas(db, miembro, progreso):
             "timestamp":       progreso.get("fecha_registro") or datetime.now(),
             "genero":          sexo,
             "peso":            progreso.get("peso"),
-            "bmi":             progreso.get("bmi"),
+            "bmi":             progreso.get("imc"),
             "cintura":         progreso.get("cintura"),
             "cadera":          progreso.get("cadera"),
             "pecho":           progreso.get("pecho"),

@@ -99,7 +99,7 @@ def _ejecutar_kmeans(k: int = 3, max_iter: int = 300, seed: int = 42, gym_id=Non
         {"$group": {
             "_id":          "$id_miembro",
             "peso":         {"$first": "$peso"},
-            "bmi":          {"$first": "$imc"},
+            "bmi":          {"$first": {"$ifNull": ["$imc", "$bmi"]}},
             "grasa":        {"$first": "$grasa_corporal"},
             "musculo":      {"$first": "$masa_muscular"},
         }},
@@ -264,7 +264,7 @@ def _load_X(gym_id=None, trainer_id=None):
         {"$match": {"id_miembro": {"$in": oids}}},
         {"$sort": {"fecha_registro": -1}},
         {"$group": {"_id": "$id_miembro", "peso": {"$first": "$peso"},
-                    "bmi": {"$first": "$imc"}, "grasa": {"$first": "$grasa_corporal"},
+                    "bmi": {"$first": {"$ifNull": ["$imc", "$bmi"]}}, "grasa": {"$first": "$grasa_corporal"},
                     "musculo": {"$first": "$masa_muscular"}}}])}
     rows = []
     for m in miembros:

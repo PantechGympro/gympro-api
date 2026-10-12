@@ -212,9 +212,11 @@ def update_user_health():
             "fecha_registro": datetime.now()
         }
 
-        # IMC SIEMPRE CALCULADO CORRECTAMENTE
+        # IMC SIEMPRE CALCULADO CORRECTAMENTE. Se guarda como "imc" (no
+        # "bmi"): es el campo que leen los modelos de IA y los reportes de
+        # entrenador/dueño; guardarlo como "bmi" los deja sin este dato.
         if nuevo_progreso["peso"] and miembro.get("estatura"):
-            nuevo_progreso["bmi"] = _calcular_bmi(
+            nuevo_progreso["imc"] = _calcular_bmi(
                 nuevo_progreso["peso"],
                 miembro["estatura"]
             )
@@ -314,7 +316,7 @@ def _append_historial_metricas(db, miembro, progreso):
             "genero":        sexo,
             # Métricas numéricas — None si no fue registrado en esta sesión
             "peso":          progreso.get("peso"),
-            "bmi":           progreso.get("bmi"),
+            "bmi":           progreso.get("imc"),
             "cintura":       progreso.get("cintura"),
             "cadera":        progreso.get("cadera"),
             "pecho":         progreso.get("pecho"),
