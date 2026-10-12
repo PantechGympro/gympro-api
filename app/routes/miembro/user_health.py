@@ -162,6 +162,8 @@ def get_user_health():
         lesiones_raw = miembro.get("lesiones_previas", "")
         lesiones_list = [l.strip() for l in lesiones_raw.split(",") if l.strip()] if lesiones_raw else []
 
+        consentimiento_medico = miembro.get("consentimiento_datos_medicos") or {}
+
         return jsonify({
             "condiciones":          condiciones,
             "condicionesMedicas":   conds_medicas,
@@ -176,7 +178,12 @@ def get_user_health():
             "fuma":                 miembro.get("fuma", False),
             "alcohol":              miembro.get("alcohol", ""),
             "notas": (ultimo_progreso or {}).get("notas"),
-            "ultimaActualizacion": str_fecha
+            "ultimaActualizacion": str_fecha,
+            # SCRUM-102: el bloque médico del indicador de completitud los
+            # necesita de vuelta -- antes solo se escribían, nunca se leían.
+            "contactoEmergenciaNombre":    miembro.get("contacto_emergencia_nombre", ""),
+            "contactoEmergenciaTelefono":  miembro.get("contacto_emergencia_telefono", ""),
+            "consentimientoDatosMedicos":  bool(consentimiento_medico.get("aceptado")),
         }), 200
 
     except Exception as e:
@@ -262,6 +269,14 @@ def update_user_medical():
         alergias           : list[str] | str  -> miembro.alergias            (CSV)
         medicamentos       : list[str] | str  -> miembro.medicamentos        (CSV)
         lesiones           : list[str] | str  -> miembro.lesiones_previas     (CSV)
+        contactoEmergenciaNombre    : str      -> miembro.contacto_emergencia_nombre
+        contactoEmergenciaTelefono  : str      -> miembro.contacto_emergencia_telefono
+        consentimiento : bool (SCRUM-102, requerido para guardar lo anterior)
+            La información médica es dato sensible bajo la LFPDPPP: su captura
+            es opcional y requiere consentimiento explícito. Si se envía algún
+            dato médico (condicionesMedicas/alergias/medicamentos/lesiones/
+            contacto de emergencia) sin consentimiento=true, se rechaza con 400
+            en vez de guardarlo silenciosamente.
 
     Se guarda alergias/medicamentos/lesiones como texto separado por comas para
     ser consistente con el parseo del GET (que hace split por comas).
@@ -281,6 +296,15 @@ def update_user_medical():
                 return [str(x).strip() for x in v if str(x).strip()]
             return [s.strip() for s in str(v or "").split(",") if s.strip()]
 
+        CAMPOS_MEDICOS = ("condicionesMedicas", "alergias", "medicamentos", "lesiones",
+                          "contactoEmergenciaNombre", "contactoEmergenciaTelefono")
+        envia_dato_medico = any(campo in data for campo in CAMPOS_MEDICOS)
+        if envia_dato_medico and not data.get("consentimiento"):
+            return jsonify({
+                "error": "Se requiere tu consentimiento explícito para guardar información médica.",
+                "code": "CONSENTIMIENTO_REQUERIDO",
+            }), 400
+
         update = {}
         if "condicionesMedicas" in data:
             update["condiciones_medicas"] = _to_list(data["condicionesMedicas"])
@@ -290,6 +314,16 @@ def update_user_medical():
             update["medicamentos"] = ", ".join(_to_list(data["medicamentos"]))
         if "lesiones" in data:
             update["lesiones_previas"] = ", ".join(_to_list(data["lesiones"]))
+        if "contactoEmergenciaNombre" in data:
+            update["contacto_emergencia_nombre"] = data["contactoEmergenciaNombre"]
+        if "contactoEmergenciaTelefono" in data:
+            update["contacto_emergencia_telefono"] = data["contactoEmergenciaTelefono"]
+
+        if envia_dato_medico and data.get("consentimiento"):
+            update["consentimiento_datos_medicos"] = {
+                "aceptado": True,
+                "fecha": datetime.now(),
+            }
 
         if update:
             db.miembros.update_one({"_id": miembro["_id"]}, {"$set": update})

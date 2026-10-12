@@ -94,6 +94,129 @@ def get_user_profile():
             "fuma":                miembro.get("fuma", False),
             "alcohol":             miembro.get("alcohol", ""),
             "onboardingCompletado": miembro.get("onboarding_completado", False),
+            # SCRUM-102: se escribian desde complete-profile/PUT pero nunca se
+            # devolvian -- el indicador de completitud necesita leerlos de vuelta.
+            "contactoEmergenciaNombre":    miembro.get("contacto_emergencia_nombre", ""),
+            "contactoEmergenciaTelefono":  miembro.get("contacto_emergencia_telefono", ""),
+            "unidadMedida":                miembro.get("unidad_medida", ""),
+        }), 200
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@user_profile_bp.route('/api/user/profile-completion', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_profile_completion():
+    """
+    SCRUM-102: indicador de completitud de perfil.
+
+    El calculo vive UNA sola vez aqui; web y movil consumen este mismo
+    endpoint, asi que el porcentaje es idéntico en ambas plataformas por
+    construccion (no por disciplina de mantener dos copias sincronizadas).
+
+    El bloque de información médica es OPCIONAL -dato sensible bajo la
+    LFPDPPP, requiere consentimiento explicito antes de guardar (ver
+    PUT /api/user/health/medical)- y NO cuenta para el porcentaje: el
+    perfil puede llegar a 100% sin el.
+    """
+    try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        usuario = Usuario.query.get(user_pg_id)
+        miembro = mdb.miembros.find_one({
+            "id_usuario_pg":  user_pg_id,
+            "id_gimnasio_pg": gym_id,
+        })
+        if not usuario or not miembro:
+            return jsonify({"error": "Usuario/Miembro no encontrado"}), 404
+
+        progreso_actual = mdb.progreso_fisico.find_one(
+            {"id_miembro": miembro["_id"]}, sort=[("fecha_registro", -1)],
+        ) or {}
+        medidas_iniciales = miembro.get("medidas_iniciales") or {}
+
+        def _tiene_medida(campo):
+            """Misma estrategia de búsqueda que user_body_progress._get_medida:
+            campo directo del último registro > anidado en 'medidas' > inicial."""
+            return bool(
+                progreso_actual.get(campo)
+                or (progreso_actual.get("medidas") or {}).get(campo)
+                or medidas_iniciales.get(campo)
+            )
+
+        def _pend(campo, label):
+            return {"campo": campo, "label": label}
+
+        # ── Bloque 1: información personal ──────────────────────────────
+        p_personal = []
+        if not (usuario.nombre or "").strip():
+            p_personal.append(_pend("nombre", "Nombre completo"))
+        if not (miembro.get("telefono") or "").strip():
+            p_personal.append(_pend("telefono", "Teléfono"))
+        if not miembro.get("fecha_nacimiento"):
+            p_personal.append(_pend("fecha_nacimiento", "Fecha de nacimiento"))
+        if not miembro.get("foto_perfil"):
+            p_personal.append(_pend("foto", "Fotografía de perfil"))
+
+        # ── Bloque 2: métricas corporales ───────────────────────────────
+        p_metricas = []
+        if not (progreso_actual.get("peso") or miembro.get("peso_inicial")):
+            p_metricas.append(_pend("peso", "Peso"))
+        if not miembro.get("estatura"):
+            p_metricas.append(_pend("estatura", "Talla / estatura"))
+        if not (_tiene_medida("cintura") and _tiene_medida("cadera") and _tiene_medida("pecho")):
+            p_metricas.append(_pend("medidas", "Medidas corporales (cintura, cadera, pecho)"))
+
+        # ── Bloque 3: información médica (OPCIONAL, con consentimiento) ──
+        # El consentimiento es la puerta de TODO el bloque, no campo por
+        # campo: si no se ha otorgado, los tres pendientes aparecen juntos
+        # (coincide con que PUT /api/user/health/medical lo exige una sola
+        # vez, antes de guardar cualquier dato médico).
+        consentimiento = bool((miembro.get("consentimiento_datos_medicos") or {}).get("aceptado"))
+        p_medico = []
+        if not consentimiento:
+            p_medico = [
+                _pend("condiciones", "Condiciones médicas relevantes"),
+                _pend("lesiones", "Lesiones previas"),
+                _pend("contacto_emergencia", "Contacto de emergencia"),
+            ]
+
+        # ── Bloque 4: preferencias de entrenamiento ─────────────────────
+        p_prefs = []
+        if not (miembro.get("objetivo") or "").strip():
+            p_prefs.append(_pend("objetivo", "Objetivo de entrenamiento"))
+        if not (miembro.get("dias_disponibles") or ""):
+            p_prefs.append(_pend("disponibilidad", "Disponibilidad"))
+        if not (miembro.get("unidad_medida") or "").strip():
+            p_prefs.append(_pend("unidad_medida", "Unidad de medida"))
+
+        bloques = [
+            {"id": "personal", "nombre": "Información personal", "obligatorio": True,
+             "pendientes": p_personal},
+            {"id": "metricas", "nombre": "Métricas corporales", "obligatorio": True,
+             "pendientes": p_metricas},
+            {"id": "medico", "nombre": "Información médica (opcional)", "obligatorio": False,
+             "requiereConsentimiento": True, "consentimientoOtorgado": consentimiento,
+             "pendientes": p_medico},
+            {"id": "preferencias", "nombre": "Preferencias de entrenamiento", "obligatorio": True,
+             "pendientes": p_prefs},
+        ]
+
+        # Solo los bloques obligatorios entran al porcentaje (4 + 3 + 3
+        # campos): el médico puede quedar vacío y el perfil llega a 100%.
+        total_obligatorios      = 4 + 3 + 3
+        pendientes_obligatorios = len(p_personal) + len(p_metricas) + len(p_prefs)
+        porcentaje = round((total_obligatorios - pendientes_obligatorios) / total_obligatorios * 100)
+
+        return jsonify({
+            "porcentaje": porcentaje,
+            "completo":   pendientes_obligatorios == 0,
+            "bloques":    bloques,
         }), 200
 
     except Exception as e:
@@ -169,6 +292,17 @@ def update_user_profile():
             update_miembro['contacto_emergencia_nombre'] = data['contacto_emergencia_nombre']
         if data.get('contacto_emergencia_telefono'):
             update_miembro['contacto_emergencia_telefono'] = data['contacto_emergencia_telefono']
+        # Preferencia de unidad de medida (SCRUM-102): 'metrico' (kg/cm) o
+        # 'imperial' (lb/in). Es una eleccion explicita del miembro, por eso
+        # no se asume un valor por defecto en el calculo de completitud.
+        if data.get('unidadMedida'):
+            update_miembro['unidad_medida'] = data['unidadMedida']
+        # Disponibilidad (SCRUM-102): antes solo se podia fijar una vez, en
+        # el wizard de complete-profile (ver mas abajo). El indicador de
+        # completitud exige poder resolver este pendiente sin repetir el
+        # onboarding completo.
+        if data.get('diasDisponibles'):
+            update_miembro['dias_disponibles'] = data['diasDisponibles']
         # Desnormalizar nombre en Mongo también
         if data.get('nombre'):
             update_miembro['nombre'] = data['nombre']
