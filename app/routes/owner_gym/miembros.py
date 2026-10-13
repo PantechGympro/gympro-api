@@ -9,6 +9,7 @@ from app.models.user import User
 from app.models.miembro import Miembro
 from app.utils.tenant import get_tenant_filter, require_tenant
 from app.utils.alcance import crear_asignacion
+from app.utils.busqueda import patron_insensible
 # PG — fuente de verdad desde Sprint 2
 from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario as UsuarioPG
@@ -47,10 +48,16 @@ def listar_miembros():
     }
 
     if search:
-        regex = re.compile(re.escape(search), re.IGNORECASE)
+        # SCRUM-105: el nombre se compara ignorando mayúsculas/acentos
+        # (patron_insensible, única fuente de esa lógica -- ver
+        # utils/busqueda.py; MongoDB no tiene un equivalente a unaccent,
+        # por eso el patrón se construye en Python en vez de delegarlo a
+        # la base). El email queda fuera de alcance a propósito
+        # (identificador técnico) y se sigue comparando tal cual.
+        regex_email = re.compile(re.escape(search), re.IGNORECASE)
         filtro_miembros["$or"] = [
-            {"nombre": regex},
-            {"email":  regex},
+            {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
+            {"email":  regex_email},
         ]
 
     skip            = (page - 1) * per_page

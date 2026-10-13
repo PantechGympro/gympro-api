@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request, g, current_app
+from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from bson.objectid import ObjectId
 from datetime import datetime, date, timedelta, timezone
@@ -9,7 +9,7 @@ from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario
 from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
-from app.extensions import limiter
+from app.utils.busqueda import normalizar_columna, patron_insensible
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
 
@@ -235,7 +235,7 @@ def get_trainer_clients():
             # por cliente en el frontend.
             ultimo_progreso = mdb.progreso_fisico.find_one(
                 {"id_miembro": miembro_id, "peso": {"$ne": None}},
-                {"peso": 1, "imc": 1, "bmi": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
+                {"peso": 1, "imc": 1, "grasa_corporal": 1, "fecha_registro": 1, "_id": 0},
                 sort=[("fecha_registro", -1)],
             ) or {}
 
@@ -257,7 +257,7 @@ def get_trainer_clients():
                 "sex":          r.get("sexo") or "",
                 "memberSince":  _iso(r.get("fecha_registro")),
                 "weight":       ultimo_progreso.get("peso"),
-                "bmi":          ultimo_progreso.get("imc") or ultimo_progreso.get("bmi"),
+                "bmi":          ultimo_progreso.get("imc"),
                 "bodyFat":      ultimo_progreso.get("grasa_corporal"),
                 "lastMeasured": _iso(ultimo_progreso.get("fecha_registro")),
                 "monthAttendance": r.get("asistencias_mes", 0),
@@ -912,7 +912,9 @@ def get_routines():
 
         query = {"id_entrenador_pg": trainer_id}
         if category != 'all': query["categoria"] = category
-        if search:            query["nombre"]    = {"$regex": search, "$options": "i"}
+        # SCRUM-105: insensible a mayúsculas/acentos (patron_insensible,
+        # única fuente de esa lógica -- ver utils/busqueda.py).
+        if search:            query["nombre"]    = {"$regex": patron_insensible(search), "$options": "i"}
 
         routines = list(mdb.rutinas.find(query).sort("fecha_actualizacion", -1))
         result   = []
@@ -1405,7 +1407,9 @@ def get_exercises():
     if not incluir_inactivos:
         q = q.filter_by(activo=True)
     if search:
-        q = q.filter(Ejercicio.nombre.ilike(f'%{search}%'))
+        # SCRUM-105: insensible a mayúsculas/acentos (normalizar_columna,
+        # única fuente de esa lógica -- ver utils/busqueda.py).
+        q = q.filter(normalizar_columna(Ejercicio.nombre).ilike(normalizar_columna(f'%{search}%')))
     if grupo:
         q = q.filter_by(grupo_muscular=grupo)
 
@@ -1806,16 +1810,6 @@ def calcular_racha_dias(mdb, id_miembro):
             f_asist = asistencia.get("fecha")
             if isinstance(f_asist, datetime):
                 f_asist = f_asist.date()
-            elif isinstance(f_asist, str):
-                # Compatibilidad con asistencias sembradas antes de SCRUM-106,
-                # cuando seed_pg.py guardaba "fecha" como string en vez de
-                # datetime. Sin esto, la racha de cualquier miembro con
-                # historial antiguo quedaba siempre en 0 (string nunca es
-                # igual a un date por == , aunque la fecha sea la misma).
-                try:
-                    f_asist = datetime.strptime(f_asist[:10], "%Y-%m-%d").date()
-                except ValueError:
-                    continue
             if f_asist == fecha_actual or f_asist == fecha_actual - timedelta(days=racha):
                 racha += 1
                 fecha_actual = f_asist
@@ -2160,6 +2154,58 @@ def _format_fecha(ts):
 #    Retorna  — JSON para previsualizar y confirmar antes de guardar
 # ═════════════════════════════════════════════════════════════════════════════
 
+_ROUTINE_ETL_PROMPT = """
+Eres un experto en entrenamiento físico y planificación de rutinas de gimnasio.
+Tu tarea es extraer la información del documento y devolver ÚNICAMENTE un objeto JSON
+válido, sin explicaciones, sin markdown, sin texto extra.
+
+La estructura JSON que debes devolver es exactamente:
+{
+  "rutinas": [
+    {
+      "name": "nombre de la rutina",
+      "category": "Fuerza|Hipertrofia|Cardio|Funcional|Movilidad|General",
+      "difficulty": "Principiante|Intermedio|Avanzado",
+      "duration_minutes": <número entero o 60>,
+      "description": "descripción breve de la rutina",
+      "days": [
+        {
+          "day": "Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo",
+          "muscleGroup": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Full Body|Cardio",
+          "exercises": [
+            {
+              "name": "nombre del ejercicio",
+              "sets": "3",
+              "reps": "12",
+              "peso": "descripción del peso o intensidad",
+              "notes": "notas técnicas o de ejecución"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "ejercicios": [
+    {
+      "nombre": "nombre del ejercicio",
+      "grupo_muscular": "Pecho|Espalda|Piernas|Hombros|Bíceps|Tríceps|Abdomen|Glúteos|Cuádriceps|Isquiotibiales|Full Body",
+      "tipo": "Fuerza|Cardio|Flexibilidad|Funcional|Potencia",
+      "series": <número entero o null>,
+      "repeticiones": "descripción de repeticiones",
+      "descripcion": "descripción o instrucciones del ejercicio"
+    }
+  ]
+}
+
+Reglas importantes:
+- Extrae TODAS las rutinas y días que encuentres en el documento
+- Si no hay estructura de días, agrupa los ejercicios en un solo día "Lunes"
+- Para ejercicios sin número de series usa 3 como default
+- Para ejercicios sin repeticiones usa "12" como default
+- El array "ejercicios" debe contener ejercicios únicos del documento para la biblioteca
+- Si no encuentras rutinas estructuradas, devuelve "rutinas": []
+- Si no encuentras ejercicios individuales, devuelve "ejercicios": []
+- RESPONDE SOLO CON EL JSON, nada más"""
 
 
 @trainer_bp.route("/routines/ai-status", methods=["GET"])
@@ -2176,102 +2222,163 @@ def routine_ai_status():
 @require_tenant
 def import_routines_ai():
     """
-    Encola el ETL de importacion de rutinas como job en background y
-    responde de inmediato (202) con un job_id.
+    ETL híbrido para importar rutinas desde PDF o Excel.
 
-    Antes este endpoint corria el ETL completo (parser deterministico +
-    fallback Ollama, hasta 8 bloques) de forma sincrona dentro del propio
-    request -- si Ollama no alcanzaba a responder en el timeout configurado,
-    el request entero tronaba con un ReadTimeout (ver SCRUM-203 y su
-    seguimiento). Ahora el trabajo real vive en utils/ia_jobs.py y corre en
-    un hilo de background: el entrenador no se queda bloqueado esperando y
-    puede seguir usando el resto del sistema mientras se procesa.
+    Estrategia en dos pasos:
+      1. Parser determinístico — reconoce el formato "Sesión N: Título ⏱ X min"
+         con tabla de ejercicios. Instantáneo, sin dependencias externas.
+      2. Fallback Ollama — si el PDF no sigue la estructura reconocida,
+         se envía al LLM local para extracción flexible.
 
-    El resultado se consulta con GET /routines/import-ai/jobs/<job_id>.
+    El entrenador puede subir:
+      - El historial de entrenamiento de un cliente de otro gimnasio/app
+      - Su propia biblioteca de rutinas en cualquier formato
     """
-    from app.utils.ia_jobs import create_job, start_routines_import_job  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    try:
+        from app.utils.etl_ollama import (  # noqa: PLC0415
+            extract_text, parse_routines_from_text, check_ollama_ready, call_ollama,
+            chunk_text, parse_llm_json,
+        )
 
-    archivo = request.files.get("archivo")
-    if not archivo:
-        return jsonify({"error": "No se recibió archivo"}), 400
+        archivo = request.files.get("archivo")
+        if not archivo:
+            return jsonify({"error": "No se recibió archivo"}), 400
 
-    nombre_archivo = archivo.filename or ""
-    ext = nombre_archivo.rsplit(".", 1)[-1].lower()
-    if ext not in {"pdf", "xlsx", "xls"}:
+        nombre_archivo = archivo.filename or ""
+        ext = nombre_archivo.rsplit(".", 1)[-1].lower()
+        if ext not in {"pdf", "xlsx", "xls"}:
+            return jsonify({
+                "error": "Formato no soportado",
+                "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
+            }), 400
+
+        # ── Extract ──────────────────────────────────────────────────────────
+        try:
+            contenido = archivo.read()
+            raw_text  = extract_text(contenido, ext)
+        except Exception as e:
+            return jsonify({"error": f"Error leyendo el archivo: {e}"}), 400
+
+        if not raw_text.strip():
+            return jsonify({
+                "error": "El archivo no contiene texto extraíble",
+                "detalle": "Asegúrate de que el PDF no sea una imagen escaneada.",
+            }), 422
+
+        # ── Transform: parser determinístico (rápido, sin LLM) ───────────────
+        resultado = parse_routines_from_text(raw_text)
+        aviso_truncado: str | None = None
+
+        if resultado is None:
+            # ── Fallback: LLM local (Ollama), por bloques ────────────────────
+            # Antes se cortaba el documento a 4.000 caracteres y se perdían
+            # ejercicios en silencio. Ahora se trocea y se procesa cada bloque,
+            # fusionando los resultados (la deduplicación posterior limpia los
+            # ejercicios repetidos entre bloques).
+            ready, msg = check_ollama_ready()
+            if not ready:
+                return jsonify({"error": "Servicio de IA no disponible", "detalle": msg}), 503
+
+            bloques, truncado = chunk_text(raw_text)
+            combinado: dict = {"rutinas": [], "ejercicios": []}
+            for bloque in bloques:
+                try:
+                    parsed = parse_llm_json(call_ollama(_ROUTINE_ETL_PROMPT, bloque))
+                except Exception:
+                    print(traceback.format_exc())
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                combinado["rutinas"].extend(parsed.get("rutinas") or [])
+                combinado["ejercicios"].extend(parsed.get("ejercicios") or [])
+
+            if not combinado["rutinas"] and not combinado["ejercicios"]:
+                return jsonify({
+                    "error": "La IA no pudo estructurar el documento",
+                    "detalle": (
+                        "El archivo tiene un formato no reconocido. "
+                        "Prueba con un PDF con texto seleccionable o un Excel bien estructurado."
+                    ),
+                }), 422
+
+            resultado = combinado
+            if truncado:
+                aviso_truncado = (
+                    "El documento es muy largo: se procesó solo la primera parte. "
+                    "Para no perder ejercicios, divídelo en archivos más pequeños."
+                )
+
+        rutinas    = resultado.get("rutinas",   [])
+        ejercicios = resultado.get("ejercicios", [])
+
+        # ── Deduplicación contra la biblioteca del entrenador ────────────────
+        # Omite ejercicios que ya existen (por entrenador) y los repetidos dentro
+        # del mismo archivo; complementa los días de rutina con datos almacenados.
+        from app.utils.rutina_helpers import (  # noqa: PLC0415
+            dedupe_ejercicios, normalizar_nombre,
+        )
+        trainer_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+        existentes = {
+            normalizar_nombre(e.nombre): {
+                "series":         e.series,
+                "repeticiones":   e.repeticiones,
+                "grupo_muscular": e.grupo_muscular,
+                "tipo":           e.tipo,
+                "activo":         e.activo,
+            }
+            for e in Ejercicio.query.filter_by(
+                id_gimnasio=gym_id, id_entrenador=trainer_id
+            ).all()
+        }
+        dedup = dedupe_ejercicios(ejercicios, rutinas, existentes)
+        ejercicios = dedup["nuevos"]          # solo los que realmente se agregarán
+
+        # ── Avisos legibles para el usuario ──────────────────────────────────
+        avisos: list[str] = []
+        if aviso_truncado:
+            avisos.append(aviso_truncado)
+        if dedup["omitidos"]:
+            muestra = ", ".join(dedup["omitidos"][:5])
+            extra   = f" y {len(dedup['omitidos']) - 5} más" if len(dedup["omitidos"]) > 5 else ""
+            avisos.append(
+                f"{len(dedup['omitidos'])} ejercicio(s) ya existían en tu biblioteca "
+                f"y se omitieron: {muestra}{extra}. Se reutilizarán los ya guardados."
+            )
+        if dedup.get("reactivar"):
+            muestra = ", ".join(dedup["reactivar"][:5])
+            extra   = f" y {len(dedup['reactivar']) - 5} más" if len(dedup["reactivar"]) > 5 else ""
+            avisos.append(
+                f"{len(dedup['reactivar'])} ejercicio(s) que habías eliminado se "
+                f"reactivarán al importar: {muestra}{extra}."
+            )
+        if dedup["duplicados_archivo"]:
+            avisos.append(
+                f"{dedup['duplicados_archivo']} ejercicio(s) venían repetidos dentro "
+                f"del archivo y se consolidaron en uno solo."
+            )
+        if dedup["nuevos"]:
+            avisos.append(f"{len(dedup['nuevos'])} ejercicio(s) nuevo(s) se agregarán a tu biblioteca.")
+
         return jsonify({
-            "error": "Formato no soportado",
-            "detalle": "Usa un archivo PDF (.pdf) o Excel (.xlsx / .xls)",
-        }), 400
+            "success":            True,
+            "rutinas":            rutinas,
+            "ejercicios":         ejercicios,            # nuevos (deduplicados)
+            "ejercicios_omitidos": dedup["omitidos"],    # ya existían → reutilizar
+            "avisos":             avisos,
+            "archivo":            nombre_archivo,
+            "resumen": {
+                "total_rutinas":         len(rutinas),
+                "ejercicios_nuevos":     len(dedup["nuevos"]),
+                "ejercicios_omitidos":   len(dedup["omitidos"]),
+                "ejercicios_reactivados": len(dedup.get("reactivar", [])),
+                "duplicados_archivo":    dedup["duplicados_archivo"],
+                "total_dias": sum(len(r.get("days", [])) for r in rutinas),
+            },
+        }), 200
 
-    # Leer el archivo AHORA -- el stream de request.files deja de ser válido
-    # en cuanto termina este request, y el ETL real corre después, en el hilo.
-    contenido = archivo.read()
-
-    trainer_id = int(get_jwt_identity())
-    gym_id     = g.tenant_id
-
-    job_id = create_job(
-        tipo="rutinas", id_gimnasio=gym_id, id_entrenador=trainer_id,
-        archivo=nombre_archivo,
-    )
-    start_routines_import_job(
-        current_app._get_current_object(),
-        job_id=job_id, contenido=contenido, ext=ext, nombre_archivo=nombre_archivo,
-        id_gimnasio=gym_id, id_entrenador=trainer_id,
-    )
-
-    return jsonify({
-        "success": True,
-        "job_id":  job_id,
-        "estado":  "procesando",
-    }), 202
-
-
-@trainer_bp.route("/routines/import-ai/jobs/<job_id>", methods=["GET"])
-@jwt_required()
-@require_tenant
-# El límite global por defecto (300/día, 60/hora -- ver app/extensions.py) se
-# agota en ~4 minutos con el polling cada 4s del frontend (useRoutineImportJob.js)
-# y deja al entrenador recibiendo 429 en vez del resultado real, aunque el job
-# ya haya terminado. override_defaults=True reemplaza el límite global SOLO en
-# esta ruta -- 120/min da más de 8x margen sobre el ritmo real de polling.
-@limiter.limit("120 per minute", override_defaults=True)
-def routine_import_job_status(job_id: str):
-    """Consulta el estado de un job de importacion de rutinas (polling)."""
-    from app.utils.ia_jobs import get_job  # noqa: PLC0415
-
-    trainer_id = int(get_jwt_identity())
-    gym_id     = g.tenant_id
-
-    job = get_job(job_id, id_gimnasio=gym_id, id_entrenador=trainer_id)
-    if not job:
-        return jsonify({"error": "Job no encontrado"}), 404
-    return jsonify(job), 200
-
-
-@trainer_bp.route("/routines/import-ai/jobs/<job_id>/cancel", methods=["POST"])
-@jwt_required()
-@require_tenant
-def routine_import_job_cancel(job_id: str):
-    """
-    Cancela (desde la UI) un job de importación de rutinas que quedó
-    procesando indefinidamente -- por ejemplo, tras reiniciar los
-    contenedores mientras corría. No mata el hilo de background en sí (no
-    hay forma segura de interrumpirlo a mitad de una llamada HTTP), pero
-    marca el job para que deje de reportarse como "procesando" y _set_job()
-    ya no lo sobreescriba si el hilo llega a terminar después.
-    """
-    from app.utils.ia_jobs import cancel_job  # noqa: PLC0415
-
-    trainer_id = int(get_jwt_identity())
-    gym_id     = g.tenant_id
-
-    ok = cancel_job(job_id, id_gimnasio=gym_id, id_entrenador=trainer_id)
-    if not ok:
-        # No existía, no era de este entrenador, o ya no estaba "procesando"
-        # (ya terminó/erroró/se canceló antes) -- no es un error real para la
-        # UI: de cualquier forma el resultado deseado (dejar de mostrarlo
-        # como pendiente) ya se cumple del lado del cliente.
-        return jsonify({"success": False, "detalle": "El job ya no estaba en curso"}), 200
-    return jsonify({"success": True}), 200
-
+    except Exception as e:
+        # Cualquier error inesperado del ETL termina aquí (log + 500 controlado)
+        print(traceback.format_exc())
+        return jsonify({"error": f"Error en el proceso de IA: {e}"}), 500
