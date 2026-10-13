@@ -28,6 +28,7 @@ from app.models.pg.plan_suscripcion    import PlanSuscripcion
 from app.models.pg.suscripcion         import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.gym_types               import GYM_TYPES, get_gym_type_config, seed_default_memberships
+from app.utils.alcance                 import crear_organizacion_para_gimnasio, crear_asignacion
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,11 @@ def register_gym():
         db.session.add(nuevo_gym)
         db.session.flush()  # obtener nuevo_gym.id
 
+        # 1b. Organización 1:1 del gimnasio nuevo (HU-41 / SCRUM-212).
+        # gimnasios.id_organizacion es NOT NULL, así que esto es obligatorio
+        # aquí -- no cambia ningún comportamiento visible todavía.
+        crear_organizacion_para_gimnasio(nuevo_gym)
+
         # 2. Crear Usuario administrador (primer_login=True para forzar onboarding)
         nuevo_admin = Usuario(
             nombre       = adm_nombre,
@@ -225,6 +231,9 @@ def register_gym():
         nuevo_admin.set_password(adm_pass)
         db.session.add(nuevo_admin)
         db.session.flush()
+
+        # 2b. Asignación de alcance del administrador (HU-41 / SCRUM-212).
+        crear_asignacion(nuevo_admin, gimnasio=nuevo_gym)
 
         # 3. Crear Suscripcion trialing
         suscripcion = Suscripcion(

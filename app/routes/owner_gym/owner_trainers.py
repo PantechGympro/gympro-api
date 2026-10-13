@@ -17,6 +17,7 @@ from app.models.pg.rol        import Rol
 from app.models.pg.gimnasio   import Gimnasio
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
+from app.utils.alcance import crear_asignacion
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
@@ -143,6 +144,12 @@ def crear_staff():
     )
     nuevo.set_password(password)
     db.session.add(nuevo)
+    db.session.flush()
+
+    # Asignación de alcance del nuevo staff (HU-41 / SCRUM-212) -- no
+    # cambia nada del comportamiento actual de este endpoint.
+    crear_asignacion(nuevo)
+
     db.session.commit()
 
     return jsonify({"msg": "Usuario creado", **nuevo.to_dict()}), 201

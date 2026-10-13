@@ -10,6 +10,13 @@ Planes:
   basico      → hasta 50 miembros activos
   pro         → hasta 200 miembros + analytics
   enterprise  → ilimitado + SLA + soporte dedicado
+
+HU-41 (SCRUM-212): todo Gimnasio pertenece a una Organizacion
+(id_organizacion, NOT NULL). Hoy esa relación es 1:1 -- cada gimnasio
+existente recibió su propia Organizacion vía la migración 017 -- pero el
+campo ya admite que una Organizacion agrupe varias sucursales cuando
+HU-42 habilite ese flujo. es_sucursal_principal marca cuál de las
+sucursales de una organización es la "sede" cuando hay más de una.
 """
 import enum
 from datetime import datetime, timezone
@@ -56,6 +63,18 @@ class Gimnasio(db.Model):
         nullable=False,
     )
 
+    # FK hacia Organizacion (organizaciones.id) — HU-41 / SCRUM-212.
+    # NOT NULL: la migración 017 garantiza que todo gimnasio existente
+    # quede con una organización antes de aplicar la restricción.
+    id_organizacion = db.Column(
+        db.Integer, db.ForeignKey("organizaciones.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    organizacion    = db.relationship("Organizacion", back_populates="gimnasios")
+
+    # True si esta sucursal es la "sede principal" de su organización.
+    # Hoy, con la relación 1:1, toda sucursal existente es su propia sede.
+    es_sucursal_principal = db.Column(db.Boolean, default=True, nullable=False, server_default="true")
+
     # Relación inversa: gimnasio.usuarios → lista de usuarios del gimnasio
     usuarios = db.relationship("Usuario", back_populates="gimnasio", lazy="dynamic")
 
@@ -64,15 +83,17 @@ class Gimnasio(db.Model):
 
     def to_dict(self):
         return {
-            "id":             self.id,
-            "nombre":         self.nombre,
-            "plan":           self.plan.value if hasattr(self.plan, "value") else self.plan,
-            "activo":         self.activo,
-            "email_contacto": self.email_contacto,
-            "telefono":       self.telefono,
-            "tipo_gimnasio":  self.tipo_gimnasio,
+            "id":                    self.id,
+            "nombre":                self.nombre,
+            "plan":                  self.plan.value if hasattr(self.plan, "value") else self.plan,
+            "activo":                self.activo,
+            "email_contacto":        self.email_contacto,
+            "telefono":              self.telefono,
+            "tipo_gimnasio":         self.tipo_gimnasio,
             # Solo se expone si es una data URL válida
-            "logo":           self.logo if (self.logo or "").startswith("data:image") else None,
-            "configuracion":  self.configuracion or {},
-            "created_at":     self.created_at.isoformat() if self.created_at else None,
+            "logo":                  self.logo if (self.logo or "").startswith("data:image") else None,
+            "configuracion":         self.configuracion or {},
+            "id_organizacion":       self.id_organizacion,
+            "es_sucursal_principal": self.es_sucursal_principal,
+            "created_at":            self.created_at.isoformat() if self.created_at else None,
         }

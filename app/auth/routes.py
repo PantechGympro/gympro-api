@@ -22,6 +22,7 @@ import uuid
 from app.extensions import db, limiter, mail, redis_cliente
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
+from app.utils.alcance     import crear_asignacion
 
 # ── Modelos Mongo (fallback legacy — se eliminarán en Sprint 3) ───────────────
 from app.mongo import get_db
@@ -55,6 +56,12 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
                 "perfil_completo": True,
                 "peso_inicial": None,
                 "fuente":       "pg",
+                # HU-41 (SCRUM-212): claims adicionales de alcance. superadmin
+                # opera a nivel de plataforma -- sin organización ni sucursales.
+                # Aditivos: nada lee todavía estos dos campos para decidir
+                # permisos (eso es HU-42), así que no cambian ningún comportamiento.
+                "id_organizacion": None,
+                "sucursales":      [],
             },
             "user_response": {
                 "id":           str(usuario.id),
@@ -108,6 +115,13 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
             "fuente":          "pg",
+            # HU-41 (SCRUM-212): claims adicionales de alcance -- aditivos,
+            # nada los lee todavía para decidir permisos (eso es HU-42), así
+            # que no cambian ningún comportamiento. "sucursales" ya se
+            # expone como lista para no romper el contrato cuando HU-42
+            # habilite más de una sucursal por usuario.
+            "id_organizacion": usuario.gimnasio.id_organizacion if usuario.gimnasio else None,
+            "sucursales":      [usuario.id_gimnasio] if usuario.id_gimnasio else [],
         },
         "user_response": {
             "id":              str(usuario.id),
@@ -467,6 +481,13 @@ def register():
         )
         nuevo.set_password(data["password"])
         db.session.add(nuevo)
+        db.session.flush()
+
+        # Asignación de alcance del usuario (HU-41 / SCRUM-212) -- si no
+        # se especificó id_gimnasio, queda sin organización ni sucursal,
+        # igual que hoy queda sin gimnasio asignado.
+        crear_asignacion(nuevo)
+
         db.session.commit()
 
         return jsonify({"msg": "Usuario registrado exitosamente", "id": nuevo.id}), 201

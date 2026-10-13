@@ -20,8 +20,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from app.extensions import db
 from app.models.pg.rol                 import Rol                # noqa: F401
+from app.models.pg.organizacion        import Organizacion       # noqa: F401
 from app.models.pg.gimnasio            import Gimnasio           # noqa: F401
 from app.models.pg.usuario             import Usuario            # noqa: F401
+from app.models.pg.asignacion_usuario  import AsignacionUsuario  # noqa: F401
 from app.models.pg.plan_suscripcion    import PlanSuscripcion    # noqa: F401
 from app.models.pg.suscripcion         import Suscripcion        # noqa: F401
 from app.models.pg.factura_suscripcion import FacturaSuscripcion # noqa: F401

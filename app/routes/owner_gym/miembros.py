@@ -8,6 +8,7 @@ from app.mongo import get_db
 from app.models.user import User
 from app.models.miembro import Miembro
 from app.utils.tenant import get_tenant_filter, require_tenant
+from app.utils.alcance import crear_asignacion
 # PG — fuente de verdad desde Sprint 2
 from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario as UsuarioPG
@@ -106,6 +107,12 @@ def crear_miembro():
         pg_usuario.set_password(password if password else "gym123")
         pg_db.session.add(pg_usuario)
         pg_db.session.flush()
+
+        # 1b. Asignación de alcance del miembro (HU-41 / SCRUM-212). El
+        # gimnasio ya existe (es el tenant del token) -- crear_asignacion
+        # resuelve su organización con una consulta, sin cambiar nada del
+        # comportamiento actual de este endpoint.
+        crear_asignacion(pg_usuario)
 
         # 2. Foto: base64 almacenada directamente en MongoDB (sin filesystem)
         foto_perfil = _valid_foto(data.get("foto_base64"))

@@ -91,6 +91,7 @@ from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.models.pg.ejercicio import Ejercicio
 from app.mongo import get_db
+from app.utils.alcance import crear_organizacion_para_gimnasio
 
 RNG = random.Random(2026)
 
@@ -245,6 +246,12 @@ def get_or_create_gimnasio(gym_id):
                    email_contacto="contacto@vitazone.mx", telefono="+52-728-200-0004",
                    activo=True)
     db.session.add(gym)
+    db.session.flush()
+    # HU-41 (SCRUM-212): gimnasios.id_organizacion es NOT NULL -- antes se
+    # podía hacer commit directo sin flush porque nada más dependía del id
+    # todavía; ahora hace falta el flush para poder crear la Organizacion
+    # 1:1 antes del commit.
+    crear_organizacion_para_gimnasio(gym)
     db.session.commit()
     if gym.id != gym_id:
         print(f"  AVISO: el gimnasio nuevo quedo con id #{gym.id}, no #{gym_id} "

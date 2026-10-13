@@ -33,6 +33,7 @@ from app.models.pg.tipo_membresia      import TipoMembresia
 from app.models.pg.ejercicio           import Ejercicio
 from app.models.pg.tipo_clase          import TipoClase
 from app.models.pg.pasarela_pago       import ConfiguracionPasarela
+from app.utils.alcance                 import crear_organizacion_para_gimnasio
 from app.utils.crypto                  import cifrar_dict, CryptoNoConfigurado
 from app.mongo import get_db
 
@@ -564,6 +565,13 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
                    telefono=cfg["telefono"], activo=True)
     db.session.add(gym)
     db.session.flush()
+
+    # HU-41 (SCRUM-212): gimnasios.id_organizacion es NOT NULL -- toda
+    # creación de Gimnasio necesita su Organizacion 1:1, incluida en seeds.
+    # No se wire-ea crear_asignacion() en los usuarios de este seed (ver
+    # bitácora técnica): nada lee asignacion_usuario para permisos todavía
+    # y los seeds son solo datos de desarrollo/demo.
+    crear_organizacion_para_gimnasio(gym)
 
     ahora = datetime.now(timezone.utc)
     plan  = planes_map[cfg["plan"]]

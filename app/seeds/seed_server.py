@@ -63,6 +63,7 @@ from app.models.pg.tipo_membresia      import TipoMembresia
 from app.models.pg.ejercicio           import Ejercicio
 from app.models.pg.tipo_clase          import TipoClase
 from app.extensions import db
+from app.utils.alcance import crear_organizacion_para_gimnasio
 
 # Los únicos 3 gimnasios de seed_pg.py que ya traen exactamente 5 membresías
 # configuradas (requisito explícito de esta historia).
@@ -238,6 +239,11 @@ def seed_gimnasio_servidor(cfg, roles, planes_map, idx_start):
                    telefono=cfg["telefono"], activo=True)
     db.session.add(gym)
     db.session.flush()
+
+    # HU-41 (SCRUM-212): ver seed_pg.seed_gimnasio() -- misma obligación
+    # (id_organizacion NOT NULL) y misma decisión de no wire-ear
+    # crear_asignacion() para los usuarios de este seed.
+    crear_organizacion_para_gimnasio(gym)
 
     ahora = datetime.now(timezone.utc)
     plan  = planes_map[cfg["plan"]]
