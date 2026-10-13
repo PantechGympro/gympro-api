@@ -7,6 +7,7 @@ from app.mongo import get_db
 from app.models.pg.usuario import Usuario
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
+from app.utils.sync import resolver_capturado_en
 
 user_dashboard_bp = Blueprint('user_dashboard', __name__)
 
@@ -126,12 +127,16 @@ def register_progress():
         if not miembro:
             return jsonify({"error": "Miembro no encontrado"}), 404
 
+        # SCRUM-168 / HU-30: si la app móvil encoló esta medición sin conexión,
+        # `_capturado_en` trae la hora real en que el socio la registró en el
+        # dispositivo — se usa esa en vez de "ahora" para que el historial
+        # quede ordenado por cuándo pasó, no por cuándo se sincronizó.
         nuevo_progreso = {
             "id_miembro":    miembro["_id"],
             "peso":          float(data.get('peso', 0)),
             "cintura":       float(data['cintura'])  if data.get('cintura')  else None,
             "cadera":        float(data['cadera'])   if data.get('cadera')   else None,
-            "fecha_registro":datetime.now()
+            "fecha_registro":resolver_capturado_en(data)
         }
 
         estatura = float(miembro.get("estatura") or 0)
@@ -198,7 +203,11 @@ def complete_workout():
 
         from app.utils.timezone import local_now_naive
         data = request.json or {}
-        ahora = local_now_naive()
+        # SCRUM-168 / HU-30: si la sesión se registró sin conexión y se
+        # sincroniza después, `_capturado_en` trae el momento real en que se
+        # entrenó — se usa para la fecha del entrenamiento, la asistencia del
+        # día y el registro de peso corporal, en vez de la hora de sincronía.
+        ahora = resolver_capturado_en(data, ahora=local_now_naive())
 
         # Normalizar ejercicios + calcular volumen (sum reps*peso).
         # Reps y peso pueden ser multivalor (ej. "7,7,7" y "10,20,30" = drop set),

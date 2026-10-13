@@ -3,6 +3,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from app.mongo import get_db
 from app.utils.tenant import require_tenant
+from app.utils.sync import resolver_capturado_en
 
 user_body_progress_bp = Blueprint('user_body_progress', __name__)
 
@@ -218,12 +219,15 @@ def add_body_progress():
             return jsonify({"error": "El peso es requerido"}), 400
             
         # Crear nuevo registro
+        # SCRUM-168 / HU-30: igual que en /api/user/progress — si viene
+        # `_capturado_en` (medición encolada sin conexión y sincronizada
+        # después) se usa esa fecha en vez de la del servidor.
         nuevo_progreso = {
             "id_miembro": miembro["_id"],
             "peso": float(data.get('peso')),
             "cintura": float(data.get('cintura')) if data.get('cintura') else None,
             "cadera": float(data.get('cadera')) if data.get('cadera') else None,
-            "fecha_registro": datetime.now()
+            "fecha_registro": resolver_capturado_en(data)
         }
         
         # 🆕 AGREGAR CAMPOS ADICIONALES
