@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from bson.objectid import ObjectId
@@ -7,10 +7,31 @@ from app.mongo import get_db
 miembro_membresias_bp = Blueprint('miembro_membresias', __name__)
 
 @miembro_membresias_bp.route('/miembro-membresias/expiran', methods=['GET'])
-# @jwt_required()  # Descomenta si necesitas seguridad
+@jwt_required()
 def membresias_por_expirar():
+    """
+    Corrección de seguridad (hallazgo propio al inventariar endpoints para
+    SCRUM-213, 2026-10-14): este endpoint no exigía JWT -- el propio código
+    traía comentado "Descomenta si necesitas seguridad" -- y la consulta a
+    miembro_membresia no filtraba por gimnasio, así que devolvía nombres y
+    fechas de vencimiento de membresía de TODOS los gimnasios a cualquiera,
+    sin autenticación. Ahora exige sesión y acota a los miembros del
+    gimnasio del token, con el mismo patrón que owner_dashboard.py /
+    recepcionista_routes.py (miembro_membresia no guarda id_gimnasio
+    directamente, solo id_miembro -- se resuelve vía miembros.id_gimnasio_pg).
+    superadmin no tiene gimnasio propio: este widget no tiene selector de
+    gimnasio, así que para superadmin se devuelve vacío en vez de agregar
+    datos de todos los gimnasios sin que nadie lo haya pedido.
+    """
     try:
         db = get_db()
+
+        if getattr(g, "is_superadmin", False):
+            return jsonify({"data": []}), 200
+        gym_id = getattr(g, "tenant_id", None)
+        if not gym_id:
+            return jsonify({"msg": "Token sin gimnasio asignado."}), 403
+
         # Obtener parámetros (por defecto 7 días)
         dias = request.args.get('dias', default=7, type=int)
         
@@ -19,9 +40,14 @@ def membresias_por_expirar():
         # Reseteamos horas, minutos, segundos a 0 para comparación justa
         inicio_hoy = datetime(hoy.year, hoy.month, hoy.day)
         fecha_limite = inicio_hoy + timedelta(days=dias)
-        
-        # Consultar DB: Membresías activas que vencen en el rango
+
+        ids_miembros_gym = [
+            m["_id"] for m in db.miembros.find({"id_gimnasio_pg": gym_id}, {"_id": 1})
+        ]
+
+        # Consultar DB: Membresías activas del gimnasio que vencen en el rango
         resultados = list(db.miembro_membresia.find({
+            "id_miembro": {"$in": ids_miembros_gym},
             "fecha_fin": {"$gte": inicio_hoy, "$lte": fecha_limite},
             "estado": "Activa"
         }))
