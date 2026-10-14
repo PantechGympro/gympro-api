@@ -20,13 +20,17 @@ from app.utils.security import require_role
 
 owner_membresias_bp = Blueprint("owner_membresias", __name__)
 
+# HU-45: un Administrador gestiona los tipos de membresía de SU sucursal
+# (g.tenant_id) igual que el Propietario gestiona los suyos -- ver la misma
+# decisión en owner_dashboard.py/owner_trainers.py/owner_profile.py.
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET /api/owner_gym/membresias
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_membresias_bp.route("/membresias", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def listar_membresias():
     gym_id       = g.tenant_id
@@ -77,7 +81,7 @@ def _desactivar_promociones_caducadas(gym_id: int) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_membresias_bp.route("/membresias", methods=["POST"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def crear_membresia():
     """
@@ -191,7 +195,7 @@ def _parsear_fecha(valor):
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_membresias_bp.route("/membresias/<int:mem_id>", methods=["PUT"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def editar_membresia(mem_id: int):
     gym_id = g.tenant_id
@@ -255,7 +259,7 @@ def editar_membresia(mem_id: int):
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_membresias_bp.route("/membresias/<int:mem_id>/toggle", methods=["PATCH"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def toggle_membresia(mem_id: int):
     gym_id = g.tenant_id
@@ -274,7 +278,7 @@ def toggle_membresia(mem_id: int):
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_membresias_bp.route("/membresias/<int:mem_id>", methods=["DELETE"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def eliminar_membresia(mem_id: int):
     """Elimina solo si no tiene miembro_membresias asociadas."""

@@ -21,10 +21,16 @@ from app.utils.security import require_role
 
 owner_profile_bp = Blueprint("owner_profile", __name__)
 
+# HU-45: un Administrador también edita "Mi Perfil" (su propia persona) y
+# "Perfil del Gym" -- en su caso, el de SU sucursal activa (g.tenant_id),
+# no el de toda la organización. No choca con PUT /owner_gym/sucursales/<id>
+# (exclusivo de Propietario, ver sucursales.py): ambos terminan escribiendo
+# la misma fila de Gimnasio, cada quien sobre la que le corresponde.
+
 
 @owner_profile_bp.route("/perfil", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def get_perfil():
     """
@@ -85,7 +91,7 @@ def get_perfil():
 
 @owner_profile_bp.route("/perfil", methods=["PUT"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def update_perfil():
     """
@@ -167,7 +173,7 @@ def _foto_valida(valor):
 
 @owner_profile_bp.route("/perfil/propietario", methods=["PUT"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def update_propietario():
     """

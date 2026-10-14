@@ -20,6 +20,13 @@ from app.utils.security import require_role
 
 owner_dashboard_bp = Blueprint("owner_dashboard", __name__)
 
+# HU-45 (SCRUM-222, cierre de panel): un Administrador de sucursal necesita
+# ver el dashboard de SU sucursal para ejercer su rol -- se agrega al lado de
+# "owner_gym" (Propietario) en vez de reemplazarlo. Queda scoped igual que
+# siempre por g.tenant_id (ver utils/tenant.py), así que un Administrador
+# solo ve los números de la sucursal a la que está asignado, nunca los de
+# toda la organización.
+
 
 def _month_range(year: int, month: int):
     """Devuelve (inicio, fin) del mes como datetime."""
@@ -43,7 +50,7 @@ def _prev_months(n: int):
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_dashboard_bp.route("/dashboard", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def get_owner_dashboard():
     """KPIs principales: miembros activos/inactivos, ingresos, membresías, staff."""
@@ -185,7 +192,7 @@ def get_owner_dashboard():
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_dashboard_bp.route("/dashboard/ingresos", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def get_ingresos_historicos():
     """Ingresos por mes (pagos + ventas POS) para el gráfico de tendencia."""
@@ -244,7 +251,7 @@ def get_ingresos_historicos():
 # ─────────────────────────────────────────────────────────────────────────────
 @owner_dashboard_bp.route("/dashboard/actividad", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def get_actividad_reciente():
     """Feed de actividad reciente: últimos pagos, registros de miembros y ventas POS."""

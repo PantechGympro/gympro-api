@@ -34,6 +34,10 @@ from app.utils.security import require_role
 
 reportes_negocio_bp = Blueprint("reportes_negocio", __name__)
 
+# HU-45: reporte ejecutivo de SU sucursal para el Administrador, igual que
+# el Propietario -- scoped por g.tenant_id, nunca agregado a nivel
+# organización.
+
 MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
             "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
@@ -206,7 +210,7 @@ def _recolectar(gym_id: int, desde: datetime, hasta: datetime) -> dict:
 
 @reportes_negocio_bp.route("/reportes/opciones", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def opciones_reporte():
     """Años con datos y catálogo de secciones, para armar el formulario."""
@@ -240,7 +244,7 @@ def opciones_reporte():
 
 @reportes_negocio_bp.route("/reportes/pdf", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def reporte_pdf():
     """Reporte ejecutivo del gimnasio en PDF."""

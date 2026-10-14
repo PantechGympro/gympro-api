@@ -23,6 +23,14 @@ from app.utils.busqueda import normalizar_columna
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
+# HU-45: un Administrador da de alta y gestiona el Staff (Entrenador /
+# Recepcionista) de SU sucursal -- el formulario de alta (OwnerStaff.jsx)
+# no ofrece el rol Administrador como opción, así que no hay riesgo de que
+# un Administrador cree a otro Administrador por esta vía (eso sigue siendo
+# exclusivo de Propietario, ver sucursales.py). El tope de capacidad de
+# staff (utils/capacidad.py) ya es por Gimnasio, así que sigue aplicando
+# igual sin importar quién da de alta.
+
 _STAFF_ROLES         = ("Entrenador", "Recepcionista")
 _VALID_FOTO_PREFIXES = ("data:image/jpeg;base64,", "data:image/png;base64,",
                         "data:image/webp;base64,", "data:image/gif;base64,")
@@ -43,7 +51,7 @@ def _staff_filter(gym_id):
 # ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def listar_staff():
     """Lista entrenadores y recepcionistas del gimnasio con filtros opcionales."""
@@ -91,7 +99,7 @@ def listar_staff():
 # ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>", methods=["GET"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def get_staff_member(user_id: int):
     gym_id   = g.tenant_id
@@ -107,7 +115,7 @@ def get_staff_member(user_id: int):
 # ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff", methods=["POST"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def crear_staff():
     """
@@ -172,7 +180,7 @@ def crear_staff():
 # ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>", methods=["PUT"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def actualizar_staff(user_id: int):
     """
@@ -224,7 +232,7 @@ def actualizar_staff(user_id: int):
 # ---------------------------------------------------------------------------
 @owner_trainers_bp.route("/staff/<int:user_id>/toggle", methods=["PATCH"])
 @jwt_required()
-@require_role("owner_gym")
+@require_role("owner_gym", "Administrador")
 @require_tenant
 def toggle_staff(user_id: int):
     gym_id   = g.tenant_id
