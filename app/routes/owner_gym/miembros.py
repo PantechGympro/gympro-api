@@ -9,6 +9,7 @@ from app.models.user import User
 from app.models.miembro import Miembro
 from app.utils.tenant import get_tenant_filter, require_tenant
 from app.utils.alcance import crear_asignacion
+from app.utils.capacidad import verificar_capacidad_miembro, LimiteDePlanExcedido
 from app.utils.busqueda import patron_insensible
 # PG — fuente de verdad desde Sprint 2
 from app.extensions import db as pg_db
@@ -91,6 +92,13 @@ def crear_miembro():
 
     if not nombre or not email:
         return jsonify({"error": "Nombre y Email son obligatorios"}), 400
+
+    # SCRUM-222 (AC1): el tope de plan se verifica en el alta, antes de
+    # tocar la base -- nunca en una consulta de lectura (ver utils/capacidad.py).
+    try:
+        verificar_capacidad_miembro(gym_id)
+    except LimiteDePlanExcedido as e:
+        return jsonify({"error": str(e)}), 409
 
     # Verificar duplicado en PG y en Mongo
     if UsuarioPG.query.filter_by(email=email).first():

@@ -18,6 +18,7 @@ from app.models.pg.gimnasio   import Gimnasio
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import crear_asignacion
+from app.utils.capacidad import verificar_capacidad_staff, LimiteDePlanExcedido
 from app.utils.busqueda import normalizar_columna
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
@@ -131,6 +132,12 @@ def crear_staff():
         return jsonify({"msg": "nombre, email, password y rol son requeridos"}), 400
     if rol_name not in _STAFF_ROLES:
         return jsonify({"msg": f"rol debe ser uno de: {', '.join(_STAFF_ROLES)}"}), 400
+
+    # SCRUM-222 (AC2): tope de staff del plan, verificado en el alta.
+    try:
+        verificar_capacidad_staff(gym_id)
+    except LimiteDePlanExcedido as e:
+        return jsonify({"msg": str(e)}), 409
 
     if Usuario.query.filter_by(email=email).first():
         return jsonify({"msg": "El email ya está registrado"}), 409

@@ -48,6 +48,7 @@ from app.models.pg.pasarela_pago import ConfiguracionPasarela
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import crear_asignacion, sucursales_de_administrador, registrar_evento
+from app.utils.capacidad import verificar_capacidad_staff, estado_capacidad, LimiteDePlanExcedido
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR
 
 sucursales_bp = Blueprint("sucursales", __name__)
@@ -98,6 +99,30 @@ def listar_sucursales():
         return jsonify([]), 200
     sucursales = Gimnasio.query.filter_by(id_organizacion=org).order_by(Gimnasio.id).all()
     return jsonify([s.to_dict() for s in sucursales]), 200
+
+
+@sucursales_bp.route("/sucursales/capacidad", methods=["GET"])
+@jwt_required()
+@require_role(ROL_PROPIETARIO)
+@require_tenant
+def capacidad_de_mis_sucursales():
+    """
+    SCRUM-222 (AC3): ocupación de miembros y staff de cada sucursal de mi
+    organización, para que el panel del propietario avise ANTES de topar
+    (cerca_del_tope al 90%) y no solo cuando una alta ya fue rechazada.
+    """
+    org = _mi_organizacion()
+    if org is None:
+        return jsonify([]), 200
+
+    sucursales = Gimnasio.query.filter_by(id_organizacion=org).order_by(Gimnasio.id).all()
+    salida = []
+    for s in sucursales:
+        bloque = estado_capacidad(s.id)
+        bloque["id_gimnasio"] = s.id
+        bloque["nombre"]      = s.nombre
+        salida.append(bloque)
+    return jsonify(salida), 200
 
 
 @sucursales_bp.route("/sucursales", methods=["POST"])
@@ -301,6 +326,14 @@ def crear_administrador():
         if not _sucursal_de_mi_organizacion(sid, org):
             return jsonify({"msg": f"La sucursal {sid} no pertenece a tu organización"}), 400
 
+    # SCRUM-222 (AC2): un Administrador cuenta como staff en CADA sucursal
+    # a la que se le asigna -- se verifica el tope de todas antes de crear nada.
+    for sid in sucursales_ids:
+        try:
+            verificar_capacidad_staff(sid)
+        except LimiteDePlanExcedido as e:
+            return jsonify({"msg": f"Sucursal {sid}: {e}"}), 409
+
     if Usuario.query.filter_by(email=email).first():
         return jsonify({"msg": "El email ya está registrado"}), 409
 
@@ -359,6 +392,18 @@ def reasignar_sucursales_administrador(id_usuario):
     for sid in nuevas_ids:
         if not _sucursal_de_mi_organizacion(sid, org):
             return jsonify({"msg": f"La sucursal {sid} no pertenece a tu organización"}), 400
+
+    # SCRUM-222 (AC2): tope de staff en cada sucursal NUEVA para este
+    # administrador (las que ya tenía asignadas no necesitan reverificarse
+    # -- él ya estaba contado ahí).
+    ids_previas = set(sucursales_de_administrador(admin.id))
+    for sid in nuevas_ids:
+        if sid in ids_previas:
+            continue
+        try:
+            verificar_capacidad_staff(sid)
+        except LimiteDePlanExcedido as e:
+            return jsonify({"msg": f"Sucursal {sid}: {e}"}), 409
 
     AsignacionUsuario.query.filter_by(id_usuario=admin.id, id_rol=rol.id).delete(synchronize_session=False)
     db.session.flush()
