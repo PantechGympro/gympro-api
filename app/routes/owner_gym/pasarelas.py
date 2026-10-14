@@ -25,16 +25,25 @@ from app.models.pg.pasarela_pago import ConfiguracionPasarela
 from app.utils.tenant import require_tenant
 from app.utils.crypto import cifrar_dict, descifrar_dict, enmascarar, crypto_disponible
 from app.services.payments import PROVEEDORES_INFO, construir_pasarela
+from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 
 logger = logging.getLogger(__name__)
 
 pasarelas_bp = Blueprint("pasarelas", __name__, url_prefix="/api/owner/pasarelas")
 
-_ROLES_ADMIN = ("owner_gym", "superadmin")
+# Bug encontrado en migración 019 (owner_gym -> Propietario, 2026-10-14):
+# esta comparación era contra la cadena literal "owner_gym" sin pasar por
+# normalizar_rol(), así que tras el rename cualquier token nuevo con
+# role="Propietario" perdía acceso a la configuración de cobros. Corregido
+# aquí usando los mismos constantes/normalizar_rol que el resto del código.
+# HU-45: un Administrador de sucursal también puede configurar el cobro de
+# SU sucursal (hereda la cuenta de la principal al crearse, pero puede
+# tener la suya propia si la sucursal cobra distinto).
+_ROLES_ADMIN = (ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN)
 
 
 def _es_admin(claims: dict) -> bool:
-    return claims.get("role") in _ROLES_ADMIN
+    return normalizar_rol(claims.get("role")) in _ROLES_ADMIN
 
 
 def _validar_proveedor(proveedor: str):
