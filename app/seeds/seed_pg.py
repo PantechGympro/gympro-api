@@ -458,12 +458,13 @@ def seed_pg_base():
     print("Roles + Planes SaaS ===")
     roles = {}
     # Roles de la plataforma:
-    #   superadmin  → operador de la plataforma (sin gimnasio asignado)
-    #   owner_gym   → dueño/admin del gimnasio (tenant admin)
-    #   Entrenador  → trainer asignado al gimnasio
+    #   superadmin    → operador de la plataforma (sin gimnasio asignado)
+    #   Propietario   → dueño/admin del gimnasio (tenant admin) -- antes "owner_gym"
+    #   Administrador → admin de UNA sucursal, alcance limitado (HU-45/SCRUM-216)
+    #   Entrenador    → trainer asignado al gimnasio
     #   Recepcionista → staff de front-desk
-    #   Miembro     → cliente final
-    for nombre in ["superadmin", "Propietario", "Entrenador", "Recepcionista", "Miembro"]:
+    #   Miembro       → cliente final
+    for nombre in ["superadmin", "Propietario", "Administrador", "Entrenador", "Recepcionista", "Miembro"]:
         r = Rol(nombre=nombre)
         db.session.add(r)
         db.session.flush()

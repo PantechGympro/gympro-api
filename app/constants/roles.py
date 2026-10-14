@@ -15,10 +15,11 @@ convivientes sin un catálogo central:
      Rol.nombre contra la que compara `Rol.nombre == rol_param` en
      superadmin/usuarios.py.
   3. "administrador"/"admin" como sinónimo informal de "owner_gym" en
-     comentarios y vistas antiguas — no existe un rol "administrador"
-     independiente en la tabla `roles` (ver seed_pg.py: solo
-     superadmin/owner_gym/Entrenador/Recepcionista/Miembro). Se trata aquí
-     como alias, no como rol distinto.
+     comentarios y vistas antiguas de antes de la migración 020 -- desde
+     HU-45/SCRUM-216 SÍ existe un rol "Administrador" independiente en la
+     tabla `roles` (alcance de sucursal, no de organización; lo asigna el
+     Propietario), y estos alias ya apuntan a ese rol nuevo, no a
+     Propietario.
 
 Migración 019 (2026-10-14): "owner_gym" se renombró a "Propietario" en
 la tabla `roles` -- HU-45/HU-50 introducen un rol NUEVO y distinto,
@@ -45,18 +46,22 @@ de rol debería usar en vez de comparar cadenas crudas.
 # estilo: es el dato real contra el que compara `Rol.nombre == rol_param`.
 ROL_SUPERADMIN    = "superadmin"
 ROL_PROPIETARIO   = "Propietario"   # antes "owner_gym" (ver migración 019)
+ROL_ADMINISTRADOR = "Administrador" # NUEVO (migración 020, HU-45) -- alcance de
+                                     # sucursal, no de organización; ver utils/alcance.py
 ROL_ENTRENADOR    = "Entrenador"
 ROL_RECEPCIONISTA = "Recepcionista"
 ROL_MIEMBRO       = "Miembro"
 
 ROLES_CANONICOS = (
-    ROL_SUPERADMIN, ROL_PROPIETARIO, ROL_ENTRENADOR, ROL_RECEPCIONISTA, ROL_MIEMBRO,
+    ROL_SUPERADMIN, ROL_PROPIETARIO, ROL_ADMINISTRADOR,
+    ROL_ENTRENADOR, ROL_RECEPCIONISTA, ROL_MIEMBRO,
 )
 
 # Rótulo de presentación por rol canónico.
 ROL_LABEL = {
     ROL_SUPERADMIN:    "Superadmin",
     ROL_PROPIETARIO:   "Propietario",
+    ROL_ADMINISTRADOR: "Administrador",
     ROL_ENTRENADOR:    "Entrenador",
     ROL_RECEPCIONISTA: "Recepcionista",
     ROL_MIEMBRO:       "Miembro",
@@ -66,11 +71,10 @@ ROL_LABEL = {
 # Variantes legadas/informales → identificador canónico. Todas las claves
 # van en minúsculas porque normalizar_rol() minuscula antes de buscar.
 #
-# "administrador"/"admin"/"owner" son sinónimos de Propietario -- OJO:
-# HU-45 introduce un rol "Administrador" de sucursal que es un rol
-# DISTINTO (alcance limitado, no es el dueño). Cuando ese rol exista de
-# verdad en el catálogo, estos tres alias dejan de tener sentido como
-# sinónimos de Propietario y hay que quitarlos de aquí -- no antes.
+# Migración 020 (HU-45): "Administrador" ya es un rol real y distinto de
+# Propietario, así que "administrador"/"admin" dejan de ser sinónimos de
+# Propietario -- apuntan al rol nuevo. "owner" sigue siendo Propietario sin
+# ambigüedad (nadie dice "owner" para referirse al admin de una sucursal).
 #
 # "owner_gym" se queda como alias PERMANENTE (no legado a limpiar):
 # cualquier JWT emitido antes de la migración 019 todavía trae ese
@@ -79,9 +83,9 @@ _ALIASES = {
     "superadmin":    ROL_SUPERADMIN,
     "owner_gym":     ROL_PROPIETARIO,
     "propietario":   ROL_PROPIETARIO,
-    "administrador": ROL_PROPIETARIO,
-    "admin":         ROL_PROPIETARIO,
     "owner":         ROL_PROPIETARIO,
+    "administrador": ROL_ADMINISTRADOR,
+    "admin":         ROL_ADMINISTRADOR,
     "entrenador":    ROL_ENTRENADOR,
     "trainer":       ROL_ENTRENADOR,
     "recepcionista": ROL_RECEPCIONISTA,

@@ -22,7 +22,8 @@ import uuid
 from app.extensions import db, limiter, mail, redis_cliente
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
-from app.utils.alcance     import crear_asignacion
+from app.utils.alcance     import crear_asignacion, sucursales_de_administrador, usuario_tiene_alcance
+from app.constants.roles  import ROL_ADMINISTRADOR, normalizar_rol
 
 # ── Modelos Mongo (fallback legacy — se eliminarán en Sprint 3) ───────────────
 from app.mongo import get_db
@@ -115,13 +116,18 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
             "fuente":          "pg",
-            # HU-41 (SCRUM-212): claims adicionales de alcance -- aditivos,
-            # nada los lee todavía para decidir permisos (eso es HU-42), así
-            # que no cambian ningún comportamiento. "sucursales" ya se
-            # expone como lista para no romper el contrato cuando HU-42
-            # habilite más de una sucursal por usuario.
+            # HU-41 (SCRUM-212) + HU-45 (SCRUM-216): "sucursales" ya deja de
+            # ser aditivo para un Administrador -- es la lista real de
+            # sucursales que puede operar (ver sucursales_de_administrador(),
+            # resuelta sobre AsignacionUsuario, no sobre id_gimnasio). Para
+            # el resto de roles se mantiene igual que antes: una sola
+            # sucursal de por vida, sin consulta extra.
             "id_organizacion": usuario.gimnasio.id_organizacion if usuario.gimnasio else None,
-            "sucursales":      [usuario.id_gimnasio] if usuario.id_gimnasio else [],
+            "sucursales":      (
+                sucursales_de_administrador(usuario.id)
+                if normalizar_rol(rol_nombre) == ROL_ADMINISTRADOR
+                else ([usuario.id_gimnasio] if usuario.id_gimnasio else [])
+            ),
         },
         "user_response": {
             "id":              str(usuario.id),
@@ -401,10 +407,75 @@ def me():
     """
     claims = get_jwt()
     return jsonify({
-        "role":        claims.get("role"),
-        "id_gimnasio": claims.get("id_gimnasio"),
-        "email":       claims.get("email"),
+        "role":            claims.get("role"),
+        "id_gimnasio":     claims.get("id_gimnasio"),
+        "email":           claims.get("email"),
+        # HU-45: el selector de sucursal activa del frontend los necesita
+        # para saber si debe mostrarse y con qué opciones -- ver
+        # POST /auth/sucursal-activa más abajo.
+        "id_organizacion": claims.get("id_organizacion"),
+        "sucursales":      claims.get("sucursales", []),
     }), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUCURSAL ACTIVA (HU-45 / SCRUM-216)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/sucursal-activa", methods=["POST"])
+@jwt_required()
+def cambiar_sucursal_activa():
+    """
+    Cambia la sucursal activa de un Administrador multi-sucursal y reemite
+    los tokens para que el cambio surta efecto de inmediato -- sin esto,
+    el usuario tendría que cerrar sesión y volver a entrar cada vez que su
+    propietario lo mueve de sucursal o le asigna una nueva.
+
+    Diseño "sucursal activa": usuarios.id_gimnasio sigue siendo la única
+    fuente que lee require_tenant/require_role (utils/tenant.py,
+    utils/security.py) en los 267 endpoints existentes -- aquí solo se
+    actualiza ese valor, validado contra AsignacionUsuario (la fuente de
+    verdad de qué sucursales puede operar), y se reconstruye el JWT con
+    _build_token_pg() exactamente como hace /auth/refresh. Cero endpoints
+    existentes necesitan saber que esto existe.
+
+    Deliberadamente limitado a Administrador: Propietario, Entrenador,
+    Recepcionista y Miembro siguen con una sola sucursal de por vida (ver
+    utils/alcance.py), así que no tienen nada que "activar".
+    """
+    data = request.get_json(silent=True) or {}
+    id_gimnasio_nuevo = data.get("id_gimnasio")
+    if not isinstance(id_gimnasio_nuevo, int):
+        return jsonify({"msg": "id_gimnasio es obligatorio y debe ser un entero"}), 400
+
+    user_id = get_jwt_identity()
+    usuario = UsuarioPG.query.get(int(user_id)) if str(user_id).isdigit() else None
+    if usuario is None or not usuario.activo:
+        return jsonify({"msg": "Usuario inválido"}), 403
+
+    if normalizar_rol(usuario.rol.nombre if usuario.rol else "") != ROL_ADMINISTRADOR:
+        return jsonify({"msg": "Solo un Administrador de sucursal puede cambiar su sucursal activa"}), 403
+
+    if not usuario_tiene_alcance(usuario.id, [ROL_ADMINISTRADOR], id_gimnasio_nuevo):
+        return jsonify({"msg": "No tienes una asignación como Administrador sobre esa sucursal"}), 403
+
+    usuario.id_gimnasio = id_gimnasio_nuevo
+    db.session.commit()
+
+    payload = _build_token_pg(usuario)
+    access_nuevo  = create_access_token(identity=payload["identity"], additional_claims=payload["claims"])
+    refresh_nuevo = create_refresh_token(
+        identity=payload["identity"],
+        additional_claims={**payload["claims"], "fam": str(uuid.uuid4())},
+    )
+    respuesta = jsonify({
+        "access_token":  access_nuevo,
+        "refresh_token": refresh_nuevo,
+        "user":          payload["user_response"],
+    })
+    set_access_cookies(respuesta, access_nuevo)
+    set_refresh_cookies(respuesta, refresh_nuevo)
+    return respuesta, 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
