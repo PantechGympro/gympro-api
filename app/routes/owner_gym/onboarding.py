@@ -66,7 +66,7 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str, nombre_pl
       </ol>
     </div>
     <p style="color:#888;font-size:13px">
-      Si tienes dudas escribe a soporte@gympro.mx<br>
+      Si tienes dudas escribe a soporteGympro@gmail.com<br>
       Equipo GymPro SaaS
     </p>
   </div>
