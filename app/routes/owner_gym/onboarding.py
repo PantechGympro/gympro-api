@@ -29,6 +29,7 @@ from app.models.pg.suscripcion         import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.gym_types               import GYM_TYPES, get_gym_type_config, seed_default_memberships
 from app.utils.alcance                 import crear_organizacion_para_gimnasio, crear_asignacion
+from app.constants.roles               import ROL_PROPIETARIO, roles_equivalentes
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +177,10 @@ def register_gym():
     if Usuario.query.filter_by(email=adm_email).first():
         return jsonify({"msg": "El correo del administrador ya esta registrado"}), 409
 
-    # Obtener rol owner_gym
-    rol_admin = Rol.query.filter_by(nombre="owner_gym").first()
+    # Obtener rol Propietario (antes "owner_gym" -- migración 019)
+    rol_admin = Rol.query.filter_by(nombre=ROL_PROPIETARIO).first()
     if not rol_admin:
-        return jsonify({"msg": "Error interno: rol owner_gym no encontrado"}), 500
+        return jsonify({"msg": "Error interno: rol Propietario no encontrado"}), 500
 
     # Obtener plan (default: basico)
     id_plan = data.get("id_plan")
@@ -271,7 +272,7 @@ def register_gym():
             identity = str(nuevo_admin.id),
             additional_claims = {
                 "email":           adm_email,
-                "role":            "owner_gym",
+                "role":            ROL_PROPIETARIO,
                 "id_gimnasio":     nuevo_gym.id,
                 "plan":            _plan_val,
                 "access_level":    "basico",
@@ -289,7 +290,7 @@ def register_gym():
                 "id":          nuevo_admin.id,
                 "nombre":      nuevo_admin.nombre,
                 "email":       nuevo_admin.email,
-                "role":        "owner_gym",
+                "role":        ROL_PROPIETARIO,
                 "primer_login": True,
             },
             "suscripcion": suscripcion.to_dict(),
@@ -334,7 +335,10 @@ def complete_setup():
     user_id     = get_jwt_identity()
     id_gimnasio = claims.get("id_gimnasio")
 
-    if claims.get("role") not in ("owner_gym", "admin", "Administrador"):
+    # roles_equivalentes() resuelve alias/mayúsculas (SCRUM-107) -- antes
+    # esto comparaba contra una tupla fija de literales, que un token
+    # nuevo con "role": "Propietario" no hubiera igualado nunca.
+    if not roles_equivalentes(claims.get("role"), ROL_PROPIETARIO):
         return jsonify({"msg": "Acceso denegado"}), 403
 
     data          = request.get_json() or {}

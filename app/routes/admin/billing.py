@@ -28,6 +28,7 @@ from app.models.pg.plan_suscripcion   import PlanSuscripcion
 from app.models.pg.suscripcion        import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.tenant import require_tenant
+from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, normalizar_rol
 
 billing_bp = Blueprint("billing", __name__, url_prefix="/api/billing")
 
@@ -37,7 +38,7 @@ billing_bp = Blueprint("billing", __name__, url_prefix="/api/billing")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _es_admin(claims: dict) -> bool:
-    return claims.get("role") in ("owner_gym", "superadmin")
+    return normalizar_rol(claims.get("role")) in (ROL_PROPIETARIO, ROL_SUPERADMIN)
 
 
 def _suscripcion_activa(gym_id: int) -> Suscripcion | None:

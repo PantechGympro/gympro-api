@@ -17,7 +17,7 @@ from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.models.pg.suscripcion import Suscripcion
 from app.models.pg.plan_suscripcion import PlanSuscripcion
-from app.constants.roles import ROL_OWNER_GYM, ROL_ENTRENADOR, ROL_RECEPCIONISTA
+from app.constants.roles import ROL_PROPIETARIO, ROL_ENTRENADOR, ROL_RECEPCIONISTA
 from app.mongo import get_db
 from app.utils.security import require_role
 
@@ -238,7 +238,7 @@ def detalle_gimnasio(gym_id: int):
     # Rol.nombre en la base (ver seed_pg.py): el dueño del gimnasio se guarda
     # como "owner_gym". El filtro excluía silenciosamente al propio dueño de
     # la lista de staff (SCRUM-107).
-    ROLES_STAFF = {ROL_OWNER_GYM, ROL_ENTRENADOR, ROL_RECEPCIONISTA}
+    ROLES_STAFF = {ROL_PROPIETARIO, ROL_ENTRENADOR, ROL_RECEPCIONISTA}
     usuarios = (
         Usuario.query
         .join(Usuario.rol)

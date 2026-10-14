@@ -26,6 +26,7 @@ from bson import ObjectId
 from app.mongo import get_db
 from app.routes.compartido.notificaciones import crear_notificacion
 from app.utils.tenant import require_tenant
+from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, ROL_RECEPCIONISTA, normalizar_rol
 
 recepcionista_bp = Blueprint("recepcionista", __name__)
 
@@ -35,9 +36,9 @@ recepcionista_bp = Blueprint("recepcionista", __name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _require_receptionist():
-    """Verifica que el JWT pertenece a un Recepcionista o owner_gym (acceso amplio)."""
-    role = get_jwt().get("role", "")
-    allowed = {"Recepcionista", "recepcionista", "owner_gym", "admin", "superadmin"}
+    """Verifica que el JWT pertenece a un Recepcionista o Propietario (acceso amplio)."""
+    role = normalizar_rol(get_jwt().get("role", ""))
+    allowed = {ROL_RECEPCIONISTA, ROL_PROPIETARIO, ROL_SUPERADMIN}
     if role not in allowed:
         return jsonify({"error": "Acceso no autorizado"}), 403
     return None

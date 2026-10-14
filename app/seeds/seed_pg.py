@@ -463,7 +463,7 @@ def seed_pg_base():
     #   Entrenador  → trainer asignado al gimnasio
     #   Recepcionista → staff de front-desk
     #   Miembro     → cliente final
-    for nombre in ["superadmin", "owner_gym", "Entrenador", "Recepcionista", "Miembro"]:
+    for nombre in ["superadmin", "Propietario", "Entrenador", "Recepcionista", "Miembro"]:
         r = Rol(nombre=nombre)
         db.session.add(r)
         db.session.flush()
@@ -584,7 +584,7 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
         estado="pagada", fecha_emision=ahora, fecha_vencimiento=ahora+timedelta(days=30)))
 
     admin = Usuario(nombre=cfg["admin_nombre"], email=cfg["admin_email"],
-                    id_rol=roles["owner_gym"].id, id_gimnasio=gym.id, activo=True)
+                    id_rol=roles["Propietario"].id, id_gimnasio=gym.id, activo=True)
     admin.set_password("Admin1234!")
     db.session.add(admin)
     db.session.flush()

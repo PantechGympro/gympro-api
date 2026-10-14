@@ -15,7 +15,7 @@ Contenido generado:
     — los tres, de los 5 de seed_pg.py, que ya traen configuradas exactamente
     5 membresías, cada una con beneficios, tipo (estandar/promocion) y datos
     completos (heredado de seed_pg.py)
-  - Por gimnasio: 1 owner_gym, 2 entrenadores, 1 recepcionista, 64 miembros
+  - Por gimnasio: 1 Propietario, 2 entrenadores, 1 recepcionista, 64 miembros
   - Cada miembro con historial completo en MongoDB (pagos, asistencias,
     progreso físico, sesiones, rutina y dieta propias con todos sus campos
     llenos) para que las métricas de cada módulo tengan datos reales
@@ -256,7 +256,7 @@ def seed_gimnasio_servidor(cfg, roles, planes_map, idx_start):
         estado="pagada", fecha_emision=ahora, fecha_vencimiento=ahora + timedelta(days=30)))
 
     admin = Usuario(nombre=cfg["admin_nombre"], email=cfg["admin_email"],
-                    id_rol=roles["owner_gym"].id, id_gimnasio=gym.id, activo=True)
+                    id_rol=roles["Propietario"].id, id_gimnasio=gym.id, activo=True)
     admin.set_password("Admin1234!")
     db.session.add(admin)
     db.session.flush()

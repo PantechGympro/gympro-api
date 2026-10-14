@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from app.utils.tenant import require_tenant
+from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, normalizar_rol
 
 notifications_bp = Blueprint("notifications", __name__, url_prefix="/api/notifications")
 
@@ -198,7 +199,7 @@ def init_scheduler(app):
 def trigger_check():
     """Dispara el chequeo de vencimientos de forma manual (solo Admin)."""
     claims = get_jwt()
-    if claims.get("role") not in ("owner_gym", "superadmin"):
+    if normalizar_rol(claims.get("role")) not in (ROL_PROPIETARIO, ROL_SUPERADMIN):
         return jsonify({"error": "Solo administradores pueden ejecutar esta accion"}), 403
 
     from flask import current_app
