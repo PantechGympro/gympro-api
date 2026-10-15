@@ -237,13 +237,17 @@ def seed_gimnasio_servidor(cfg, roles, planes_map, idx_start):
     gym = Gimnasio(nombre=cfg["nombre"], plan=cfg["plan"],
                    email_contacto=cfg["email_contacto"],
                    telefono=cfg["telefono"], activo=True)
-    db.session.add(gym)
-    db.session.flush()
 
     # HU-41 (SCRUM-212): ver seed_pg.seed_gimnasio() -- misma obligación
-    # (id_organizacion NOT NULL) y misma decisión de no wire-ear
-    # crear_asignacion() para los usuarios de este seed.
+    # (id_organizacion NOT NULL), misma decisión de no wire-ear
+    # crear_asignacion() para los usuarios de este seed, y mismo bug real
+    # corregido: resolver la organización ANTES de agregar/flushear "gym"
+    # (el flush interno de crear_organizacion_para_gimnasio() arrastraba el
+    # INSERT pendiente de "gym" con id_organizacion todavía en None).
     crear_organizacion_para_gimnasio(gym)
+
+    db.session.add(gym)
+    db.session.flush()  # obtener gym.id (id_organizacion ya resuelto)
 
     ahora = datetime.now(timezone.utc)
     plan  = planes_map[cfg["plan"]]

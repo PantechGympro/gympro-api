@@ -44,6 +44,14 @@ class Usuario(db.Model):
     # Onboarding: True = primer login, debe completar configuración del gimnasio
     primer_login = db.Column(db.Boolean, default=False, nullable=False, server_default="false")
 
+    # SCRUM-224: True = la contraseña actual la puso alguien distinto de
+    # esta persona (generada al crear la cuenta, o reseteada por un
+    # Propietario/Administrador) -- se le exige cambiarla antes de dejarla
+    # entrar a su panel. Distinto de primer_login: ese es solo para el
+    # wizard de onboarding del Propietario, que SI elige su propia
+    # contraseña al registrarse.
+    debe_cambiar_password = db.Column(db.Boolean, default=False, nullable=False, server_default="false")
+
     # Foto de perfil almacenada como data URL base64 (nullable)
     foto_perfil  = db.Column(db.Text, nullable=True)
 

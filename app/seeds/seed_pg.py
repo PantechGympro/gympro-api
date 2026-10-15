@@ -482,8 +482,14 @@ def seed_pg_base():
                 "1 usuario administrador",
                 "Soporte por correo electronico",
             ],
+            # SCRUM-224: "rutinas_ia" (importación de rutinas con IA desde PDF)
+            # faltaba en este seed de desarrollo -- ya existía en la migración
+            # 012 para las bases reales, pero seed_pg_base() hace TRUNCATE +
+            # re-INSERT de planes_suscripcion, así que lo que no esté aquí
+            # desaparece en cualquier entorno local sembrado con este script.
             "limites": {"pos": False, "pasarelas_pago": False, "analiticas_ia": False,
-                        "reportes_pdf": False, "app_movil": False, "max_staff": 1},
+                        "rutinas_ia": False, "reportes_pdf": False, "app_movil": False,
+                        "max_staff": 1, "max_sucursales": 1},
         },
         {
             "nombre": "basico", "precio_mensual_mxn": 49900, "max_miembros": 50,
@@ -498,7 +504,8 @@ def seed_pg_base():
                 "App movil para tus miembros",
             ],
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": False,
-                        "reportes_pdf": True, "app_movil": True, "max_staff": 3},
+                        "rutinas_ia": False, "reportes_pdf": True, "app_movil": True,
+                        "max_staff": 3, "max_sucursales": 1},
         },
         {
             "nombre": "pro", "precio_mensual_mxn": 99900, "max_miembros": 200,
@@ -513,36 +520,39 @@ def seed_pg_base():
                 "Hasta 10 usuarios de staff",
             ],
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
-                        "reportes_pdf": True, "app_movil": True, "backups_automaticos": True, "max_staff": 10},
+                        "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
+                        "backups_automaticos": True, "max_staff": 10, "max_sucursales": 2},
         },
         {
             # SCRUM-222 (AC6): "Miembros y staff ilimitados" se corrige --
             # esa promesa no la respalda un VPS compartido (Postgres +
             # Mongo + Redis + Ollama en la misma maquina). El tope real
             # pasa a ser alto pero finito, y aplica POR SUCURSAL (igual
-            # que el resto de los planes, ver utils/capacidad.py): un
-            # cliente con varias sucursales multiplica su capacidad, no
-            # la reparte.
+            # que el resto de los planes, ver utils/capacidad.py).
             #
-            # 500 miembros / 20 staff por sucursal son valores
-            # PROVISIONALES -- no se derivan de una prueba de carga real
-            # sobre el VPS, son una extrapolacion directa del salto
-            # basico(50)->pro(200) de la misma tabla. Antes de anunciar
-            # este numero a un cliente real, hay que confirmarlo con
-            # pruebas de carga del VPS de produccion.
-            "nombre": "enterprise", "precio_mensual_mxn": 199900, "max_miembros": 500,
+            # SCRUM-223: con tope de SUCURSALES (max_sucursales, debajo),
+            # enterprise deja de diferenciarse de pro por "cuanto cabe en
+            # una sola sucursal" (200/10 en ambos, el mismo numero que
+            # pro) y pasa a diferenciarse por "cuantas sucursales cubre
+            # un mismo contrato" -- ver migracion 022 y la discusion en
+            # la bitacora tecnica del proyecto. Siguen siendo valores
+            # PROVISIONALES, igual que lo eran los 500/20 anteriores: una
+            # extrapolacion razonada, no el resultado de una prueba de
+            # carga real sobre el VPS de produccion.
+            "nombre": "enterprise", "precio_mensual_mxn": 199900, "max_miembros": 200,
             "descripcion": "Alta capacidad por sucursal, con soporte dedicado y acuerdos de nivel de servicio.",
             "titulo_comercial": "Para cadenas y multiples sucursales", "orden": 3, "destacado": False,
             "caracteristicas": [
-                "Hasta 500 miembros y 20 usuarios de staff por sucursal",
+                "Hasta 200 miembros y 10 staff por sucursal, hasta 5 sucursales",
                 "Todo lo del plan Pro",
                 "Laboratorio de Machine Learning completo",
                 "Soporte prioritario con SLA",
                 "Acompañamiento en la implementacion",
             ],
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
-                        "reportes_pdf": True, "app_movil": True, "backups_automaticos": True,
-                        "ml_lab": True, "soporte_sla": True, "max_staff": 20},
+                        "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
+                        "backups_automaticos": True, "ml_lab": True, "soporte_sla": True,
+                        "max_staff": 10, "max_sucursales": 5},
         },
     ]
     planes_map = {}
@@ -578,15 +588,23 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
     gym = Gimnasio(nombre=cfg["nombre"], plan=cfg["plan"],
                    email_contacto=cfg["email_contacto"],
                    telefono=cfg["telefono"], activo=True)
-    db.session.add(gym)
-    db.session.flush()
 
     # HU-41 (SCRUM-212): gimnasios.id_organizacion es NOT NULL -- toda
     # creación de Gimnasio necesita su Organizacion 1:1, incluida en seeds.
+    # Bug real corregido: esto debe resolverse ANTES de agregar/flushear
+    # "gym" -- crear_organizacion_para_gimnasio() solo lee gym.nombre (ya
+    # puesto por el constructor) y escribe gym.id_organizacion en memoria,
+    # pero su propio flush() interno (para obtener organizacion.id)
+    # arrastraba también el INSERT pendiente de "gym" si ya estaba
+    # agregado a la sesión -- con id_organizacion todavía en None, violando
+    # el NOT NULL. Ver el mismo fix en owner_gym/onboarding.py.
     # No se wire-ea crear_asignacion() en los usuarios de este seed (ver
     # bitácora técnica): nada lee asignacion_usuario para permisos todavía
     # y los seeds son solo datos de desarrollo/demo.
     crear_organizacion_para_gimnasio(gym)
+
+    db.session.add(gym)
+    db.session.flush()  # obtener gym.id (id_organizacion ya resuelto)
 
     ahora = datetime.now(timezone.utc)
     plan  = planes_map[cfg["plan"]]

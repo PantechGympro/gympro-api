@@ -192,13 +192,20 @@ def register_gym():
                 "label":           tipo_config["label"],
             },
         )
-        db.session.add(nuevo_gym)
-        db.session.flush()  # obtener nuevo_gym.id
-
         # 1b. Organización 1:1 del gimnasio nuevo (HU-41 / SCRUM-212).
-        # gimnasios.id_organizacion es NOT NULL, así que esto es obligatorio
-        # aquí -- no cambia ningún comportamiento visible todavía.
-        crear_organizacion_para_gimnasio(nuevo_gym)
+        # gimnasios.id_organizacion es NOT NULL (migración 017) -- debe
+        # resolverse ANTES del primer flush del gimnasio, no después (ver
+        # el mismo fix y su explicación completa en owner_gym/onboarding.py,
+        # el que sí se ejecuta en producción; este archivo es una copia
+        # huérfana, nunca registrada en app/__init__.py, corregida aquí
+        # solo por consistencia).
+        # SCRUM-223: se fija el plan de la organización desde aquí mismo
+        # (plan.nombre, ya resuelto arriba) -- es la fuente de verdad que
+        # lee utils/capacidad.py, no Gimnasio.plan.
+        crear_organizacion_para_gimnasio(nuevo_gym, plan=plan.nombre)
+
+        db.session.add(nuevo_gym)
+        db.session.flush()  # obtener nuevo_gym.id (id_organizacion ya resuelto)
 
         # 2. Crear Usuario administrador
         nuevo_admin = Usuario(
@@ -215,11 +222,17 @@ def register_gym():
         # 2b. Asignación de alcance del administrador (HU-41 / SCRUM-212).
         crear_asignacion(nuevo_admin, gimnasio=nuevo_gym)
 
-        # 3. Crear Suscripcion trialing
+        # 3. Crear Suscripcion trialing. SCRUM-224: el periodo de prueba no
+        # cobra nada, así que el ciclo (mensual/anual) todavía no se decide
+        # aquí -- se elige hasta la primera renovación real, en
+        # OwnerSubscription.jsx. ciclo_facturacion queda explícito en
+        # "mensual" para que quede claro que es la condición de partida, no
+        # un olvido.
         suscripcion = Suscripcion(
             id_gimnasio         = nuevo_gym.id,
             id_plan             = plan.id,
             estado              = "trialing",
+            ciclo_facturacion   = "mensual",
             fecha_inicio        = ahora,
             fecha_proximo_cobro = ahora + timedelta(days=14),
         )
@@ -245,7 +258,10 @@ def register_gym():
         _enviar_bienvenida(adm_email, gym_nombre, adm_nombre)
 
         # 6. Generar JWT para login inmediato
-        _plan_val = nuevo_gym.plan if isinstance(nuevo_gym.plan, str) else nuevo_gym.plan.value
+        # SCRUM-223: el claim "plan" refleja el de la organización, no el
+        # de Gimnasio.plan (ver mismo criterio en auth/routes.py).
+        _org_plan = nuevo_gym.organizacion.plan if nuevo_gym.organizacion else plan.nombre
+        _plan_val = _org_plan if isinstance(_org_plan, str) else _org_plan.value
         token = create_access_token(
             identity = str(nuevo_admin.id),
             additional_claims = {

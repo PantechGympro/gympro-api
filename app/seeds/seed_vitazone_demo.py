@@ -245,13 +245,18 @@ def get_or_create_gimnasio(gym_id):
     gym = Gimnasio(nombre=GYM_NOMBRE_DEFAULT, plan="pro",
                    email_contacto="contacto@vitazone.mx", telefono="+52-728-200-0004",
                    activo=True)
-    db.session.add(gym)
-    db.session.flush()
     # HU-41 (SCRUM-212): gimnasios.id_organizacion es NOT NULL -- antes se
     # podía hacer commit directo sin flush porque nada más dependía del id
-    # todavía; ahora hace falta el flush para poder crear la Organizacion
-    # 1:1 antes del commit.
+    # todavía; ahora hace falta resolver la Organizacion 1:1 antes del
+    # commit. Bug real corregido: debe resolverse ANTES de agregar/
+    # flushear "gym" (no después) -- crear_organizacion_para_gimnasio()
+    # solo necesita gym.nombre, ya puesto por el constructor; su propio
+    # flush() interno arrastraba el INSERT pendiente de "gym" si ya estaba
+    # agregado a la sesión, con id_organizacion todavía en None. Ver el
+    # mismo fix en owner_gym/onboarding.py.
     crear_organizacion_para_gimnasio(gym)
+    db.session.add(gym)
+    db.session.flush()  # obtener gym.id (id_organizacion ya resuelto)
     db.session.commit()
     if gym.id != gym_id:
         print(f"  AVISO: el gimnasio nuevo quedo con id #{gym.id}, no #{gym_id} "

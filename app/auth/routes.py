@@ -23,7 +23,8 @@ from app.extensions import db, limiter, mail, redis_cliente
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
 from app.utils.alcance     import crear_asignacion, sucursales_de_administrador, usuario_tiene_alcance
-from app.constants.roles  import ROL_ADMINISTRADOR, normalizar_rol
+from app.constants.roles  import ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
+from app.utils.capacidad  import permite_funcion
 
 # ── Modelos Mongo (fallback legacy — se eliminarán en Sprint 3) ───────────────
 from app.mongo import get_db
@@ -76,11 +77,20 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             },
         }
 
+    # SCRUM-223: el plan que se muestra/gatea en el frontend es el de la
+    # ORGANIZACIÓN (ver utils/capacidad.py), no el de Gimnasio.plan --
+    # desde que el billing se sincroniza a Organizacion.plan, Gimnasio.plan
+    # ya no se actualiza y quedaría mostrando un valor viejo tras cualquier
+    # cambio de plan.
     # plan es str con PGEnum(create_type=False); con db.Enum(PlanEnum) sería .value
-    _plan = usuario.gimnasio.plan if usuario.gimnasio else "basico"
+    if usuario.gimnasio and usuario.gimnasio.organizacion:
+        _plan = usuario.gimnasio.organizacion.plan
+    else:
+        _plan = "basico"
     plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
 
     primer_login = getattr(usuario, "primer_login", False)
+    debe_cambiar_password = getattr(usuario, "debe_cambiar_password", False)  # SCRUM-224
 
     # Para miembros PG, resolver peso_inicial y perfil_completo desde el doc Mongo
     # (el perfil físico sigue viviendo en MongoDB — colección miembros)
@@ -115,6 +125,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "perfil_completo": perfil_completo,
             "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
+            "debe_cambiar_password": debe_cambiar_password,  # SCRUM-224
             "fuente":          "pg",
             # HU-41 (SCRUM-212) + HU-45 (SCRUM-216): "sucursales" ya deja de
             # ser aditivo para un Administrador -- es la lista real de
@@ -140,6 +151,7 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             "perfil_completo": perfil_completo,
             "peso_inicial":    peso_inicial,
             "primer_login":    primer_login,
+            "debe_cambiar_password": debe_cambiar_password,  # SCRUM-224
             "foto_perfil":     foto_login,
         },
     }
@@ -392,6 +404,16 @@ def refresh_token():
 
 @auth_bp.route("/me", methods=["GET"])
 @jwt_required()
+# Límite propio, muy por encima del global (ver default_limits en
+# extensions.py: 60/hora) -- Layout.jsx llama este endpoint en CADA cambio
+# de ruta (useEffect con [location.pathname, role]) para re-verificar el rol
+# en cada navegación, así que una sesión normal de uso (clicks por el
+# sidebar, probar varias pantallas) agota el límite global en minutos y dejó
+# a un usuario real fuera de su propia sesión ("no me deja entrar", 429 en
+# /api/auth/me). No tiene sentido limitarlo como a /login: ya exige un JWT
+# válido, así que no es superficie de fuerza bruta -- lo único que previene
+# un límite aquí es un bucle descontrolado del cliente, no un ataque.
+@limiter.limit("120 per minute")
 def me():
     """
     Devuelve el rol y los datos mínimos de la sesión actual, leídos del JWT
@@ -406,6 +428,43 @@ def me():
     respuesta antes de montar cualquier panel.
     """
     claims = get_jwt()
+
+    # HU-47/SCRUM-218: la pantalla de "verificar miembro de otra sucursal"
+    # no debe aparecer (AC7) si la organización tiene una sola sucursal --
+    # distinto de "sucursales" arriba (las que ESTE usuario tiene asignadas
+    # como Administrador): aquí se pregunta si la ORGANIZACIÓN completa
+    # tiene más de una, sin importar a cuántas tenga alcance quien pregunta.
+    id_organizacion = claims.get("id_organizacion")
+    multi_sucursal = False
+    if id_organizacion is not None:
+        from app.models.pg.gimnasio import Gimnasio
+        multi_sucursal = (
+            Gimnasio.query.filter_by(id_organizacion=id_organizacion).count() >= 2
+        )
+
+    # SCRUM-224: banderas de función del plan contratado, para que el
+    # frontend pueda mostrar el aviso de "bloqueado por tu plan" de forma
+    # PROACTIVA al montar la pantalla, en vez de solo después de que el
+    # usuario intente la acción y el backend responda 402 -- ver
+    # @require_funcion_plan() en utils/security.py, que hace este mismo
+    # chequeo (y es la fuente de verdad real) en cada endpoint protegido;
+    # esto es solo para que la UI se anticipe. Layout.jsx ya llama a este
+    # endpoint en cada cambio de ruta, así que cualquier pantalla puede
+    # leer esto sin una petición adicional.
+    FUNCIONES_PLAN = (
+        "analiticas_ia", "rutinas_ia", "reportes_pdf", "app_movil",
+        "pos", "cobros_en_linea", "respaldos", "soporte_prioritario",
+    )
+    if normalizar_rol(claims.get("role", "")) == ROL_SUPERADMIN:
+        # El superadmin no tiene plan propio (id_gimnasio es None salvo que
+        # esté impersonando) y @require_funcion_plan() lo exenta siempre
+        # en el backend -- el frontend debe ver exactamente lo mismo: nada
+        # bloqueado, nunca el aviso de "mejora tu plan".
+        funciones_plan = {f: True for f in FUNCIONES_PLAN}
+    else:
+        id_gimnasio_actual = claims.get("id_gimnasio")
+        funciones_plan = {f: permite_funcion(id_gimnasio_actual, f) for f in FUNCIONES_PLAN}
+
     return jsonify({
         "role":            claims.get("role"),
         "id_gimnasio":     claims.get("id_gimnasio"),
@@ -413,8 +472,72 @@ def me():
         # HU-45: el selector de sucursal activa del frontend los necesita
         # para saber si debe mostrarse y con qué opciones -- ver
         # POST /auth/sucursal-activa más abajo.
-        "id_organizacion": claims.get("id_organizacion"),
+        "id_organizacion": id_organizacion,
         "sucursales":      claims.get("sucursales", []),
+        "organizacion_multi_sucursal": multi_sucursal,
+        "funciones_plan":  funciones_plan,
+        "debe_cambiar_password": claims.get("debe_cambiar_password", False),  # SCRUM-224
+    }), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CAMBIO DE CONTRASEÑA OBLIGATORIO (SCRUM-224)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@auth_bp.route("/cambiar-password-inicial", methods=["PUT"])
+@jwt_required()
+def cambiar_password_inicial():
+    """
+    Cambia la contraseña de la cuenta actual y apaga debe_cambiar_password.
+
+    Lo usa la pasarela obligatoria que ve cualquier miembro/staff/
+    administrador (no el Propietario -- ese pasa por
+    PUT /api/onboarding/complete-setup, que ya hace lo mismo para su propio
+    flujo) la primera vez que entra con una contraseña que no eligió él
+    mismo: generada al crear su cuenta (ver utils/credenciales_acceso.py)
+    o reseteada por un Propietario/Administrador (ver
+    owner_gym/owner_trainers.py::actualizar_staff()).
+
+    No pide la contraseña actual: igual que complete-setup, el JWT ya
+    prueba que la sesión es legítima -- exigir la contraseña generada de
+    vuelta no añade seguridad real aquí y sí fricción al único paso que
+    existe precisamente para reemplazarla.
+
+    Body: { "nueva_password": "..." }
+    """
+    user_id = get_jwt_identity()
+    data    = request.get_json(silent=True) or {}
+    nueva_password = (data.get("nueva_password") or data.get("password") or "").strip()
+
+    if len(nueva_password) < 8:
+        return jsonify({"msg": "La contraseña debe tener al menos 8 caracteres"}), 400
+
+    try:
+        usuario = UsuarioPG.query.get(int(user_id))
+    except (TypeError, ValueError):
+        usuario = None
+    if not usuario:
+        return jsonify({"msg": "Usuario no encontrado"}), 404
+
+    try:
+        usuario.set_password(nueva_password)
+        usuario.debe_cambiar_password = False
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": f"No se pudo actualizar la contraseña: {e}"}), 500
+
+    # Reemitir el JWT ya con debe_cambiar_password=False -- mismo patrón que
+    # onboarding.py::complete-setup: sin esto, el frontend seguiría viendo
+    # la bandera vieja (true) hasta el próximo login y la pasarela de
+    # cambio de contraseña nunca se cerraría sola.
+    payload = _build_token_pg(usuario)
+    token   = create_access_token(identity=payload["identity"], additional_claims=payload["claims"])
+
+    return jsonify({
+        "msg":          "Contraseña actualizada",
+        "access_token": token,
+        "user":         payload["user_response"],
     }), 200
 
 

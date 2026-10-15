@@ -18,6 +18,7 @@ from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.usuario import Usuario
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
+from app.utils.horarios_gym import horarios_desde_configuracion, horario_de_hoy
 
 owner_profile_bp = Blueprint("owner_profile", __name__)
 
@@ -49,6 +50,20 @@ def get_perfil():
         return jsonify({"msg": "Gimnasio no encontrado"}), 404
 
     data = gym.to_dict()
+
+    # SCRUM-224 (item B): to_dict() deja "configuracion" anidado tal cual
+    # se guardó -- la app móvil (mobile/app/(admin)/gym-profile.tsx) espera
+    # estos campos aplanados en la raíz de la respuesta, y antes de este
+    # cambio no se aplanaba NINGUNO, así que esa pantalla nunca llegó a
+    # mostrar descripción, capacidad, horario ni redes sociales reales
+    # (bug preexistente, descubierto al implementar el horario por día).
+    config = data.get("configuracion") or {}
+    data["descripcion"]      = config.get("descripcion", "")
+    data["direccion"]        = config.get("direccion", "")
+    data["capacidad_maxima"] = config.get("capacidad_maxima", 0)
+    data["redes"]            = config.get("redes", {})
+    data["horarios"]         = horarios_desde_configuracion(config)
+    data["horario_hoy"]      = horario_de_hoy(config)
 
     # Etiqueta legible del tipo: la interfaz no debe mostrar 'gimnasio_tradicional'.
     tipo = data.get("tipo_gimnasio") or "gimnasio_tradicional"

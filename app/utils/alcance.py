@@ -15,9 +15,11 @@ cuando llegue HU-42.
 Uso típico en un endpoint que crea un Gimnasio y luego su Usuario dueño:
 
     nuevo_gym = Gimnasio(...)
+    crear_organizacion_para_gimnasio(nuevo_gym)   # ANTES de add()/flush() --
+                                                   # ver nota en la función
+
     db.session.add(nuevo_gym)
     db.session.flush()                        # necesita nuevo_gym.id
-    crear_organizacion_para_gimnasio(nuevo_gym)
 
     nuevo_admin = Usuario(..., id_gimnasio=nuevo_gym.id)
     db.session.add(nuevo_admin)
@@ -35,15 +37,31 @@ from app.constants.roles import normalizar_rol
 from app.models.pg.bitacora_evento import BitacoraEvento
 
 
-def crear_organizacion_para_gimnasio(gimnasio) -> Organizacion:
+def crear_organizacion_para_gimnasio(gimnasio, plan=None) -> Organizacion:
     """
     Crea la Organizacion 1:1 de un Gimnasio recién creado y la deja
     asignada en gimnasio.id_organizacion (más es_sucursal_principal=True).
 
-    Debe llamarse DESPUÉS de db.session.flush() sobre el gimnasio (se
-    necesita gimnasio.id ya asignado) y ANTES del commit.
+    `plan` (SCRUM-223): plan SaaS con el que arranca la organización --
+    lo fija quien da de alta al gimnasio (ver onboarding.py, que ya
+    resolvió el PlanSuscripcion elegido antes de llegar aquí). Si se
+    omite, queda en el default del modelo ("basico").
+
+    IMPORTANTE -- orden de llamada (bug real corregido en los 5 sitios que
+    crean un Gimnasio, ver bitácora técnica): debe llamarse ANTES de
+    db.session.add(gimnasio)/flush(), no después. Esta función no toca
+    gimnasio.id para nada, solo gimnasio.nombre (ya disponible desde el
+    constructor) -- pero sí hace su propio db.session.flush() interno
+    (para obtener organizacion.id), y un flush() arrastra TODOS los
+    objetos pendientes de la sesión, no solo el que uno tiene en mente. Si
+    el gimnasio ya estaba agregado a la sesión en ese momento, ese flush
+    intenta insertarlo con id_organizacion todavía en None -- y
+    gimnasios.id_organizacion es NOT NULL (migración 017), así que la
+    inserción revienta antes de que esta función alcance a resolverlo.
     """
     organizacion = Organizacion(nombre=gimnasio.nombre, activo=True)
+    if plan:
+        organizacion.plan = plan
     db.session.add(organizacion)
     db.session.flush()  # obtener organizacion.id
 

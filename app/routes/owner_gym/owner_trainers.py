@@ -20,6 +20,7 @@ from app.utils.security import require_role
 from app.utils.alcance import crear_asignacion
 from app.utils.capacidad import verificar_capacidad_staff, LimiteDePlanExcedido
 from app.utils.busqueda import normalizar_columna
+from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
@@ -124,20 +125,22 @@ def crear_staff():
         {
             "nombre":   "Juan Pérez",
             "email":    "juan@gym.com",
-            "password": "segura123",
             "rol":      "Entrenador"   // o "Recepcionista"
         }
+
+    SCRUM-224: ya no se manda "password" -- se genera aquí y se le envía
+    por correo al propio entrenador/recepcionista, que la cambia en su
+    primer login (ver Usuario.debe_cambiar_password).
     """
     gym_id = g.tenant_id
     data   = request.get_json() or {}
 
     nombre   = (data.get("nombre")   or "").strip()
     email    = (data.get("email")    or "").strip().lower()
-    password = (data.get("password") or "").strip()
     rol_name = (data.get("rol")      or "").strip()
 
-    if not all([nombre, email, password, rol_name]):
-        return jsonify({"msg": "nombre, email, password y rol son requeridos"}), 400
+    if not all([nombre, email, rol_name]):
+        return jsonify({"msg": "nombre, email y rol son requeridos"}), 400
     if rol_name not in _STAFF_ROLES:
         return jsonify({"msg": f"rol debe ser uno de: {', '.join(_STAFF_ROLES)}"}), 400
 
@@ -162,7 +165,9 @@ def crear_staff():
         activo      = True,
         foto_perfil = _valid_foto(data.get("foto_base64")),
     )
-    nuevo.set_password(password)
+    password_generada = generar_password_temporal()
+    nuevo.set_password(password_generada)
+    nuevo.debe_cambiar_password = True
     db.session.add(nuevo)
     db.session.flush()
 
@@ -171,6 +176,8 @@ def crear_staff():
     crear_asignacion(nuevo)
 
     db.session.commit()
+
+    enviar_credenciales_acceso(email, nombre, password_generada, rol_name)
 
     return jsonify({"msg": "Usuario creado", **nuevo.to_dict()}), 201
 
@@ -210,6 +217,7 @@ def actualizar_staff(user_id: int):
 
     if password:
         usuario.set_password(password)
+        usuario.debe_cambiar_password = True  # SCRUM-224: la acaba de fijar el admin, no él mismo
 
     if rol_name:
         if rol_name not in _STAFF_ROLES:

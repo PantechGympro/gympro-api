@@ -30,6 +30,7 @@ from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.gym_types               import GYM_TYPES, get_gym_type_config, seed_default_memberships
 from app.utils.alcance                 import crear_organizacion_para_gimnasio, crear_asignacion
 from app.constants.roles               import ROL_PROPIETARIO, roles_equivalentes
+from app.utils.horarios_gym            import normalizar_horarios
 
 logger = logging.getLogger(__name__)
 
@@ -212,13 +213,29 @@ def register_gym():
                 "label":           tipo_config["label"],
             },
         )
-        db.session.add(nuevo_gym)
-        db.session.flush()  # obtener nuevo_gym.id
-
         # 1b. Organización 1:1 del gimnasio nuevo (HU-41 / SCRUM-212).
-        # gimnasios.id_organizacion es NOT NULL, así que esto es obligatorio
-        # aquí -- no cambia ningún comportamiento visible todavía.
-        crear_organizacion_para_gimnasio(nuevo_gym)
+        # gimnasios.id_organizacion es NOT NULL (migración 017), así que
+        # esto debe resolverse ANTES del primer flush del gimnasio -- no
+        # después. crear_organizacion_para_gimnasio() solo lee
+        # nuevo_gym.nombre (ya puesto por el constructor) y escribe
+        # nuevo_gym.id_organizacion/es_sucursal_principal en memoria; no
+        # necesita nuevo_gym.id para nada. Si se llama DESPUÉS de
+        # db.session.add(nuevo_gym) + flush() (como sugería antes el
+        # docstring de la función, y como quedó también en los 4 seeds que
+        # crean gimnasios), el flush() de la propia Organizacion() de
+        # adentro arrastra también el INSERT pendiente de nuevo_gym -- con
+        # id_organizacion todavía en None -- y revienta el NOT NULL antes
+        # de que esta función alcance a resolverlo. Bug real: así fallaba
+        # el registro de cualquier gimnasio nuevo (ver bitácora técnica).
+        # SCRUM-223: la organización arranca con el mismo plan que se
+        # acaba de resolver para el gimnasio (plan.nombre), no con el
+        # default del modelo -- evita un desfase de 1 escritura entre
+        # 'el plan que el usuario eligió' y 'el plan que de verdad gobierna
+        # los límites de su organización'.
+        crear_organizacion_para_gimnasio(nuevo_gym, plan=plan.nombre)
+
+        db.session.add(nuevo_gym)
+        db.session.flush()  # obtener nuevo_gym.id (id_organizacion ya resuelto)
 
         # 2. Crear Usuario administrador (primer_login=True para forzar onboarding)
         nuevo_admin = Usuario(
@@ -236,11 +253,17 @@ def register_gym():
         # 2b. Asignación de alcance del administrador (HU-41 / SCRUM-212).
         crear_asignacion(nuevo_admin, gimnasio=nuevo_gym)
 
-        # 3. Crear Suscripcion trialing
+        # 3. Crear Suscripcion trialing. SCRUM-224: el periodo de prueba no
+        # cobra nada, así que el ciclo (mensual/anual) todavía no se decide
+        # aquí -- se elige hasta la primera renovación real, en
+        # OwnerSubscription.jsx. ciclo_facturacion queda explícito en
+        # "mensual" para que quede claro que es la condición de partida, no
+        # un olvido.
         suscripcion = Suscripcion(
             id_gimnasio         = nuevo_gym.id,
             id_plan             = plan.id,
             estado              = "trialing",
+            ciclo_facturacion   = "mensual",
             fecha_inicio        = ahora,
             fecha_proximo_cobro = ahora + timedelta(days=14),
         )
@@ -267,7 +290,10 @@ def register_gym():
                             nombre_plan=plan.titulo_comercial or plan.nombre.capitalize())
 
         # 6. Generar JWT para login inmediato (primer_login=True → fuerza onboarding)
-        _plan_val = nuevo_gym.plan if isinstance(nuevo_gym.plan, str) else nuevo_gym.plan.value
+        # SCRUM-223: el claim "plan" refleja el de la organización recién
+        # creada (ya fijado arriba con plan.nombre), no Gimnasio.plan.
+        _org_plan = nuevo_gym.organizacion.plan if nuevo_gym.organizacion else plan.nombre
+        _plan_val = _org_plan if isinstance(_org_plan, str) else _org_plan.value
         token = create_access_token(
             identity = str(nuevo_admin.id),
             additional_claims = {
@@ -320,8 +346,10 @@ def complete_setup():
         "tipo_gimnasio":    "crossfit_functional",
         "descripcion":      "El mejor gym de la ciudad",
         "direccion":        "Av. Principal 123, Monterrey",
-        "horario_apertura": "06:00",
-        "horario_cierre":   "22:00",
+        "horarios": {
+          "lunes":    { "cerrado": false, "apertura": "06:00", "cierre": "22:00" },
+          "...":      "... (martes..domingo, misma forma)",
+        },
         "capacidad_maxima": 80,
         "redes": {
           "instagram": "@migym",
@@ -378,20 +406,39 @@ def complete_setup():
                 config_base = dict(gym.configuracion or {})
 
             # Mezclar campos de preferencias en configuracion JSON
+            #
+            # SCRUM-224 (item B): horario_apertura/horario_cierre (un solo
+            # par para los 7 dias) se reemplaza por "horarios", un dict con
+            # una entrada por dia -- ver utils/horarios_gym.py. Si el
+            # gimnasio ya tenia el par legacy (onboarding incompleto de una
+            # version anterior) y el frontend aun no manda "horarios", se
+            # usa ese par como base para los 7 dias en vez de perderlo.
             config_base.update({
                 "descripcion":      gym_info.get("descripcion", config_base.get("descripcion", "")),
                 "direccion":        gym_info.get("direccion",   config_base.get("direccion", "")),
-                "horario_apertura": gym_info.get("horario_apertura", config_base.get("horario_apertura", "")),
-                "horario_cierre":   gym_info.get("horario_cierre",   config_base.get("horario_cierre", "")),
+                "horarios":         normalizar_horarios(
+                    gym_info.get("horarios"),
+                    legacy_apertura=config_base.get("horario_apertura"),
+                    legacy_cierre=config_base.get("horario_cierre"),
+                ),
                 "capacidad_maxima": gym_info.get("capacidad_maxima", config_base.get("capacidad_maxima", 0)),
                 "redes":            gym_info.get("redes",       config_base.get("redes", {})),
             })
+            # Los campos planos quedan obsoletos: una sola fuente de verdad
+            # para el horario evita que un consumidor viejo lea el par
+            # global mientras otro ya lee "horarios" y queden desincronizados.
+            config_base.pop("horario_apertura", None)
+            config_base.pop("horario_cierre", None)
             gym.configuracion = config_base
 
         db.session.commit()
 
         # 3. Emitir nuevo JWT con primer_login=False
-        _plan = gym.plan if gym else "basico"
+        # SCRUM-223: el plan vigente es el de la organización, no Gimnasio.plan.
+        if gym and gym.organizacion:
+            _plan = gym.organizacion.plan
+        else:
+            _plan = "basico"
         plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
         nuevo_token = create_access_token(
             identity = str(usuario.id),

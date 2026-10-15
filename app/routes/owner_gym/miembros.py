@@ -15,6 +15,7 @@ from app.utils.busqueda import patron_insensible
 from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol import Rol as RolPG
+from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
 
 miembros_bp = Blueprint("miembros", __name__)
 
@@ -88,10 +89,15 @@ def crear_miembro():
 
     nombre   = data.get('nombre', '').strip()
     email    = data.get('email', '').strip().lower()
-    password = data.get('password', '').strip()
 
     if not nombre or not email:
         return jsonify({"error": "Nombre y Email son obligatorios"}), 400
+
+    # SCRUM-224: la contraseña ya no la escribe quien da de alta al miembro
+    # (antes incluso caía a un fallback fijo "gym123" si se dejaba en
+    # blanco) -- se genera aquí y se le envía por correo al propio
+    # miembro, que la cambia en su primer login (debe_cambiar_password).
+    password_generada = generar_password_temporal()
 
     # SCRUM-222 (AC1): el tope de plan se verifica en el alta, antes de
     # tocar la base -- nunca en una consulta de lectura (ver utils/capacidad.py).
@@ -119,7 +125,8 @@ def crear_miembro():
             id_gimnasio = gym_id,
             activo      = True,
         )
-        pg_usuario.set_password(password if password else "gym123")
+        pg_usuario.set_password(password_generada)
+        pg_usuario.debe_cambiar_password = True
         pg_db.session.add(pg_usuario)
         pg_db.session.flush()
 
@@ -150,6 +157,12 @@ def crear_miembro():
         nuevo_miembro._id = miembro_id
 
         pg_db.session.commit()
+
+        # El correo se manda ya con la fila comprometida (commit arriba) --
+        # si falla el envío (ver enviar_credenciales_acceso: falla
+        # silenciosamente), el miembro queda creado igual, solo que
+        # alguien tendrá que resetearle la contraseña a mano.
+        enviar_credenciales_acceso(email, nombre, password_generada, "Miembro")
 
         return jsonify(nuevo_miembro.to_dict_full()), 201
 
@@ -351,13 +364,32 @@ def listar_asistencias_miembro(id):
                   .skip(skip)
                   .limit(per_page))
 
+        asistencias_raw = list(cursor)
+
+        # HU-47/SCRUM-218: si alguna asistencia fue una visita a OTRA
+        # sucursal (id_gimnasio_visita != esta, la de origen del
+        # miembro), se resuelve su nombre para mostrarlo -- en lote, para
+        # no hacer una consulta a PG por cada fila de la página.
+        ids_visita = {
+            a["id_gimnasio_visita"] for a in asistencias_raw
+            if a.get("id_gimnasio_visita") and a["id_gimnasio_visita"] != gym_id
+        }
+        nombres_sucursal = {}
+        if ids_visita:
+            from app.models.pg.gimnasio import Gimnasio
+            nombres_sucursal = {
+                gimn.id: gimn.nombre
+                for gimn in Gimnasio.query.filter(Gimnasio.id.in_(ids_visita)).all()
+            }
+
         asistencias = [{
-            "id":           str(a["_id"]),
-            "fecha":        _fecha_iso(a.get("fecha")),
-            "hora_entrada": a.get("hora_entrada"),
-            "hora_salida":  a.get("hora_salida"),
-            "origen":       a.get("origen", "checkin"),
-        } for a in cursor]
+            "id":              str(a["_id"]),
+            "fecha":           _fecha_iso(a.get("fecha")),
+            "hora_entrada":    a.get("hora_entrada"),
+            "hora_salida":     a.get("hora_salida"),
+            "origen":          a.get("origen", "checkin"),
+            "sucursal_visita": nombres_sucursal.get(a.get("id_gimnasio_visita")),
+        } for a in asistencias_raw]
 
         return jsonify({
             "asistencias":  asistencias,
