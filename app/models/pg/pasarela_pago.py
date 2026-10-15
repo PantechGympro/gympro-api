@@ -82,6 +82,16 @@ class ConfiguracionPasarela(db.Model):
     verificado_en  = db.Column(db.DateTime(timezone=True), nullable=True)
     ultimo_error   = db.Column(db.String(300), nullable=True)
 
+    # SCRUM-221 / HU-50, criterio 6 (ventana de enfriamiento de 24h): cuando
+    # el propietario cambia la cuenta de cobro, el valor ANTERIOR de
+    # `credenciales` se guarda aquí y `cambiado_en` marca cuándo pasó. Durante
+    # las primeras 24h tras ese momento, services/payments/factory.py cobra
+    # con `credenciales_anteriores`, no con `credenciales` -- así un cobro ya
+    # en curso (el miembro llegó a la caja justo cuando el propietario
+    # terminaba de cambiar la cuenta) no cae a medias en la cuenta nueva.
+    credenciales_anteriores = db.Column(db.Text, nullable=True)
+    cambiado_en             = db.Column(db.DateTime(timezone=True), nullable=True)
+
     created_at    = db.Column(db.DateTime(timezone=True), nullable=False,
                               default=lambda: datetime.now(timezone.utc))
     updated_at    = db.Column(db.DateTime(timezone=True), nullable=False,

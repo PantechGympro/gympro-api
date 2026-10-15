@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 import re as _re
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
+from app.utils.security import require_funcion_plan  # SCRUM-224
 
 spark_regresion_bp = Blueprint("spark_regresion", __name__)
 
@@ -690,6 +691,7 @@ def _diagnostico_datos(gym_id, trainer_id):
 
 @spark_regresion_bp.route("/api/analytics/regresion", methods=["GET"])
 @jwt_required()
+@require_funcion_plan("analiticas_ia")  # SCRUM-224
 def regresion_analytics():
     """Devuelve métricas globales desde caché. Si expiró, re-entrena."""
     try:
@@ -725,6 +727,7 @@ def regresion_analytics():
 
 @spark_regresion_bp.route("/api/analytics/regresion/train", methods=["POST"])
 @jwt_required()
+@require_funcion_plan("analiticas_ia")  # SCRUM-224
 def regresion_train():
     """Fuerza re-entrenamiento y actualiza caché."""
     try:

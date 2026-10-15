@@ -250,6 +250,12 @@ def register_checkin():
         "hora_entrada": now.strftime("%H:%M:%S"),
         "hora_salida":  None,
         "registrado_por": get_jwt().get("sub"),
+        # HU-47/SCRUM-218: mismo campo que usa la verificación entre
+        # sucursales (verificacion_sucursal.py) para poder mostrar "dónde
+        # fue" en el historial -- en un check-in normal de recepción
+        # siempre coincide con la sucursal de origen del miembro, así que
+        # el historial no lo resalta (solo resalta cuando difiere).
+        "id_gimnasio_visita": gym_id,
     })
 
     return jsonify({

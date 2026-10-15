@@ -19,6 +19,8 @@ directa sobre Gimnasio.id_organizacion (ver _mi_organizacion() más abajo).
 
 Endpoints (prefijo /api/owner_gym, registrado en app/__init__.py):
     GET    /sucursales                         lista las sucursales de mi organización
+    GET    /sucursales/capacidad                ocupación de miembros/staff de cada sucursal
+    GET    /sucursales/limite                   sucursales usadas vs. tope del plan de mi organización
     POST   /sucursales                         crea una sucursal nueva
     PUT    /sucursales/<id>                    edita datos de una sucursal
     PATCH  /sucursales/<id>/toggle              activa/desactiva una sucursal
@@ -27,14 +29,18 @@ Endpoints (prefijo /api/owner_gym, registrado en app/__init__.py):
     PUT    /administradores/<id>/sucursales      reemplaza el conjunto de sucursales asignadas
     PATCH  /administradores/<id>/toggle          activa/desactiva un administrador
 
-Nota de alcance deliberadamente fuera de este ticket: crear una sucursal
-aquí NO crea una Suscripcion/FacturaSuscripcion nueva (el billing SaaS
-gimnasio-paga-a-GymPro, ver billing.py/billing_stripe.py) -- solo copia,
-si se pide, la configuración de PASARELAS DE COBRO de la sede principal
-(con qué el gimnasio cobra a SUS miembros, ver pasarelas.py). Si el
-negocio decide que cada sucursal debe pagar su propia suscripción SaaS,
-eso es una decisión de producto que no estaba en el alcance de HU-45 tal
-como se leyó, y se deja para una actividad aparte.
+SCRUM-223: la pregunta que HU-45 dejaba deliberadamente abierta ("¿cada
+sucursal paga su propia suscripción SaaS?") ya se resolvió -- NO. El plan
+SaaS lo contrata la ORGANIZACIÓN completa (organizaciones.plan, ver
+models/pg/organizacion.py y utils/capacidad.py) y cubre hasta
+limites.max_sucursales sucursales; por eso esta ruta YA NO acepta un
+campo "plan" al crear o editar una sucursal -- una sucursal no tiene plan
+propio, hereda el de su organización. Crear una sucursal aquí sigue sin
+generar una Suscripcion/FacturaSuscripcion nueva (eso solo existe para la
+sede principal, ver billing.py) -- solo copia, si se pide, la
+configuración de PASARELAS DE COBRO de la sede principal (con qué el
+gimnasio cobra a SUS miembros, ver pasarelas.py), que es un concepto
+distinto y nada tiene que ver con el plan SaaS contratado.
 """
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -48,8 +54,12 @@ from app.models.pg.pasarela_pago import ConfiguracionPasarela
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import crear_asignacion, sucursales_de_administrador, registrar_evento
-from app.utils.capacidad import verificar_capacidad_staff, estado_capacidad, LimiteDePlanExcedido
+from app.utils.capacidad import (
+    verificar_capacidad_staff, verificar_capacidad_sucursal,
+    estado_capacidad, estado_capacidad_organizacion, LimiteDePlanExcedido,
+)
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR
+from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
 
 sucursales_bp = Blueprint("sucursales", __name__)
 
@@ -125,6 +135,23 @@ def capacidad_de_mis_sucursales():
     return jsonify(salida), 200
 
 
+@sucursales_bp.route("/sucursales/limite", methods=["GET"])
+@jwt_required()
+@require_role(ROL_PROPIETARIO)
+@require_tenant
+def limite_sucursales():
+    """
+    SCRUM-223: cuántas sucursales tiene ya mi organización frente al tope
+    de su plan contratado (estado_capacidad_organizacion), para que el
+    panel pueda avisar ANTES de que "Nueva Sucursal" devuelva 409 -- mismo
+    espíritu que GET /sucursales/capacidad pero a nivel organización.
+    """
+    org = _mi_organizacion()
+    if org is None:
+        return jsonify({"plan": None, "actual": 0, "tope": None, "cerca_del_tope": False, "en_el_tope": False}), 200
+    return jsonify(estado_capacidad_organizacion(org)), 200
+
+
 @sucursales_bp.route("/sucursales", methods=["POST"])
 @jwt_required()
 @require_role(ROL_PROPIETARIO)
@@ -151,15 +178,17 @@ def crear_sucursal():
     if not nombre:
         return jsonify({"msg": "nombre es requerido"}), 400
 
+    # SCRUM-223 (tope de sucursales por plan): se verifica ANTES de tocar
+    # la base, mismo criterio que verificar_capacidad_miembro/staff.
+    try:
+        verificar_capacidad_sucursal(org)
+    except LimiteDePlanExcedido as e:
+        return jsonify({"msg": str(e), "caben": max(e.tope - e.actual, 0)}), 409
+
     sede_principal = Gimnasio.query.filter_by(id_organizacion=org, es_sucursal_principal=True).first()
-    if sede_principal is not None:
-        plan_heredado = sede_principal.plan.value if hasattr(sede_principal.plan, "value") else sede_principal.plan
-    else:
-        plan_heredado = "basico"
 
     nueva = Gimnasio(
         nombre                = nombre,
-        plan                   = (data.get("plan") or plan_heredado),
         activo                 = True,
         email_contacto         = (data.get("email_contacto") or "").strip() or None,
         telefono               = (data.get("telefono") or "").strip() or None,
@@ -217,8 +246,8 @@ def actualizar_sucursal(id_gimnasio):
             if campo == "nombre" and valor is None:
                 return jsonify({"msg": "nombre no puede quedar vacío"}), 400
             setattr(sucursal, campo, valor)
-    if data.get("plan"):
-        sucursal.plan = data["plan"]
+    # SCRUM-223: "plan" ya no se acepta aquí -- una sucursal no tiene plan
+    # propio, hereda el de su organización (ver billing.py para cambiarlo).
 
     db.session.commit()
     return jsonify({"msg": "Sucursal actualizada", **sucursal.to_dict()}), 200
@@ -313,11 +342,14 @@ def crear_administrador():
     data     = request.get_json() or {}
     nombre   = (data.get("nombre")   or "").strip()
     email    = (data.get("email")    or "").strip().lower()
-    password = (data.get("password") or "").strip()
     sucursales_ids = data.get("sucursales") or []
 
-    if not all([nombre, email, password]) or not sucursales_ids:
-        return jsonify({"msg": "nombre, email, password y al menos una sucursal son requeridos"}), 400
+    if not all([nombre, email]) or not sucursales_ids:
+        return jsonify({"msg": "nombre, email y al menos una sucursal son requeridos"}), 400
+
+    # SCRUM-224: igual que crear_miembro()/crear_staff() -- la contraseña
+    # se genera aquí y se envía por correo, nunca la escribe el Propietario.
+    password_generada = generar_password_temporal()
     if not isinstance(sucursales_ids, list) or not all(isinstance(i, int) for i in sucursales_ids):
         return jsonify({"msg": "sucursales debe ser una lista de ids"}), 400
 
@@ -348,7 +380,8 @@ def crear_administrador():
         id_gimnasio = sucursales_ids[0],   # sucursal activa inicial
         activo      = True,
     )
-    nuevo.set_password(password)
+    nuevo.set_password(password_generada)
+    nuevo.debe_cambiar_password = True
     db.session.add(nuevo)
     db.session.flush()  # necesita nuevo.id
 
@@ -361,6 +394,9 @@ def crear_administrador():
         detalle={"id_usuario": nuevo.id, "sucursales": sucursales_ids},
     )
     db.session.commit()
+
+    enviar_credenciales_acceso(email, nombre, password_generada, "Administrador")
+
     return jsonify({"msg": "Administrador creado", **nuevo.to_dict(), "sucursales": sucursales_ids}), 201
 
 

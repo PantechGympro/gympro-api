@@ -18,6 +18,22 @@ from app.utils.security import require_role
 planes_admin_bp = Blueprint("planes_admin", __name__)
 
 
+def _limites_desde_payload(data: dict) -> dict:
+    """
+    Arma el JSON `limites` de un plan NUEVO a partir de las claves sueltas
+    que acepta el body (max_staff, max_sucursales) más cualquier otra
+    bandera de función (analiticas_ia, pos, etc.) que venga ya como un
+    dict `limites` completo -- para no perder las banderas existentes si
+    el caller manda ambas formas a la vez.
+    """
+    limites = dict(data.get("limites") or {})
+    if "max_staff" in data:
+        limites["max_staff"] = data["max_staff"]
+    if "max_sucursales" in data:
+        limites["max_sucursales"] = data["max_sucursales"]
+    return limites
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +67,10 @@ def crear_plan():
         {
             "nombre":             "enterprise_plus",
             "precio_mensual_mxn": 199900,     ← centavos (1999.00 MXN)
-            "max_miembros":       null,        ← null = ilimitado
+            "precio_anual_mxn":   1999000,     ← opcional, centavos; null = se cobra 12x el mensual (SCRUM-224)
+            "max_miembros":       null,        ← None = ilimitado, por SUCURSAL (ver utils/capacidad.py)
+            "max_staff":          10,          ← por sucursal, se guarda en limites.max_staff
+            "max_sucursales":     5,           ← tope de sucursales de la ORGANIZACIÓN (SCRUM-223)
             "descripcion":        "Plan enterprise plus con soporte prioritario",
             "stripe_price_id":    "price_xxx"  ← opcional
         }
@@ -68,18 +87,28 @@ def crear_plan():
     if precio is None or not isinstance(precio, int) or precio < 0:
         return jsonify({"msg": "precio_mensual_mxn debe ser un entero positivo en centavos"}), 400
 
+    # SCRUM-224: precio_anual_mxn es opcional -- si no se manda, el ciclo
+    # "anual" simplemente cobra 12x el mensual (ver billing._monto_para_ciclo).
+    precio_anual = data.get("precio_anual_mxn")
+    if precio_anual is not None and (not isinstance(precio_anual, int) or precio_anual < 0):
+        return jsonify({"msg": "precio_anual_mxn debe ser un entero positivo en centavos, o null"}), 400
+
     caracteristicas = data.get("caracteristicas")
     if caracteristicas is not None and not isinstance(caracteristicas, list):
         return jsonify({"msg": "caracteristicas debe ser una lista de beneficios"}), 400
 
+    limites = _limites_desde_payload(data)
+
     plan = PlanSuscripcion(
         nombre              = nombre,
         precio_mensual_mxn  = precio,
+        precio_anual_mxn    = precio_anual,
         max_miembros        = data.get("max_miembros"),   # None = ilimitado
         descripcion         = data.get("descripcion", ""),
         stripe_price_id     = data.get("stripe_price_id"),
         titulo_comercial    = data.get("titulo_comercial"),
         caracteristicas     = caracteristicas or [],
+        limites             = limites,
         activo              = True,
     )
     db.session.add(plan)
@@ -121,8 +150,22 @@ def editar_plan(plan_id: int):
             return jsonify({"msg": "precio_mensual_mxn debe ser un entero positivo en centavos"}), 400
         plan.precio_mensual_mxn = precio
 
+    if "precio_anual_mxn" in data:
+        precio_anual = data["precio_anual_mxn"]
+        if precio_anual is not None and (not isinstance(precio_anual, int) or precio_anual < 0):
+            return jsonify({"msg": "precio_anual_mxn debe ser un entero positivo en centavos, o null"}), 400
+        plan.precio_anual_mxn = precio_anual   # null = vuelve a cobrar 12x el mensual
+
     if "max_miembros" in data:
         plan.max_miembros = data["max_miembros"]   # None = ilimitado
+
+    if "max_staff" in data or "max_sucursales" in data:
+        limites = dict(plan.limites or {})
+        if "max_staff" in data:
+            limites["max_staff"] = data["max_staff"]           # None = ilimitado, por sucursal
+        if "max_sucursales" in data:
+            limites["max_sucursales"] = data["max_sucursales"] # None = ilimitado, por organización
+        plan.limites = limites
 
     if "descripcion" in data:
         plan.descripcion = data["descripcion"]

@@ -110,7 +110,9 @@ def detalle_usuario(user_id: int):
         "rol":         u.rol.nombre if u.rol else None,
         "id_gimnasio": u.id_gimnasio,
         "gimnasio":    u.gimnasio.nombre if u.gimnasio else None,
-        "plan":        u.gimnasio.plan if u.gimnasio else None,
+        # SCRUM-223: el plan vigente es el de la organización, no el de
+        # Gimnasio.plan (que ya no se actualiza -- ver utils/capacidad.py).
+        "plan":        (u.gimnasio.organizacion.plan if u.gimnasio and u.gimnasio.organizacion else None),
         "created_at":  u.created_at.isoformat() if u.created_at else None,
     }), 200
 
@@ -137,7 +139,12 @@ def impersonate(user_id: int):
     superadmin_id = get_jwt_identity()
     rol_nombre    = target.rol.nombre if target.rol else "Desconocido"
 
-    _plan = target.gimnasio.plan if target.gimnasio else "basico"
+    # SCRUM-223: mismo criterio que el login real (auth/routes.py) --
+    # el plan vigente es el de la organización, no Gimnasio.plan.
+    if target.gimnasio and target.gimnasio.organizacion:
+        _plan = target.gimnasio.organizacion.plan
+    else:
+        _plan = "basico"
     plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
 
     claims = {

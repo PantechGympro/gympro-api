@@ -18,9 +18,15 @@ Variables de entorno de la plataforma (solo para el contexto 'suscripcion'):
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone, timedelta
 
 from app.models.pg.pasarela_pago import ConfiguracionPasarela
 from app.utils.crypto import descifrar_dict
+
+# SCRUM-221 / HU-50, criterio 6: cuánto dura la ventana de enfriamiento tras
+# cambiar la cuenta de cobro. Los cobros que caen dentro de esta ventana
+# siguen yendo a la cuenta ANTERIOR (ver _credenciales_vigentes abajo).
+VENTANA_ENFRIAMIENTO = timedelta(hours=24)
 
 from .base import PasarelaBase, PasarelaError
 from .paypal import PayPalPasarela
@@ -60,6 +66,23 @@ def construir_pasarela(proveedor: str, credenciales: dict,
     return clase(credenciales=credenciales, modo=modo, moneda=moneda)
 
 
+def _credenciales_vigentes(cfg: ConfiguracionPasarela) -> str | None:
+    """
+    SCRUM-221 / HU-50, criterio 6: durante las 24h posteriores a un cambio de
+    cuenta, el cobro sigue yendo a la cuenta ANTERIOR, no a la que se acaba
+    de guardar -- así un cobro que ya estaba en curso cuando el propietario
+    terminó de cambiar la cuenta no se desvía a medias. Pasada la ventana
+    (o si nunca hubo un cambio registrado), se usa la cuenta vigente.
+    """
+    if cfg.cambiado_en and cfg.credenciales_anteriores:
+        cambiado_en = cfg.cambiado_en
+        if cambiado_en.tzinfo is None:
+            cambiado_en = cambiado_en.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - cambiado_en < VENTANA_ENFRIAMIENTO:
+            return cfg.credenciales_anteriores
+    return cfg.credenciales
+
+
 def pasarela_de_gimnasio(gym_id: int, proveedor: str) -> tuple[PasarelaBase, ConfiguracionPasarela]:
     """
     Devuelve la pasarela configurada por un gimnasio y su registro de configuración.
@@ -77,7 +100,7 @@ def pasarela_de_gimnasio(gym_id: int, proveedor: str) -> tuple[PasarelaBase, Con
     if not cfg.activo:
         raise PasarelaError("Este método de pago está desactivado para el gimnasio.")
 
-    credenciales = descifrar_dict(cfg.credenciales)
+    credenciales = descifrar_dict(_credenciales_vigentes(cfg))
     if not credenciales:
         raise PasarelaError(
             "Las credenciales guardadas no se pudieron leer. Vuelve a capturarlas "

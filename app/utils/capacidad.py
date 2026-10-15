@@ -29,8 +29,31 @@ planteaba el ticket:
 Bloquear es la única opción determinista y auditable con la información
 disponible. Queda documentado aquí porque es, literalmente, un requisito
 de la historia -- no un detalle de implementación a ocultar en un commit.
+
+SCRUM-223 (actualización de este mismo módulo): el plan ya no se lee de
+Gimnasio.plan sino de Organizacion.plan -- la organización completa
+contrata un plan que cubre hasta limites.max_sucursales sucursales, y se
+sincroniza desde routes/owner_gym/billing.py cuando el Propietario
+cambia de plan. El criterio de CONTEO no cambia: miembros y staff se
+siguen contando por Gimnasio (ver la decisión de arriba), y ahora se
+suma un tercer conteo, de sucursales, que es el único que se hace a
+nivel Organizacion en vez de Gimnasio -- por definición, "cuántas
+sucursales tiene esta organización" no es una pregunta que tenga
+sentido hacerle a una sola sucursal.
+
+SCRUM-224 (añadido a este mismo módulo): además de los TOPES numéricos
+de arriba, el plan también trae banderas de función SÍ/NO en
+`limites` -- analiticas_ia, rutinas_ia, reportes_pdf, app_movil, etc.
+Esas banderas ya existían desde la migración 012 (sembradas para los 4
+planes reales, no solo en seed_pg.py) y PlanSuscripcion.permite() ya
+sabía leerlas -- lo que faltaba, y es lo que agrega este ticket, es que
+algo del backend las hiciera cumplir. permite_funcion() de abajo es ese
+punto único: cualquier endpoint que dependa de una función de plan lo
+usa (vía @require_funcion_plan en utils/security.py) en vez de leer
+`limites` a mano.
 """
 from app.models.pg.gimnasio import Gimnasio
+from app.models.pg.organizacion import Organizacion
 from app.models.pg.plan_suscripcion import PlanSuscripcion
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
@@ -51,10 +74,26 @@ class LimiteDePlanExcedido(Exception):
 
 
 def _plan_de(id_gimnasio):
+    """
+    Plan vigente de la sucursal `id_gimnasio` -- SCRUM-223: se resuelve
+    por la ORGANIZACIÓN a la que pertenece (organizacion.plan), no por
+    Gimnasio.plan (que se queda en el esquema pero ya no es la fuente de
+    verdad -- ver docstring del módulo y de models/pg/organizacion.py).
+    """
     gym = Gimnasio.query.get(id_gimnasio)
-    if gym is None:
+    if gym is None or gym.organizacion is None:
         return None
-    nombre_plan = gym.plan.value if hasattr(gym.plan, "value") else gym.plan
+    nombre_plan = gym.organizacion.plan
+    nombre_plan = nombre_plan.value if hasattr(nombre_plan, "value") else nombre_plan
+    return PlanSuscripcion.query.filter_by(nombre=nombre_plan).first()
+
+
+def _plan_de_organizacion(id_organizacion):
+    """Igual que _plan_de() pero a partir del id de Organizacion directamente."""
+    org = Organizacion.query.get(id_organizacion)
+    if org is None:
+        return None
+    nombre_plan = org.plan.value if hasattr(org.plan, "value") else org.plan
     return PlanSuscripcion.query.filter_by(nombre=nombre_plan).first()
 
 
@@ -130,6 +169,66 @@ def verificar_capacidad_staff(id_gimnasio, *, incremento=1):
             f"Esta sucursal ya tiene {actual} usuario(s) de staff de un máximo de {tope} en su plan.",
             tope=tope, actual=actual,
         )
+
+
+def permite_funcion(id_gimnasio, nombre_funcion: str) -> bool:
+    """
+    SCRUM-224: True si el plan de la organización de `id_gimnasio` habilita
+    la función indicada (ver PlanSuscripcion.permite() y las banderas de
+    la migración 012: analiticas_ia, rutinas_ia, reportes_pdf, app_movil,
+    pos, cobros_en_linea, respaldos, soporte_prioritario, ...).
+
+    Se apoya en _plan_de(), el mismo resolutor que ya usan los topes
+    numéricos de arriba (Gimnasio -> Organizacion -> PlanSuscripcion) --
+    el plan sigue siendo de la ORGANIZACIÓN completa (SCRUM-223), así que
+    da igual qué sucursal de esa organización se pase aquí.
+
+    Si no se puede resolver el plan (gimnasio inexistente, sin
+    organización) se niega por seguridad -- mismo criterio que
+    PlanSuscripcion.permite() con una bandera ausente: "si no se sabe,
+    no se concede".
+    """
+    plan = _plan_de(id_gimnasio)
+    return bool(plan and plan.permite(nombre_funcion))
+
+
+def contar_sucursales(id_organizacion):
+    """Nº de sucursales (Gimnasio) que ya tiene esta organización."""
+    return Gimnasio.query.filter_by(id_organizacion=id_organizacion).count()
+
+
+def verificar_capacidad_sucursal(id_organizacion, *, incremento=1):
+    """
+    Antes de dar de alta `incremento` sucursal(es) nueva(s) en
+    `id_organizacion`, confirma que no se exceda limites.max_sucursales
+    del plan contratado por la organización. Mismo criterio que
+    verificar_capacidad_miembro()/verificar_capacidad_staff(), pero a
+    nivel Organizacion en vez de Gimnasio -- ver docstring del módulo.
+    """
+    plan = _plan_de_organizacion(id_organizacion)
+    tope = (plan.limites or {}).get("max_sucursales") if plan else None
+    if tope is None:
+        return
+    actual = contar_sucursales(id_organizacion)
+    if actual + incremento > tope:
+        raise LimiteDePlanExcedido(
+            f"Tu organización ya tiene {actual} sucursal(es) de un máximo de {tope} en su plan.",
+            tope=tope, actual=actual,
+        )
+
+
+def estado_capacidad_organizacion(id_organizacion):
+    """Estado de ocupación de sucursales de la organización completa (análogo a estado_capacidad())."""
+    plan  = _plan_de_organizacion(id_organizacion)
+    tope  = (plan.limites or {}).get("max_sucursales") if plan else None
+    actual = contar_sucursales(id_organizacion)
+    return {
+        "plan":           (plan.nombre if plan else None),
+        "actual":         actual,
+        "tope":           tope,
+        "cerca_del_tope": tope is not None and actual >= tope * 0.9,
+        "en_el_tope":     tope is not None and actual >= tope,
+    }
 
 
 def estado_capacidad(id_gimnasio):

@@ -17,6 +17,11 @@ class PlanSuscripcion(db.Model):
     id                 = db.Column(db.Integer, primary_key=True)
     nombre             = db.Column(db.String(50), unique=True, nullable=False)   # basico | pro | enterprise
     precio_mensual_mxn = db.Column(db.Integer, nullable=False)                   # centavos: 49900 = $499.00 MXN
+    # SCRUM-224: precio del ciclo anual -- centavos, None = el plan no ofrece
+    # anual (hoy los 4 planes lo ofrecen, ver migración 023, pero no se
+    # obliga a tener uno para no forzar un valor en un plan nuevo creado
+    # desde el panel antes de que alguien decida su descuento anual).
+    precio_anual_mxn   = db.Column(db.Integer, nullable=True)
     max_miembros       = db.Column(db.Integer, nullable=True)                    # None = ilimitado
     descripcion        = db.Column(db.Text, nullable=True)
     activo             = db.Column(db.Boolean, default=True, nullable=False)
@@ -46,21 +51,32 @@ class PlanSuscripcion(db.Model):
         return f"<PlanSuscripcion {self.nombre} ${self.precio_mensual_mxn / 100:.2f} MXN>"
 
     def to_dict(self):
+        # SCRUM-224: ahorro_anual_pct compara pagar 12 meses sueltos contra
+        # el precio_anual_mxn contratado -- 0 si el plan no ofrece anual o
+        # es gratuito, para que el frontend no tenga que repetir esta cuenta.
+        ahorro_pct = 0
+        if self.precio_anual_mxn and self.precio_mensual_mxn:
+            anual_sin_descuento = self.precio_mensual_mxn * 12
+            if anual_sin_descuento > 0:
+                ahorro_pct = round((1 - self.precio_anual_mxn / anual_sin_descuento) * 100)
         return {
-            "id":                  self.id,
-            "nombre":              self.nombre,
-            "precio_mensual_mxn":  self.precio_mensual_mxn,
-            "precio_display":      f"${self.precio_mensual_mxn / 100:,.2f} MXN/mes",
-            "max_miembros":        self.max_miembros,
-            "descripcion":         self.descripcion,
-            "activo":              self.activo,
-            "stripe_price_id":     self.stripe_price_id,
-            "titulo_comercial":    self.titulo_comercial,
-            "caracteristicas":     self.caracteristicas or [],
-            "limites":             self.limites or {},
-            "orden":               self.orden,
-            "destacado":           self.destacado,
-            "precio_mxn":          round((self.precio_mensual_mxn or 0) / 100, 2),
+            "id":                   self.id,
+            "nombre":               self.nombre,
+            "precio_mensual_mxn":   self.precio_mensual_mxn,
+            "precio_display":       f"${self.precio_mensual_mxn / 100:,.2f} MXN/mes",
+            "precio_anual_mxn":     self.precio_anual_mxn,
+            "precio_anual_display": (f"${self.precio_anual_mxn / 100:,.2f} MXN/año" if self.precio_anual_mxn is not None else None),
+            "ahorro_anual_pct":     ahorro_pct,
+            "max_miembros":         self.max_miembros,
+            "descripcion":          self.descripcion,
+            "activo":               self.activo,
+            "stripe_price_id":      self.stripe_price_id,
+            "titulo_comercial":     self.titulo_comercial,
+            "caracteristicas":      self.caracteristicas or [],
+            "limites":              self.limites or {},
+            "orden":                self.orden,
+            "destacado":            self.destacado,
+            "precio_mxn":           round((self.precio_mensual_mxn or 0) / 100, 2),
         }
 
     def permite(self, funcion: str) -> bool:

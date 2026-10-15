@@ -20,6 +20,7 @@ from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime, timedelta, timezone
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
+from app.utils.security import require_funcion_plan  # SCRUM-224
 
 spark_cancelaciones_bp = Blueprint("spark_cancelaciones", __name__)
 
@@ -283,6 +284,7 @@ def _paginar_en_riesgo(payload: dict) -> dict:
 
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones", methods=["GET"])
 @jwt_required()
+@require_funcion_plan("analiticas_ia")  # SCRUM-224
 def cancelaciones_analytics():
     try:
         gym_id = get_jwt().get("id_gimnasio")
@@ -305,6 +307,7 @@ def cancelaciones_analytics():
 
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones/train", methods=["POST"])
 @jwt_required()
+@require_funcion_plan("analiticas_ia")  # SCRUM-224
 def cancelaciones_train():
     try:
         gym_id  = get_jwt().get("id_gimnasio")

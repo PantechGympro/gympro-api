@@ -29,6 +29,7 @@ from app.mongo import get_db
 from app.models.pg.usuario import Usuario
 from app.models.pg.gimnasio import Gimnasio
 from app.utils.tenant import require_tenant
+from app.utils.security import require_funcion_plan  # SCRUM-224
 
 reportes_entrenador_bp = Blueprint("reportes_entrenador", __name__, url_prefix="/api/trainer")
 
@@ -175,6 +176,7 @@ def opciones():
 @reportes_entrenador_bp.route("/reportes/pdf", methods=["GET"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("reportes_pdf")  # SCRUM-224
 def reporte_pdf():
     """Reporte de desempeño del entrenador en PDF."""
     from reportlab.lib.pagesizes import A4

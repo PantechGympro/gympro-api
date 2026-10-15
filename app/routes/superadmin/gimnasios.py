@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
+from app.models.pg.organizacion import Organizacion
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.models.pg.suscripcion import Suscripcion
@@ -196,7 +197,10 @@ def listar_gimnasios():
     if activo_param is not None:
         query = query.filter(Gimnasio.activo == (activo_param.lower() == "true"))
     if plan_param:
-        query = query.filter(Gimnasio.plan == plan_param)
+        # SCRUM-223: el plan vigente es el de la organización, no
+        # Gimnasio.plan (que ya no se actualiza -- ver utils/capacidad.py).
+        query = query.join(Organizacion, Gimnasio.id_organizacion == Organizacion.id) \
+                     .filter(Organizacion.plan == plan_param)
     if q_param:
         like = f"%{q_param}%"
         query = query.filter(

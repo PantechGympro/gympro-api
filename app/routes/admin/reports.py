@@ -17,6 +17,7 @@ from datetime import datetime
 from flask import Blueprint, Response, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from app.utils.tenant import require_tenant
+from app.utils.security import require_funcion_plan  # SCRUM-224
 
 reports_bp = Blueprint("reports", __name__, url_prefix="/api/reports")
 
@@ -184,6 +185,7 @@ def report_miembros_csv():
 @reports_bp.route("/cancelaciones/csv", methods=["GET"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("analiticas_ia")  # SCRUM-224: mismo dato que /api/analytics/cancelaciones
 def report_cancelaciones_csv():
     from app.routes.ia.spark_config import cache_get
     gym_id = get_jwt().get("id_gimnasio")

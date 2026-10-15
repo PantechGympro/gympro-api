@@ -41,6 +41,12 @@ class Suscripcion(db.Model):
     id_gimnasio             = db.Column(db.Integer, db.ForeignKey("gimnasios.id", ondelete="CASCADE"), nullable=False, index=True)
     id_plan                 = db.Column(db.Integer, db.ForeignKey("planes_suscripcion.id", ondelete="RESTRICT"), nullable=False)
 
+    # SCRUM-224: ciclo de facturación contratado -- 'mensual' | 'anual'
+    # (CHECK en BD, ver migración 023). Mismo patrón de VARCHAR validado en
+    # Python que pasarela_recurrente/estado_recurrente más abajo, no un ENUM
+    # de Postgres nuevo para solo dos valores.
+    ciclo_facturacion       = db.Column(db.String(10), default="mensual", nullable=False, server_default="mensual")
+
     # Estado y fechas de ciclo
     estado                  = db.Column(_estado_enum_type, default="trialing", nullable=False)
     fecha_inicio            = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -105,6 +111,7 @@ class Suscripcion(db.Model):
             "id_gimnasio":            self.id_gimnasio,
             "id_plan":                self.id_plan,
             "plan":                   self.plan.to_dict() if self.plan else None,
+            "ciclo_facturacion":      self.ciclo_facturacion,
             "estado":                 self.estado if isinstance(self.estado, str) else self.estado.value,
             "activa":                 self.activa,
             "fecha_inicio":           self.fecha_inicio.isoformat() if self.fecha_inicio else None,

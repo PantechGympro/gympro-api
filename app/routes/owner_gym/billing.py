@@ -18,6 +18,16 @@ Endpoints:
   PUT  /api/billing/suscripcion/<id>     → cambiar plan o estado (admin del gimnasio)
   GET  /api/billing/facturas             → historial de facturas del gimnasio
   POST /api/billing/facturas             → registrar pago manual (admin / test local)
+
+SCRUM-223: el plan que estos dos primeros endpoints fijan en la
+Suscripcion es, desde esta actualización, el plan de TODA la
+organización (organizaciones.plan, ver utils/capacidad.py), no solo del
+gimnasio puntual del JWT. Esto es correcto porque la suscripción de un
+Propietario SIEMPRE vive en la sede principal de su organización (un
+Propietario tiene una sola fila de asignacion_usuario, apuntando a esa
+sede -- ver docstring de owner_gym/sucursales.py), así que g.tenant_id
+aquí es, por invariante del dominio, la sede principal. _sincronizar_plan_organizacion()
+hace explícita esa sincronización en vez de dejarla implícita.
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -25,6 +35,7 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt
 
 from app.extensions import db
+from app.models.pg.gimnasio           import Gimnasio
 from app.models.pg.plan_suscripcion   import PlanSuscripcion
 from app.models.pg.suscripcion        import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
@@ -55,6 +66,30 @@ def _suscripcion_activa(gym_id: int) -> Suscripcion | None:
         .order_by(Suscripcion.created_at.desc())
         .first()
     )
+
+
+def _sincronizar_plan_organizacion(gym_id: int, nombre_plan: str) -> None:
+    """
+    SCRUM-223: refleja en Organizacion.plan el plan que se acaba de fijar
+    en la Suscripcion de `gym_id` -- es la fuente que lee utils/capacidad.py
+    para TODAS las sucursales de la organización, no solo esta. No hace
+    commit (el caller ya hace el suyo tras esta llamada).
+    """
+    gimnasio = Gimnasio.query.get(gym_id)
+    if gimnasio is not None and gimnasio.organizacion is not None:
+        gimnasio.organizacion.plan = nombre_plan
+
+
+def _monto_para_ciclo(plan: PlanSuscripcion, ciclo: str) -> int:
+    """
+    Precio en centavos de `plan` para el ciclo de facturación dado
+    (SCRUM-224). 'anual' sin precio_anual_mxn fijado cae a 12 veces el
+    mensual -- mejor cobrar el equivalente íntegro que dejar el ciclo
+    anual sin precio para un plan al que todavía no se le asignó uno.
+    """
+    if ciclo == "anual":
+        return plan.precio_anual_mxn if plan.precio_anual_mxn is not None else plan.precio_mensual_mxn * 12
+    return plan.precio_mensual_mxn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +137,8 @@ def crear_suscripcion():
     Solo Administrador o SuperAdmin pueden invocar este endpoint.
 
     Body JSON:
-        { "id_plan": 1, "dias_prueba": 14 }   (dias_prueba opcional, default 14)
+        { "id_plan": 1, "dias_prueba": 14, "ciclo": "mensual" }
+        (dias_prueba opcional, default 14; ciclo opcional, "mensual" | "anual", default "mensual")
     """
     claims = get_jwt()
     if not _es_admin(claims):
@@ -124,22 +160,28 @@ def crear_suscripcion():
         return jsonify({"msg": "Plan no encontrado o inactivo"}), 404
 
     dias_prueba = int(data.get("dias_prueba", 14))
+    ciclo       = data.get("ciclo", "mensual")
+    if ciclo not in ("mensual", "anual"):
+        return jsonify({"msg": "ciclo debe ser 'mensual' o 'anual'"}), 400
     ahora       = datetime.now(timezone.utc)
 
     nueva_sub = Suscripcion(
         id_gimnasio          = gym_id,
         id_plan              = plan.id,
         estado               = "trialing",
+        ciclo_facturacion    = ciclo,
         fecha_inicio         = ahora,
         fecha_proximo_cobro  = ahora + timedelta(days=dias_prueba),
     )
     db.session.add(nueva_sub)
     db.session.flush()  # obtener nueva_sub.id antes del commit
+    _sincronizar_plan_organizacion(gym_id, plan.nombre)
 
-    # Factura del primer período (estado pendiente durante prueba)
+    # Factura del primer período (estado pendiente durante prueba), ya al
+    # precio del ciclo elegido.
     factura = FacturaSuscripcion(
         id_suscripcion    = nueva_sub.id,
-        monto             = plan.precio_mensual_mxn,
+        monto             = _monto_para_ciclo(plan, ciclo),
         moneda            = "MXN",
         estado            = "pendiente",
         fecha_emision     = ahora,
@@ -160,10 +202,13 @@ def crear_suscripcion():
 @require_tenant
 def actualizar_suscripcion(sub_id: int):
     """
-    Actualiza plan o estado de una suscripción.
-    Campos permitidos: id_plan, estado, fecha_fin, fecha_proximo_cobro.
+    Actualiza plan, ciclo de facturación o estado de una suscripción.
+    Campos permitidos: id_plan, ciclo, estado, fecha_fin, fecha_proximo_cobro.
 
     - Cambio de plan: genera una nueva factura por la diferencia.
+    - Cambio de ciclo (SCRUM-224, "mensual" | "anual") sin cambiar de plan:
+      también genera una factura -- es re-contratar el mismo plan con otro
+      período de cobro.
     - Cancelación: estado → cancelled, fecha_fin → ahora.
     """
     claims = get_jwt()
@@ -178,23 +223,46 @@ def actualizar_suscripcion(sub_id: int):
     data   = request.get_json() or {}
     ahora  = datetime.now(timezone.utc)
 
+    # SCRUM-224: se resuelve ANTES de tocar el plan para que, si los dos
+    # vienen juntos, la factura de cambio de plan ya cobre el ciclo nuevo.
+    ciclo_nuevo = data.get("ciclo", sub.ciclo_facturacion)
+    if ciclo_nuevo not in ("mensual", "anual"):
+        return jsonify({"msg": "ciclo debe ser 'mensual' o 'anual'"}), 400
+    dias_ciclo = 365 if ciclo_nuevo == "anual" else 30
+
     # Cambio de plan
     if "id_plan" in data:
         nuevo_plan = PlanSuscripcion.query.filter_by(id=data["id_plan"], activo=True).first()
         if not nuevo_plan:
             return jsonify({"msg": "Plan no encontrado o inactivo"}), 404
-        sub.id_plan = nuevo_plan.id
+        sub.id_plan           = nuevo_plan.id
+        sub.ciclo_facturacion = ciclo_nuevo
+        _sincronizar_plan_organizacion(gym_id, nuevo_plan.nombre)
 
-        # Factura prorrateada del nuevo plan
+        # Factura prorrateada del nuevo plan, al precio del ciclo vigente
         factura = FacturaSuscripcion(
             id_suscripcion    = sub.id,
-            monto             = nuevo_plan.precio_mensual_mxn,
+            monto             = _monto_para_ciclo(nuevo_plan, ciclo_nuevo),
             moneda            = "MXN",
             estado            = "pendiente",
             fecha_emision     = ahora,
-            fecha_vencimiento = ahora + timedelta(days=30),
+            fecha_vencimiento = ahora + timedelta(days=dias_ciclo),
         )
         db.session.add(factura)
+    elif "ciclo" in data and ciclo_nuevo != sub.ciclo_facturacion:
+        # Cambio de ciclo SIN cambio de plan -- re-contratar el mismo plan
+        # con otro período de cobro también genera su propia factura.
+        sub.ciclo_facturacion = ciclo_nuevo
+        if sub.plan:
+            factura = FacturaSuscripcion(
+                id_suscripcion    = sub.id,
+                monto             = _monto_para_ciclo(sub.plan, ciclo_nuevo),
+                moneda            = "MXN",
+                estado            = "pendiente",
+                fecha_emision     = ahora,
+                fecha_vencimiento = ahora + timedelta(days=dias_ciclo),
+            )
+            db.session.add(factura)
 
     # Cambio de estado
     if "estado" in data:
@@ -227,13 +295,16 @@ def renovar_suscripcion_demo():
     """
     Renueva o mejora el plan del gimnasio con PAGO SIMULADO (flujo demo).
     Crea una factura ya PAGADA, activa la suscripción y extiende la fecha de
-    próximo cobro 30 días. En producción esto lo confirmaría el webhook de la
-    pasarela (Stripe / PayPal / Mercado Pago).
+    próximo cobro (30 días o 365, según el ciclo). En producción esto lo
+    confirmaría el webhook de la pasarela (Stripe / PayPal / Mercado Pago).
 
     Body JSON (todos opcionales):
-        { "id_plan": <int>, "auto_renovar": <bool> }
+        { "id_plan": <int>, "ciclo": "mensual"|"anual", "auto_renovar": <bool> }
         - id_plan presente  → mejora/cambia de plan.
         - id_plan ausente   → renueva el plan actual.
+        - ciclo (SCRUM-224) → ausente = conserva el que ya tenía la
+          suscripción (o "mensual" si es la primera); presente y distinto
+          del actual = también cambia el período de cobro, no solo el plan.
     """
     claims = get_jwt()
     if not _es_admin(claims):
@@ -258,35 +329,53 @@ def renovar_suscripcion_demo():
     else:
         return jsonify({"msg": "No hay suscripción; indica id_plan para crear una."}), 400
 
-    # Punto de partida para extender: renovar apila 30 días sobre lo que quede.
+    # SCRUM-224: ciclo de ESTE pago -- si no se manda, conserva el que ya
+    # tenía la suscripción (o "mensual" si es la primera vez que se paga).
+    ciclo = data.get("ciclo", sub.ciclo_facturacion if sub else "mensual")
+    if ciclo not in ("mensual", "anual"):
+        return jsonify({"msg": "ciclo debe ser 'mensual' o 'anual'"}), 400
+    dias_periodo = 365 if ciclo == "anual" else 30
+
+    # Punto de partida para extender: renovar apila el período sobre lo que quede.
     base = sub.fecha_proximo_cobro if (sub and sub.fecha_proximo_cobro) else ahora
     try:
         if base < ahora:
             base = ahora
     except TypeError:
         base = ahora
-    proximo = base + timedelta(days=30)
+    proximo = base + timedelta(days=dias_periodo)
 
     if not sub:
         sub = Suscripcion(
             id_gimnasio=gym_id, id_plan=plan.id, estado="active",
+            ciclo_facturacion=ciclo,
             fecha_inicio=ahora, fecha_proximo_cobro=proximo,
         )
         db.session.add(sub)
         db.session.flush()
     else:
         sub.id_plan             = plan.id
+        sub.ciclo_facturacion   = ciclo
         sub.estado              = "active"
         sub.fecha_proximo_cobro = proximo
         sub.fecha_fin           = None
         sub.updated_at          = ahora
+
+    # SCRUM-223 (bug encontrado de paso): este flujo de "renovar/mejorar"
+    # demo cambiaba sub.id_plan pero nunca llamaba a
+    # _sincronizar_plan_organizacion() -- Organizacion.plan se quedaba en
+    # el valor viejo y utils/capacidad.py seguía aplicando los límites del
+    # plan anterior a TODA la organización después de un "mejorar" por
+    # este camino. actualizar_suscripcion() (PUT) y crear_suscripcion()
+    # (POST) ya lo hacían bien; a este le faltaba.
+    _sincronizar_plan_organizacion(gym_id, plan.nombre)
 
     if "auto_renovar" in data:
         sub.auto_renovar = bool(data["auto_renovar"])
 
     factura = FacturaSuscripcion(
         id_suscripcion    = sub.id,
-        monto             = plan.precio_mensual_mxn,
+        monto             = _monto_para_ciclo(plan, ciclo),
         moneda            = "MXN",
         estado            = "pagada",
         fecha_emision     = ahora,

@@ -4,9 +4,10 @@ suscripcion_recurrente.py — Cargo recurrente de la suscripción a la plataform
 Cómo funciona el cobro automático
 ---------------------------------
 GymPro no guarda tarjetas ni dispara cargos. El dueño autoriza UNA vez en la
-pasarela y a partir de ahí es ella quien cobra cada 30 días, igual que Netflix
-o Spotify. El sistema solo pregunta el estado del acuerdo y registra lo que la
-pasarela reporta.
+pasarela y a partir de ahí es ella quien cobra cada período (30 días, o 12
+meses si el ciclo contratado es anual -- ver Suscripcion.ciclo_facturacion,
+SCRUM-224), igual que Netflix o Spotify. El sistema solo pregunta el estado
+del acuerdo y registra lo que la pasarela reporta.
 
 Esto es deliberado: almacenar medios de pago obligaría a cumplir PCI-DSS, y
 disparar cargos desde nuestro servidor requiere permisos especiales que PayPal
@@ -44,6 +45,7 @@ from app.extensions import db
 from app.models.pg.suscripcion import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.services.payments import PasarelaError, pasarela_de_plataforma
+from app.routes.owner_gym.billing import _monto_para_ciclo
 from app.utils.tenant import require_tenant
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, normalizar_rol
 
@@ -193,8 +195,24 @@ def crear_recurrente():
     if not getattr(pasarela, "soporta_suscripciones", False):
         return jsonify({"msg": "Este método de pago no admite cargos recurrentes."}), 400
 
-    # El importe viaja en centavos en la base y en pesos hacia la pasarela.
-    monto = round((sub.plan.precio_mensual_mxn or 0) / 100, 2)
+    # SCRUM-224: el importe y el período del acuerdo dependen del ciclo
+    # contratado -- el importe viaja en centavos en la base y en pesos
+    # hacia la pasarela. Para "anual": PayPal reconoce exactamente 365 días
+    # como 1 YEAR (ver services/payments/paypal.py), pero Mercado Pago solo
+    # entiende "months" o "days" como unidad de frecuencia (ver
+    # services/payments/mercadopago.py) -- 365 no es múltiplo de 30, así
+    # que ahí se usa 360 (12 meses exactos) en vez de 365 para que la
+    # frecuencia quede limpia; la diferencia de 5 días es irrelevante frente
+    # al período de facturación.
+    ciclo_actual = sub.ciclo_facturacion or "mensual"
+    if ciclo_actual == "anual":
+        monto        = round(((sub.plan.precio_anual_mxn
+                                if sub.plan.precio_anual_mxn is not None
+                                else sub.plan.precio_mensual_mxn * 12) or 0) / 100, 2)
+        dias_periodo = 365 if proveedor == "paypal" else 360
+    else:
+        monto        = round((sub.plan.precio_mensual_mxn or 0) / 100, 2)
+        dias_periodo = 30
     if monto <= 0:
         return jsonify({"msg": "El plan no tiene un precio válido."}), 400
 
@@ -209,11 +227,11 @@ def crear_recurrente():
     try:
         resultado = pasarela.crear_suscripcion(
             monto=monto,
-            descripcion=f"GymPro — Plan {sub.plan.nombre}",
+            descripcion=f"GymPro — Plan {sub.plan.nombre} ({ciclo_actual})",
             url_retorno=f"{front}/suscripcion/recurrente/exito?sub={sub.id}{sufijo}",
             url_cancelacion=f"{front}/suscripcion/recurrente/cancelado?sub={sub.id}{sufijo}",
             referencia=str(sub.id),
-            dias_periodo=30,
+            dias_periodo=dias_periodo,
             extra={
                 "brand_name": "GymPro",
                 "payer_email": data.get("email_pagador") or "",
@@ -363,12 +381,16 @@ def registrar_cobro_recurrente(referencia_acuerdo: str, monto_mxn: float | None,
         return False
 
     # El importe del plan manda: es el contrato. El de la pasarela solo se usa
-    # si el plan no lo tiene, para no registrar una factura en cero.
-    centavos = sub.plan.precio_mensual_mxn if sub.plan else None
+    # si el plan no lo tiene, para no registrar una factura en cero. SCRUM-224:
+    # el importe y la duración del período dependen del ciclo contratado, no
+    # siempre son mensuales.
+    ciclo    = sub.ciclo_facturacion or "mensual"
+    centavos = _monto_para_ciclo(sub.plan, ciclo) if sub.plan else None
     if not centavos and monto_mxn:
         centavos = int(round(monto_mxn * 100))
 
-    proximo = (sub.fecha_proximo_cobro or ahora) + timedelta(days=30)
+    dias_periodo = 365 if ciclo == "anual" else 30
+    proximo = (sub.fecha_proximo_cobro or ahora) + timedelta(days=dias_periodo)
 
     factura = FacturaSuscripcion(
         id_suscripcion     = sub.id,

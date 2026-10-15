@@ -8,6 +8,7 @@ import math
 from app.mongo import get_db
 from app.extensions import mail
 from app.utils.tenant import get_tenant_filter, require_tenant
+from app.utils.security import require_funcion_plan  # SCRUM-224
 
 ventas_bp = Blueprint("ventas", __name__)
 
@@ -15,6 +16,7 @@ ventas_bp = Blueprint("ventas", __name__)
 @ventas_bp.route("/api/ventas", methods=["POST"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("pos")  # SCRUM-224
 def registrar_venta():
     """
     Registra una venta del punto de venta en la colección 'ventas'.
@@ -222,6 +224,7 @@ def _send_ticket_email(email_dest: str, doc: dict, items: list, venta_num: str):
 
 @ventas_bp.route("/api/ventas", methods=["GET"])
 @jwt_required()
+@require_funcion_plan("pos")  # SCRUM-224
 def listar_ventas():
     """
     Lista ventas paginadas. Si el JWT corresponde a un miembro, solo devuelve sus compras.

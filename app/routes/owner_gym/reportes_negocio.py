@@ -19,18 +19,26 @@ Parámetros de /pdf:
 Nota sobre fechas: las colecciones conviven con fechas guardadas como datetime
 y como cadena, herencia de versiones anteriores. Por eso todas las agregaciones
 normalizan con $toDate antes de comparar.
+
+Ajuste (feedback de uso real, Lote 2): con varias sucursales por
+organización, el dueño/Administrador puede pedir el reporte de OTRA
+sucursal de su organización pasando ?id_gimnasio=<id> -- sin eso había
+que iniciar sesión en cada sucursal por separado para sacar su
+reporte. Ver _resolver_gimnasio_objetivo().
 """
 import io
 from datetime import datetime, timedelta
 
 from flask import Blueprint, Response, request, jsonify, g
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 from app.mongo import get_db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
-from app.utils.security import require_role
+from app.utils.security import require_role, require_funcion_plan
+from app.utils.alcance import usuario_tiene_alcance, sucursales_de_administrador
+from app.constants.roles import normalizar_rol, ROL_ADMINISTRADOR
 
 reportes_negocio_bp = Blueprint("reportes_negocio", __name__)
 
@@ -208,14 +216,80 @@ def _recolectar(gym_id: int, desde: datetime, hasta: datetime) -> dict:
 # Endpoints
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _resolver_gimnasio_objetivo():
+    """
+    Resuelve sobre qué Gimnasio correr el reporte: el propio (g.tenant_id)
+    por omisión, u otra sucursal de la MISMA organización si llega
+    ?id_gimnasio=<id> y el usuario tiene alcance sobre ella.
+
+    Devuelve (id_gimnasio, None) si procede, o (None, (response, status))
+    si hay que cortar la petición -- el llamador hace:
+        gym_id, error = _resolver_gimnasio_objetivo()
+        if error:
+            return error
+    """
+    pedido = request.args.get("id_gimnasio", type=int)
+    if not pedido or pedido == g.tenant_id:
+        return g.tenant_id, None
+
+    mi_gym  = Gimnasio.query.get(g.tenant_id)
+    destino = Gimnasio.query.get(pedido)
+    if not mi_gym or not destino or destino.id_organizacion != mi_gym.id_organizacion:
+        return None, (jsonify({"msg": "Sucursal no encontrada"}), 404)
+
+    claims = get_jwt()
+    if normalizar_rol(claims.get("role")) == ROL_ADMINISTRADOR:
+        actor_id = int(get_jwt_identity())
+        if not usuario_tiene_alcance(actor_id, [ROL_ADMINISTRADOR], id_gimnasio_objetivo=pedido):
+            return None, (jsonify({"msg": "No tienes asignada esa sucursal"}), 403)
+    # Propietario: cualquier sucursal de su propia organización es válida
+    # (ya verificado arriba con destino.id_organizacion == mi_gym.id_organizacion).
+
+    return pedido, None
+
+
+@reportes_negocio_bp.route("/reportes/sucursales", methods=["GET"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+def sucursales_disponibles_reporte():
+    """
+    Sucursales de la organización sobre las que el usuario actual puede
+    pedir un reporte: todas, si es Propietario; solo las que tiene
+    asignadas, si es Administrador (ver usuario_tiene_alcance/HU-42). El
+    frontend oculta el selector si esto devuelve 1 sola fila -- no hay
+    nada que elegir.
+    """
+    mi_gym = Gimnasio.query.get(g.tenant_id)
+    if not mi_gym:
+        return jsonify([]), 200
+
+    claims = get_jwt()
+    if normalizar_rol(claims.get("role")) == ROL_ADMINISTRADOR:
+        ids = sucursales_de_administrador(int(get_jwt_identity()))
+        # in_([]) es válido en SQLAlchemy -- genera un WHERE que no
+        # devuelve filas, sin necesitar un caso especial para la lista vacía.
+        q = Gimnasio.query.filter(Gimnasio.id.in_(ids))
+    else:
+        q = Gimnasio.query.filter_by(id_organizacion=mi_gym.id_organizacion)
+
+    sucursales = q.order_by(Gimnasio.nombre).all()
+    return jsonify([
+        {"id": s.id, "nombre": s.nombre, "es_actual": s.id == g.tenant_id}
+        for s in sucursales
+    ]), 200
+
+
 @reportes_negocio_bp.route("/reportes/opciones", methods=["GET"])
 @jwt_required()
 @require_role("owner_gym", "Administrador")
 @require_tenant
 def opciones_reporte():
     """Años con datos y catálogo de secciones, para armar el formulario."""
+    gym_id, error = _resolver_gimnasio_objetivo()
+    if error:
+        return error
     mdb = get_db()
-    gym_id = g.tenant_id
 
     anios = set()
     for coleccion, campo in ((mdb.pagos, "fecha_pago"), (mdb.ventas, "fecha")):
@@ -246,6 +320,7 @@ def opciones_reporte():
 @jwt_required()
 @require_role("owner_gym", "Administrador")
 @require_tenant
+@require_funcion_plan("reportes_pdf")  # SCRUM-224
 def reporte_pdf():
     """Reporte ejecutivo del gimnasio en PDF."""
     from reportlab.lib.pagesizes import A4
@@ -257,8 +332,10 @@ def reporte_pdf():
     from reportlab.lib.units import cm
     from reportlab.lib.enums import TA_CENTER
 
-    gym_id = g.tenant_id
-    gym    = Gimnasio.query.get(gym_id)
+    gym_id, error = _resolver_gimnasio_objetivo()
+    if error:
+        return error
+    gym = Gimnasio.query.get(gym_id)
     if not gym:
         return jsonify({"msg": "Gimnasio no encontrado"}), 404
 
@@ -322,7 +399,10 @@ def reporte_pdf():
         tipo_txt = GYM_TYPES.get(gym.tipo_gimnasio or "", {}).get("label", "")
     except Exception:
         tipo_txt = ""
-    plan_txt = gym.plan.value if hasattr(gym.plan, "value") else str(gym.plan or "")
+    # SCRUM-223: el plan que se imprime en el reporte es el de la
+    # organización (lo que realmente contrató y paga), no Gimnasio.plan.
+    _org_plan = gym.organizacion.plan if gym.organizacion else gym.plan
+    plan_txt = _org_plan.value if hasattr(_org_plan, "value") else str(_org_plan or "")
 
     story += ep.portada(
         titulo=gym.nombre or "Gimnasio",

@@ -9,6 +9,7 @@ from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario
 from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
+from app.utils.security import require_funcion_plan
 from app.utils.busqueda import normalizar_columna, patron_insensible
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
@@ -2220,6 +2221,7 @@ def routine_ai_status():
 @trainer_bp.route("/routines/import-ai", methods=["POST"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("rutinas_ia")  # SCRUM-224
 def import_routines_ai():
     """
     ETL híbrido para importar rutinas desde PDF o Excel.

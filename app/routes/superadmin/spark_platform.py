@@ -105,8 +105,12 @@ def _analytics_plataforma() -> dict:
         gym_int_ids = [int(g) for g in gym_ids if g and str(g).isdigit()]
         gyms = Gimnasio.query.filter(Gimnasio.id.in_(gym_int_ids)).all()
         gym_name_map   = {str(g.id): g.nombre for g in gyms}
+        # SCRUM-223: plan vigente = el de la organización, no Gimnasio.plan.
         gym_plan_map   = {
-            str(g.id): (g.plan.value if hasattr(g.plan, "value") else str(g.plan))
+            str(g.id): (
+                (g.organizacion.plan.value if hasattr(g.organizacion.plan, "value") else str(g.organizacion.plan))
+                if g.organizacion else None
+            )
             for g in gyms
         }
         gym_activo_map = {str(g.id): g.activo for g in gyms}
