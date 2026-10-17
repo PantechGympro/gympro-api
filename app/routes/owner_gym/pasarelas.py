@@ -80,7 +80,7 @@ from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import registrar_evento
 from app.utils.crypto import cifrar_dict, descifrar_dict, enmascarar, crypto_disponible
-from app.services.payments import PROVEEDORES_INFO, construir_pasarela
+from app.services.payments import PROVEEDORES_INFO, construir_pasarela, plataforma_en_produccion
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 
 logger = logging.getLogger(__name__)
@@ -248,17 +248,22 @@ def _listar(id_gimnasio: int):
     salida = []
     for prov, info in PROVEEDORES_INFO.items():
         cfg = existentes.get(prov)
+        # SCRUM-224: en produccion no se deja elegir modo de prueba -- el
+        # frontend desactiva el selector con esta bandera, y _guardar() la
+        # hace cumplir tambien del lado del servidor, no solo en la UI.
+        forzado = plataforma_en_produccion()
         base = {
             "proveedor": prov,
             "nombre":    info["nombre"],
             "campos":    info["campos"],
             "ayuda":     info["ayuda"],
+            "modo_forzado": forzado,
         }
         if cfg:
             base.update(cfg.to_dict(pista=_pista(cfg)))
         else:
             base.update({
-                "modo": "sandbox", "activo": False, "moneda": "MXN",
+                "modo": "live" if forzado else "sandbox", "activo": False, "moneda": "MXN",
                 "titular_cuenta": None, "configurado": False,
                 "credencial_pista": None, "verificado_en": None, "ultimo_error": None,
             })
@@ -294,6 +299,11 @@ def _guardar(id_gimnasio: int, proveedor: str, data: dict):
     modo   = (data.get("modo") or "sandbox").lower()
     if modo not in ("sandbox", "live"):
         return jsonify({"msg": "El modo debe ser 'sandbox' o 'live'"}), 400
+    if plataforma_en_produccion():
+        # SCRUM-224: este entorno no admite pasarelas en modo de prueba --
+        # se fuerza a "live" sin importar lo que haya mandado el formulario
+        # (incluso si el frontend quedo con una version vieja en cache).
+        modo = "live"
 
     cfg = ConfiguracionPasarela.query.filter_by(
         id_gimnasio=id_gimnasio, proveedor=proveedor).first()

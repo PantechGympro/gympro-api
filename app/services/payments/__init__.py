@@ -17,6 +17,7 @@ from .factory import (
     construir_pasarela,
     pasarela_de_gimnasio,
     pasarela_de_plataforma,
+    plataforma_en_produccion,
     proveedores_disponibles,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "construir_pasarela",
     "pasarela_de_gimnasio",
     "pasarela_de_plataforma",
+    "plataforma_en_produccion",
     "proveedores_disponibles",
 ]

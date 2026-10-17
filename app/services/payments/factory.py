@@ -112,6 +112,18 @@ def pasarela_de_gimnasio(gym_id: int, proveedor: str) -> tuple[PasarelaBase, Con
     return pasarela, cfg
 
 
+def plataforma_en_produccion() -> bool:
+    """
+    True si este entorno corre con pagos reales de la plataforma
+    (PLATAFORMA_PAGOS_MODO=live). Se usa para bloquear el modo "sandbox" en
+    la pantalla de pagos de cada gimnasio (ver owner_gym/pasarelas.py): en
+    produccion ya no tiene sentido dejar elegir modo de prueba, todo ahi es
+    dinero real. En desarrollo (el default, sin la variable definida) el
+    selector de modo del gimnasio sigue funcionando igual que siempre.
+    """
+    return os.getenv("PLATAFORMA_PAGOS_MODO", "sandbox").strip().lower() == "live"
+
+
 def pasarela_de_plataforma(proveedor: str) -> PasarelaBase:
     """Pasarela con las credenciales de GymPro, para cobrar suscripciones SaaS."""
     proveedor = (proveedor or "").lower()
