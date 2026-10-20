@@ -1,21 +1,31 @@
 """
-routes/notifications.py -- Notificaciones de vencimiento de membresia.
+routes/notifications.py -- Notificaciones de vencimiento de membresia y
+aviso motivacional por inasistencia.
 
 Sprint 4 / US21: APScheduler ejecuta una tarea diaria a las 08:00 que detecta
 miembros con membresia que vence en los proximos 7 dias y envia email via Flask-Mail.
 
-La tarea se registra en create_app() para que corra dentro del contexto Flask.
+Check-in por QR general (ver api/app/utils/checkin_qr.py y
+recepcionista_routes.py): APScheduler ejecuta otra tarea diaria a las 21:00
+que revisa, por gimnasio, que miembro tenia HOY un dia de rutina programado
+(no descanso, con ejercicios) y no registro asistencia -- y le manda un
+aviso push motivador (nunca de regano) via la misma infraestructura de
+notificaciones in-app + Expo push que ya usa compartido/notificaciones.py.
+
+Las tareas se registran en create_app() para que corran dentro del contexto Flask.
 
 Endpoints manuales (solo Admin):
-  POST /api/notifications/membresias/check    -- dispara el chequeo inmediatamente
+  POST /api/notifications/membresias/check    -- dispara el chequeo de vencimientos de inmediato
   GET  /api/notifications/membresias/status   -- estado del scheduler y ultima ejecucion
 """
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from app.utils.tenant import require_tenant
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, normalizar_rol
+from app.routes.compartido.notificaciones import crear_notificacion
 
 notifications_bp = Blueprint("notifications", __name__, url_prefix="/api/notifications")
 
@@ -142,6 +152,119 @@ def chequear_vencimientos(app=None):
             ctx.pop()
 
 
+# Estado de la tarea de aviso motivacional (separado del de vencimientos).
+_motivacional_status = {
+    "ultima_ejecucion": None,
+    "ultimo_resultado": None,
+}
+
+_WEEKDAYS_ES = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+
+_MENSAJES_MOTIVACIONALES = [
+    "Hoy te tocaba entrenar y no te vimos por el gym. No pasa nada -- mañana es un nuevo día, ¡te esperamos!",
+    "Vimos que hoy no pudiste venir. Lo importante es seguir intentándolo -- ¡nos vemos pronto!",
+    "Un día sin entrenar no borra todo tu esfuerzo. Cuando puedas, aquí seguimos para apoyarte.",
+]
+
+
+def _norm_dia_motivacional(s):
+    return (s or "").lower().replace("á", "a").replace("é", "e").replace("í", "i")         .replace("ó", "o").replace("ú", "u").strip()
+
+
+def chequear_asistencia_motivacional(app=None):
+    """
+    US (check-in por QR general): corre de noche, cuando ya cerró el
+    horario normal de entrenamiento, y revisa a cada miembro activo cuyo
+    día de rutina de HOY era un día de entreno programado (no descanso,
+    con ejercicios) -- si no tiene asistencia registrada hoy, le manda un
+    aviso push motivador (nunca de regaño ni culpabilizador). Idempotente
+    por día: una sola vez por miembro por día (tipo + referencia_id).
+
+    No revisa "le tocaba registrar una rutina" sino simplemente "vino al
+    gimnasio" (asistencias), que es la señal real desde que el check-in
+    por QR reemplazó el auto-registro sin verificación (ver
+    api/app/utils/checkin_qr.py).
+    """
+    from app.mongo import get_db
+    from app.utils.timezone import local_now_naive
+
+    ctx = app.app_context() if app else None
+    if ctx:
+        ctx.push()
+
+    try:
+        db    = get_db()
+        ahora = local_now_naive()
+        hoy_str = ahora.strftime("%Y-%m-%d")
+        dia_hoy = _norm_dia_motivacional(_WEEKDAYS_ES[ahora.weekday()])
+        hoy_ini = datetime.combine(ahora.date(), datetime.min.time())
+        hoy_fin = hoy_ini + timedelta(days=1)
+
+        revisados = 0
+        enviados  = 0
+
+        for miembro in db.miembros.find(
+            {"estado": "Activo"},
+            {"_id": 1, "id_usuario_pg": 1, "id_gimnasio_pg": 1},
+        ):
+            revisados += 1
+            id_usuario = miembro.get("id_usuario_pg")
+            if not id_usuario:
+                continue
+
+            # Ya se le avisó hoy -- no duplicar aunque el job se dispare de nuevo.
+            if db.notificaciones.find_one({
+                "id_usuario_pg":  int(id_usuario),
+                "tipo":           "aviso_no_asistio",
+                "referencia_id":  hoy_str,
+            }):
+                continue
+
+            # Ya asistió hoy -- nada que avisar.
+            if db.asistencias.find_one({
+                "id_miembro": miembro["_id"],
+                "fecha":      {"$gte": hoy_ini, "$lt": hoy_fin},
+            }):
+                continue
+
+            # ¿Hoy era de verdad un día de entreno programado para este miembro?
+            rutina_ids = [r["_id"] for r in db.rutinas.find({"id_miembro": miembro["_id"]}, {"_id": 1})]
+            if not rutina_ids:
+                continue
+
+            tiene_entreno_hoy = False
+            for d in db.rutina_dias.find({"id_rutina": {"$in": rutina_ids}}):
+                if _norm_dia_motivacional(d.get("dia_semana")) == dia_hoy                         and _norm_dia_motivacional(d.get("grupo_muscular")) != "descanso":
+                    if db.rutina_ejercicios.count_documents({"id_rutina_dia": d["_id"]}) > 0:
+                        tiene_entreno_hoy = True
+                        break
+            if not tiene_entreno_hoy:
+                continue
+
+            crear_notificacion(
+                db, int(id_usuario), miembro.get("id_gimnasio_pg"),
+                tipo="aviso_no_asistio",
+                titulo="Te extrañamos hoy",
+                mensaje=random.choice(_MENSAJES_MOTIVACIONALES),
+                referencia_tipo="asistencia",
+                referencia_id=hoy_str,
+            )
+            enviados += 1
+
+        resultado = {
+            "ejecutado_en":       ahora.isoformat(),
+            "miembros_revisados": revisados,
+            "avisos_enviados":    enviados,
+        }
+        _motivacional_status["ultima_ejecucion"] = ahora.isoformat()
+        _motivacional_status["ultimo_resultado"] = resultado
+        return resultado
+
+    finally:
+        if ctx:
+            ctx.pop()
+
+
 # ─── Inicializar APScheduler ──────────────────────────────────────────────────
 
 def init_scheduler(app):
@@ -180,10 +303,23 @@ def init_scheduler(app):
             kwargs={"app": app},
         )
 
+        # Aviso motivacional por inasistencia. Corre a las 21:00 (9pm MX),
+        # ya pasado el horario normal de entreno de la mayoría de los
+        # gimnasios piloto, para no avisar "no viniste hoy" a alguien que
+        # todavía puede ir en la noche.
+        scheduler.add_job(
+            func=chequear_asistencia_motivacional,
+            trigger=CronTrigger(hour=21, minute=0),
+            id="aviso_no_asistio",
+            name="Aviso motivacional por inasistencia",
+            replace_existing=True,
+            kwargs={"app": app},
+        )
+
         scheduler.start()
         _scheduler_status["activo"] = True
-        app.logger.info("[Scheduler] Tareas registradas: 'notif_vencimientos' (08:00 MX) "
-                        "y 'billing_auto_renovacion' (03:00 MX)")
+        app.logger.info("[Scheduler] Tareas registradas: 'notif_vencimientos' (08:00 MX), "
+                        "'billing_auto_renovacion' (03:00 MX) y 'aviso_no_asistio' (21:00 MX)")
 
     except ImportError:
         app.logger.warning("[Scheduler] APScheduler no disponible. Instalar: pip install apscheduler")
@@ -216,4 +352,29 @@ def scheduler_status():
         "scheduler_activo":  _scheduler_status["activo"],
         "ultima_ejecucion":  _scheduler_status["ultima_ejecucion"],
         "ultimo_resultado":  _scheduler_status["ultimo_resultado"],
+    }), 200
+
+
+@notifications_bp.route("/asistencia-motivacional/check", methods=["POST"])
+@jwt_required()
+@require_tenant
+def trigger_check_motivacional():
+    """Dispara el aviso motivacional por inasistencia de forma manual (solo Admin)."""
+    claims = get_jwt()
+    if normalizar_rol(claims.get("role")) not in (ROL_PROPIETARIO, ROL_SUPERADMIN):
+        return jsonify({"error": "Solo administradores pueden ejecutar esta accion"}), 403
+
+    from flask import current_app
+    resultado = chequear_asistencia_motivacional(app=current_app._get_current_object())
+    return jsonify(resultado), 200
+
+
+@notifications_bp.route("/asistencia-motivacional/status", methods=["GET"])
+@jwt_required()
+@require_tenant
+def status_motivacional():
+    """Devuelve el resultado de la ultima ejecucion del aviso motivacional."""
+    return jsonify({
+        "ultima_ejecucion": _motivacional_status["ultima_ejecucion"],
+        "ultimo_resultado": _motivacional_status["ultimo_resultado"],
     }), 200

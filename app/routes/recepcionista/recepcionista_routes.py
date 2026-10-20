@@ -26,6 +26,7 @@ from bson import ObjectId
 from app.mongo import get_db
 from app.routes.compartido.notificaciones import crear_notificacion
 from app.utils.tenant import require_tenant
+from app.utils.checkin_qr import emitir_token
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, ROL_RECEPCIONISTA, normalizar_rol
 
 recepcionista_bp = Blueprint("recepcionista", __name__)
@@ -195,6 +196,7 @@ def get_checkins():
 
         result.append({
             "id":               str(a["_id"]),
+            "id_usuario_pg":    m.get("id_usuario_pg"),
             "nombre":           m.get("nombre", "Desconocido"),
             "hora_entrada":     a.get("hora_entrada", ""),
             "hora_salida":      a.get("hora_salida"),
@@ -265,6 +267,24 @@ def register_checkin():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# QR general de check-in — reemplaza el QR fijo por-persona (ver
+# checkin_qr.py): el recepcionista pide un token nuevo cada ~45-60s y lo
+# muestra como QR en pantalla; el miembro lo escanea con su propia app
+# (POST /api/user/checkin/qr) y asi registra su propia asistencia.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@recepcionista_bp.route("/checkin-qr/token", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_checkin_qr_token():
+    """Emite un token de corta vigencia para mostrar como QR en pantalla."""
+    err = _require_receptionist()
+    if err:
+        return err
+    return jsonify(emitir_token(g.tenant_id)), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Members — lista con estado de membresía
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -312,10 +332,16 @@ def get_members():
 
     query = {"id_gimnasio_pg": gym_id, "estado": "Activo"}
     if search:
-        query["$or"] = [
+        # HU: tambien se busca por numero de ID (id_usuario_pg) exacto, no
+        # solo por nombre/correo -- para que recepcion lo use como atajo
+        # cuando el miembro da su numero en vez de su nombre.
+        condiciones = [
             {"nombre": {"$regex": search, "$options": "i"}},
             {"email":  {"$regex": search, "$options": "i"}},
         ]
+        if search.isdigit():
+            condiciones.append({"id_usuario_pg": int(search)})
+        query["$or"] = condiciones
 
     total = db.miembros.count_documents(query)
 

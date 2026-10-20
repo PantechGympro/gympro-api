@@ -8,6 +8,7 @@ from app.models.pg.usuario import Usuario
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
 from app.utils.sync import resolver_capturado_en
+from app.utils.checkin_qr import validar_token, QrTokenExpirado, QrTokenInvalido
 
 user_dashboard_bp = Blueprint('user_dashboard', __name__)
 
@@ -60,16 +61,40 @@ def get_user_dashboard():
         return jsonify({"error": str(e)}), 500
 
 
-# ─── Registrar asistencia (check-in) ───────────────────────────────────────
+# ─── Registrar asistencia (check-in por QR general) ────────────────────────
+#
+# Reemplaza el antiguo POST /api/user/checkin (auto-registro sin ninguna
+# prueba de presencia -- el miembro lo podia disparar desde cualquier lugar,
+# incluso con la llamada fallando: ver historial de mobile/app/(member)/
+# index.tsx antes de este cambio). Ahora el check-in solo se acepta si viene
+# acompanado de un token de corta vigencia emitido por el QR que el
+# recepcionista muestra en pantalla (ver utils/checkin_qr.py y
+# recepcionista_routes.py::get_checkin_qr_token) -- certifica que el
+# escaneo ocurrio frente a esa pantalla hace pocos segundos.
 
-@user_dashboard_bp.route('/api/user/checkin', methods=['POST'])
+@user_dashboard_bp.route('/api/user/checkin/qr', methods=['POST'])
 @jwt_required()
 @require_tenant
-def register_checkin():
+def checkin_por_qr():
+    """
+    Body JSON: { "token": "<leido del QR general del recepcionista>" }
+    """
     try:
         mdb        = get_db()
         user_pg_id = int(get_jwt_identity())
         gym_id     = g.tenant_id
+
+        data  = request.json or {}
+        token = (data.get("token") or "").strip()
+        if not token:
+            return jsonify({"error": "token requerido"}), 400
+
+        try:
+            validar_token(token, gym_id)
+        except QrTokenExpirado as exc:
+            return jsonify({"error": str(exc), "expirado": True}), 410
+        except QrTokenInvalido as exc:
+            return jsonify({"error": str(exc)}), 400
 
         miembro = mdb.miembros.find_one({
             "id_usuario_pg":  user_pg_id,
@@ -96,12 +121,69 @@ def register_checkin():
             "id_miembro":  miembro["_id"],
             "id_gimnasio": gym_id,
             "fecha":       now,
-            "hora_entrada":now.strftime('%H:%M:%S')
+            "hora_entrada":now.strftime('%H:%M:%S'),
+            "origen":      "qr_miembro",
         })
         return jsonify({
             "message": "Asistencia registrada exitosamente",
             "fecha":   now.strftime('%Y-%m-%d')
         }), 201
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ─── Asistencias de la semana en curso ──────────────────────────────────────
+# Para que la app móvil sepa qué días (lunes-domingo) ya tienen check-in y
+# habilite, en "Empezar entrenamiento", los chips de día correspondientes
+# (ver start-workout.tsx): solo se puede loguear la rutina de un día si ese
+# día ya tiene asistencia registrada.
+
+_DIAS_ES = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
+
+
+@user_dashboard_bp.route('/api/user/checkins/semana', methods=['GET'])
+@jwt_required()
+@require_tenant
+def checkins_semana():
+    try:
+        mdb        = get_db()
+        user_pg_id = int(get_jwt_identity())
+        gym_id     = g.tenant_id
+
+        miembro = mdb.miembros.find_one({
+            "id_usuario_pg":  user_pg_id,
+            "id_gimnasio_pg": gym_id
+        })
+        if not miembro:
+            return jsonify({"error": "Miembro no encontrado"}), 404
+
+        from app.utils.timezone import local_now_naive
+        hoy_local = local_now_naive()
+        lunes = (hoy_local - timedelta(days=hoy_local.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+
+        asistencias = list(mdb.asistencias.find({
+            "id_miembro": miembro["_id"],
+            "fecha":      {"$gte": lunes, "$lt": lunes + timedelta(days=7)},
+        }, {"fecha": 1}))
+        dias_con_asistencia = {a["fecha"].date() for a in asistencias if a.get("fecha")}
+
+        semana = []
+        for i in range(7):
+            fecha_i = (lunes + timedelta(days=i)).date()
+            semana.append({
+                "fecha":   fecha_i.strftime("%Y-%m-%d"),
+                "dia":     _DIAS_ES[i],
+                "asistio": fecha_i in dias_con_asistencia,
+                "futuro":  fecha_i > hoy_local.date(),
+            })
+
+        return jsonify({
+            "semana": semana,
+            "hoy":    hoy_local.date().strftime("%Y-%m-%d"),
+        }), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -203,11 +285,60 @@ def complete_workout():
 
         from app.utils.timezone import local_now_naive
         data = request.json or {}
-        # SCRUM-168 / HU-30: si la sesión se registró sin conexión y se
-        # sincroniza después, `_capturado_en` trae el momento real en que se
-        # entrenó — se usa para la fecha del entrenamiento, la asistencia del
-        # día y el registro de peso corporal, en vez de la hora de sincronía.
-        ahora = resolver_capturado_en(data, ahora=local_now_naive())
+        hoy_local = local_now_naive()
+
+        # "Registrar rutina de otro día de la semana" (no solo hoy): el
+        # socio puede loguear, desde la app, el día que elija con los chips
+        # de start-workout.tsx -- pero solo si ya hizo check-in ese día (se
+        # valida más abajo) y solo dentro de la semana en curso (lunes de
+        # esta semana en adelante, sin incluir días futuros). `dia` es
+        # independiente de `_capturado_en` (que es para sincronía offline,
+        # ver sync.py): aquí el socio elige deliberadamente qué día de su
+        # semana está completando, conectado y en el momento.
+        dia_objetivo = (data.get("dia") or "").strip()
+        if dia_objetivo:
+            try:
+                fecha_dia = datetime.strptime(dia_objetivo, "%Y-%m-%d")
+            except ValueError:
+                return jsonify({"error": "Formato de 'dia' inválido, usa YYYY-MM-DD"}), 400
+
+            lunes = (hoy_local - timedelta(days=hoy_local.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            fin_semana = lunes + timedelta(days=7)
+            if not (lunes <= fecha_dia < fin_semana) or fecha_dia.date() > hoy_local.date():
+                return jsonify({
+                    "error": "Solo puedes registrar días de esta semana, sin incluir días futuros.",
+                }), 400
+
+            ahora = fecha_dia.replace(
+                hour=hoy_local.hour, minute=hoy_local.minute,
+                second=hoy_local.second, microsecond=hoy_local.microsecond,
+            )
+        else:
+            # SCRUM-168 / HU-30: si la sesión se registró sin conexión y se
+            # sincroniza después, `_capturado_en` trae el momento real en que
+            # se entrenó — se usa para la fecha del entrenamiento y el
+            # registro de peso corporal, en vez de la hora de sincronía.
+            ahora = resolver_capturado_en(data, ahora=hoy_local)
+
+        # Anti-fraude (misma motivación que el QR general de check-in):
+        # un entrenamiento solo se puede registrar para un día en el que YA
+        # existe asistencia (check-in por QR o recepción) -- antes este
+        # mismo endpoint creaba la asistencia del día si no existía, lo que
+        # permitía "entrenar" (con series inventadas) sin haber pisado el
+        # gimnasio. Ahora la asistencia es un prerrequisito, no un efecto
+        # colateral del entrenamiento.
+        dia_ini = datetime.combine(ahora.date(), datetime.min.time())
+        dia_fin = dia_ini + timedelta(days=1)
+        asistencia_dia = mdb.asistencias.find_one({
+            "id_miembro": miembro["_id"],
+            "fecha":      {"$gte": dia_ini, "$lt": dia_fin},
+        })
+        if not asistencia_dia:
+            return jsonify({
+                "error": "No puedes registrar una rutina de un día en el que no hiciste check-in en el gimnasio.",
+                "requiere_checkin": True,
+            }), 409
 
         # Normalizar ejercicios + calcular volumen (sum reps*peso).
         # Reps y peso pueden ser multivalor (ej. "7,7,7" y "10,20,30" = drop set),
@@ -303,21 +434,9 @@ def complete_workout():
         }
         mdb.entrenamientos_realizados.insert_one(doc)
 
-        # Registrar asistencia del día (si no existe) → cuenta y racha.
-        hoy_ini = datetime.combine(ahora.date(), datetime.min.time())
-        hoy_fin = hoy_ini + timedelta(days=1)
-        ya_asistio = mdb.asistencias.find_one({
-            "id_miembro": miembro["_id"],
-            "fecha":      {"$gte": hoy_ini, "$lt": hoy_fin},
-        })
-        if not ya_asistio:
-            mdb.asistencias.insert_one({
-                "id_miembro":   miembro["_id"],
-                "id_gimnasio":  gym_id,
-                "fecha":        ahora,
-                "hora_entrada": ahora.strftime('%H:%M:%S'),
-                "origen":       "entrenamiento",
-            })
+        # Nota: ya NO se crea aquí la asistencia del día -- es al revés,
+        # arriba se exige que ya exista (ver bloque "Anti-fraude") antes de
+        # llegar a este punto, así que `asistencia_dia` ya está garantizada.
 
         # Registrar peso del día → mueve métricas, gráficas y predicciones.
         progreso_registrado = False
