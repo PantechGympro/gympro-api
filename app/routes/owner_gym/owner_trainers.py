@@ -20,7 +20,9 @@ from app.utils.security import require_role
 from app.utils.alcance import crear_asignacion
 from app.utils.capacidad import verificar_capacidad_staff, LimiteDePlanExcedido
 from app.utils.busqueda import normalizar_columna
-from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
+from app.utils.credenciales_acceso import (
+    generar_password_temporal, enviar_credenciales_acceso, reenviar_credenciales_acceso,
+)  # SCRUM-224
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
@@ -180,6 +182,36 @@ def crear_staff():
     enviar_credenciales_acceso(email, nombre, password_generada, rol_name)
 
     return jsonify({"msg": "Usuario creado", **nuevo.to_dict()}), 201
+
+
+# ---------------------------------------------------------------------------
+# POST /api/owner_gym/staff/<id>/reenviar-credenciales
+# ---------------------------------------------------------------------------
+# Mismo criterio que miembros.py::reenviar_credenciales_miembro -- genera una
+# contrasena NUEVA (no reenvia la original) y la reenvia por correo, para
+# cuando el correo de bienvenida nunca llego (caso real: @hotmail).
+@owner_trainers_bp.route("/staff/<int:user_id>/reenviar-credenciales", methods=["POST"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+def reenviar_credenciales_staff(user_id: int):
+    gym_id   = g.tenant_id
+    role_ids = _staff_filter(gym_id)
+    usuario  = Usuario.query.filter_by(id=user_id, id_gimnasio=gym_id).first()
+    if not usuario or usuario.id_rol not in role_ids:
+        return jsonify({"msg": "Usuario no encontrado"}), 404
+
+    rol_label = usuario.rol.nombre if usuario.rol else "Staff"
+    enviado = reenviar_credenciales_acceso(usuario, rol_label)
+    db.session.commit()
+
+    if enviado:
+        return jsonify({"msg": "Se reenviaron las credenciales por correo."}), 200
+    return jsonify({
+        "msg": "Se generó una contraseña nueva, pero el correo no pudo enviarse. "
+               "Intenta de nuevo más tarde o contacta a soporte.",
+        "aviso": True,
+    }), 200
 
 
 # ---------------------------------------------------------------------------

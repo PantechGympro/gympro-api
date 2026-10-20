@@ -85,4 +85,7 @@ class Usuario(db.Model):
             "created_at":  self.created_at.isoformat() if self.created_at else None,
             # Solo exponer si es base64 valida
             "foto_perfil": fp if (fp and fp.startswith("data:image")) else None,
+            # Para que el frontend pueda ofrecer "reenviar credenciales" solo
+            # mientras la cuenta sigue en su contraseña temporal inicial.
+            "debe_cambiar_password": bool(self.debe_cambiar_password),
         }

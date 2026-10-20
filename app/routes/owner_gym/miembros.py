@@ -15,7 +15,11 @@ from app.utils.busqueda import patron_insensible
 from app.extensions import db as pg_db
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol import Rol as RolPG
-from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
+from app.utils.credenciales_acceso import (
+    generar_password_temporal, enviar_credenciales_acceso, reenviar_credenciales_acceso,
+)  # SCRUM-224
+from app.utils.security import require_role
+from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA
 
 miembros_bp = Blueprint("miembros", __name__)
 
@@ -67,7 +71,31 @@ def listar_miembros():
     miembros_cursor = db.miembros.find(filtro_miembros).sort("fecha_registro", -1).skip(skip).limit(per_page)
     pages           = math.ceil(total_miembros / per_page) if total_miembros > 0 else 0
 
-    miembros_lista = [Miembro(**m).to_dict_full(include_stats=False) for m in miembros_cursor]
+    miembros_docs = list(miembros_cursor)
+
+    # Un solo round-trip a Postgres para marcar quienes siguen con la
+    # contraseña temporal del alta (para que el frontend pueda ofrecer
+    # "Reenviar correo" solo donde de verdad aplica) -- evita N+1 queries.
+    ids_pg = [int(d["id_usuario_pg"]) for d in miembros_docs if d.get("id_usuario_pg")]
+    pendientes_ids = set()
+    if ids_pg:
+        pendientes_ids = {
+            u.id for u in UsuarioPG.query.filter(
+                UsuarioPG.id.in_(ids_pg),
+                UsuarioPG.debe_cambiar_password.is_(True),
+            ).all()
+        }
+
+    miembros_lista = []
+    for d in miembros_docs:
+        item = Miembro(**d).to_dict_full(include_stats=False)
+        id_usuario_pg = d.get("id_usuario_pg")
+        item["id_usuario_pg"] = id_usuario_pg
+        try:
+            item["debe_cambiar_password"] = int(id_usuario_pg) in pendientes_ids
+        except (TypeError, ValueError):
+            item["debe_cambiar_password"] = False
+        miembros_lista.append(item)
 
     return jsonify({
         "miembros":     miembros_lista,
@@ -81,6 +109,7 @@ def listar_miembros():
 # ==============================================================================
 @miembros_bp.route("/api/miembros", methods=["POST"])
 @jwt_required()
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA)
 @require_tenant
 def crear_miembro():
     db     = get_db()
@@ -169,6 +198,46 @@ def crear_miembro():
     except Exception as e:
         pg_db.session.rollback()
         return jsonify({"error": str(e)}), 500
+
+# ==============================================================================
+# 2b. REENVIAR CREDENCIALES (correo de bienvenida con contraseña nueva)
+# ==============================================================================
+# Para cuando el correo original nunca llego -- genera una contrasena
+# temporal NUEVA (no reenvia la vieja) y la reenvia por correo. No bloquea
+# el alta ni afecta el estado del miembro si el envio vuelve a fallar; solo
+# informa si el SMTP acepto o no el mensaje (ver reenviar_credenciales_acceso
+# y su nota sobre por que un "True" no garantiza que llegue a la bandeja de
+# entrada -- Hotmail/Outlook filtran agresivo el correo con contrasenas).
+@miembros_bp.route("/api/miembros/<id>/reenviar-credenciales", methods=["POST"])
+@jwt_required()
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA)
+@require_tenant
+def reenviar_credenciales_miembro(id):
+    db     = get_db()
+    gym_id = g.tenant_id
+
+    try:
+        miembro = db.miembros.find_one({"_id": ObjectId(id), "id_gimnasio_pg": gym_id})
+    except Exception:
+        return jsonify({"error": "Id de miembro invalido"}), 400
+    if not miembro:
+        return jsonify({"error": "Miembro no encontrado"}), 404
+
+    id_usuario_pg = miembro.get("id_usuario_pg")
+    usuario = UsuarioPG.query.get(int(id_usuario_pg)) if id_usuario_pg else None
+    if not usuario:
+        return jsonify({"error": "Este miembro no tiene una cuenta de acceso asociada"}), 400
+
+    enviado = reenviar_credenciales_acceso(usuario, "Miembro")
+    pg_db.session.commit()
+
+    if enviado:
+        return jsonify({"msg": "Se reenviaron las credenciales por correo."}), 200
+    return jsonify({
+        "msg": "Se generó una contraseña nueva, pero el correo no pudo enviarse. "
+               "Intenta de nuevo más tarde o contacta a soporte.",
+        "aviso": True,
+    }), 200
 
 # ==============================================================================
 # 3. ACTUALIZAR MIEMBRO (PUT)
