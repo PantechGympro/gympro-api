@@ -60,6 +60,8 @@ from app.routes.superadmin.planes             import planes_admin_bp
 from app.routes.superadmin.usuarios           import usuarios_admin_bp
 from app.routes.superadmin.backups_admin      import backups_admin_bp
 from app.routes.superadmin.spark_platform     import spark_platform_bp
+from app.routes.owner_gym.perfil_publico      import perfil_publico_bp
+from app.routes.publico.landing               import landing_bp
 
 
 def create_app():
@@ -76,6 +78,8 @@ def create_app():
     from app.models.pg.tipo_membresia      import TipoMembresia       # noqa: F401
     from app.models.pg.ejercicio           import Ejercicio           # noqa: F401
     from app.models.pg.tipo_clase          import TipoClase           # noqa: F401
+    from app.models.pg.gimnasio_imagen     import GimnasioImagen       # noqa: F401
+    from app.models.pg.testimonio          import Testimonio           # noqa: F401
 
     db.init_app(app)
     migrate.init_app(app, db, directory="migrations")
@@ -136,6 +140,7 @@ def create_app():
     app.register_blueprint(reportes_negocio_bp,    url_prefix="/api/owner_gym")
     app.register_blueprint(owner_productos_bp,     url_prefix="/api/owner_gym")
     app.register_blueprint(sucursales_bp,          url_prefix="/api/owner_gym")
+    app.register_blueprint(perfil_publico_bp,      url_prefix="/api/owner_gym")
     app.register_blueprint(tenant_backups_bp,      url_prefix="/api/owner_gym")
     app.register_blueprint(recepcionista_bp,       url_prefix="/api/recepcionista")
     app.register_blueprint(gimnasios_admin_bp,     url_prefix="/api/superadmin")
@@ -144,6 +149,7 @@ def create_app():
     app.register_blueprint(usuarios_admin_bp,      url_prefix="/api/superadmin")
     app.register_blueprint(backups_admin_bp,       url_prefix="/api/superadmin")
     app.register_blueprint(spark_platform_bp,      url_prefix="/api/superadmin")
+    app.register_blueprint(landing_bp,             url_prefix="/api/publico")
 
     # ── Ruta para servir fotos de perfil subidas ─────────────────────────────
     # Usa /app/storage/uploads/ (bind-mounted desde el host) para garantizar
@@ -169,6 +175,17 @@ def create_app():
     @jwt_required()
     def serve_upload(filename):
         upload_dir = "/app/storage/uploads"
+        return send_from_directory(upload_dir, filename)
+
+    # ── Fotos publicas de gimnasio (pagina comercial) ───────────────────────
+    # SIN @jwt_required() a proposito: son las fotos del carrusel de
+    # Landing.jsx, que cualquier visitante ve sin haber iniciado sesion.
+    # Carpeta separada del resto de /app/storage/uploads/ (ver
+    # perfil_publico.py) para que esta excepcion nunca alcance fotos de
+    # perfil o certificados, que siguen siendo privados.
+    @app.route("/api/uploads/publico/<path:filename>")
+    def serve_upload_publico(filename):
+        upload_dir = "/app/storage/uploads/gimnasios_publico"
         return send_from_directory(upload_dir, filename)
 
     init_scheduler(app)
