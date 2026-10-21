@@ -78,7 +78,7 @@ from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
-from app.utils.alcance import registrar_evento
+from app.utils.alcance import registrar_evento, usuario_propietario_de
 from app.utils.crypto import cifrar_dict, descifrar_dict, enmascarar, crypto_disponible
 from app.services.payments import PROVEEDORES_INFO, construir_pasarela, plataforma_en_produccion
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
@@ -158,29 +158,10 @@ def _verificar_password(password: str):
     return usuario, None
 
 
-def _usuario_propietario_de(id_gimnasio: int) -> Usuario | None:
-    """
-    El Usuario con rol Propietario de la organizacion de `id_gimnasio` --
-    es decir, el usuario registrado en la sede principal (invariante
-    documentado en sucursales.py: el id_gimnasio del JWT de un Propietario
-    es siempre su sede principal). Es a quien se avisa por correo, sin
-    importar si quien hizo el cambio fue el propio propietario o un
-    superadmin de plataforma.
-    """
-    gimnasio = Gimnasio.query.get(id_gimnasio)
-    if gimnasio is None:
-        return None
-    sede_principal = Gimnasio.query.filter_by(
-        id_organizacion=gimnasio.id_organizacion, es_sucursal_principal=True
-    ).first()
-    if sede_principal is None:
-        return None
-    return (
-        Usuario.query
-        .join(Rol, Usuario.id_rol == Rol.id)
-        .filter(Usuario.id_gimnasio == sede_principal.id, Rol.nombre == ROL_PROPIETARIO)
-        .first()
-    )
+# _usuario_propietario_de() vivia aqui; se movio a utils/alcance.py como
+# usuario_propietario_de() (publica) porque utils/recibos.py (recibos de
+# venta/membresia) necesita exactamente la misma resolucion
+# Gimnasio -> Organizacion -> sede principal -> Usuario Propietario.
 
 
 def _enviar_aviso_cambio(id_gimnasio: int, proveedor: str, accion: str,
@@ -193,7 +174,7 @@ def _enviar_aviso_cambio(id_gimnasio: int, proveedor: str, accion: str,
     que _enviar_bienvenida en onboarding.py: un correo que no llega no debe
     tumbar el cambio que ya se guardo.
     """
-    propietario = _usuario_propietario_de(id_gimnasio)
+    propietario = usuario_propietario_de(id_gimnasio)
     if not propietario or not propietario.email:
         logger.warning(
             "No se encontró el propietario para avisar el cambio de cuenta de cobro (gimnasio %s)",

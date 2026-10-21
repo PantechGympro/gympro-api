@@ -30,6 +30,7 @@ from app.utils.tenant import require_tenant
 from app.services.payments import (
     PasarelaError, pasarela_de_gimnasio, pasarela_de_plataforma, proveedores_disponibles,
 )
+from app.utils.recibos import enviar_recibo_membresia, enviar_recibo_venta, registrar_evento_transaccion
 
 logger = logging.getLogger(__name__)
 
@@ -556,16 +557,45 @@ def _aplicar_membresia(tx: TransaccionPago, meta: dict) -> None:
     })
 
     proveedor = tx.proveedor.value if hasattr(tx.proveedor, "value") else tx.proveedor
+    metodo_pago_str = "PayPal" if proveedor == "paypal" else "Mercado Pago"
+    fecha_fin_nueva = fecha_inicio + timedelta(days=duracion * 30)
     mdb.pagos.insert_one({
         "id_miembro":  miembro["_id"],
         "id_gimnasio": tx.id_gimnasio,
         "monto":       float(tx.monto),
-        "metodo_pago": "PayPal" if proveedor == "paypal" else "Mercado Pago",
+        "metodo_pago": metodo_pago_str,
         "concepto":    f"Renovación {tm.nombre}",
         "fecha_pago":  datetime.now(),
         "referencia_pasarela": tx.referencia_pago or tx.referencia_externa,
         "id_transaccion":      tx.id,
     })
+
+    # -- Recibo por correo al miembro Y al propietario, mas bitacora de
+    #    seguridad -- antes de esto, una renovacion pagada en linea (webhook
+    #    de PayPal/Mercado Pago) no mandaba ningun correo en absoluto.
+    try:
+        enviar_recibo_membresia(
+            tx.id_gimnasio,
+            numero=str(tx.id), fecha_str=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            membresia_nombre=tm.nombre, monto=float(tx.monto), metodo_pago=metodo_pago_str,
+            fecha_inicio_str=fecha_inicio.strftime("%d/%m/%Y"),
+            fecha_fin_str=fecha_fin_nueva.strftime("%d/%m/%Y"),
+            nombre_miembro=miembro.get("nombre", "") or "",
+            email_miembro=miembro.get("email"),
+            referencia_pasarela=tx.referencia_pago or tx.referencia_externa,
+        )
+    except Exception:
+        logger.exception("Pago %s: no se pudo enviar el recibo de membresía", tx.id)
+
+    registrar_evento_transaccion(
+        "membresia.renovada_en_linea",
+        id_usuario_actor=tx.id_usuario, id_gimnasio=tx.id_gimnasio,
+        detalle={
+            "id_transaccion": tx.id, "id_membresia": tm.id, "membresia_nombre": tm.nombre,
+            "monto": float(tx.monto), "metodo_pago": metodo_pago_str, "proveedor": proveedor,
+        },
+    )
+
     logger.info("Pago %s: membresía '%s' renovada al miembro %s",
                 tx.id, tm.nombre, miembro.get("nombre"))
 
@@ -594,9 +624,9 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
     # igual que hace el POST /api/ventas.
     id_miembro_oid = None
     id_miembro_pg  = None
+    miembro_doc    = None
     crudo = meta.get("id_miembro")
     if crudo is not None and crudo != "":
-        miembro_doc = None
         try:
             id_miembro_pg = int(crudo)
             miembro_doc = mdb.miembros.find_one({
@@ -627,6 +657,31 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
         "id_transaccion":      tx.id,
     }
     mdb.ventas.insert_one(venta)
+
+    # -- Recibo por correo al miembro Y al propietario, mas bitacora de
+    #    seguridad -- mismo tratamiento que POST /api/ventas (en persona).
+    metodo_pago_str = "PayPal" if proveedor == "paypal" else "Mercado Pago"
+    try:
+        enviar_recibo_venta(
+            tx.id_gimnasio, venta_num=str(tx.id),
+            fecha_str=venta["fecha"].strftime("%d/%m/%Y %H:%M"),
+            items=items, total=venta["total"], metodo_pago=metodo_pago_str,
+            nombre_miembro=venta.get("nombre_miembro", ""),
+            email_miembro=(miembro_doc.get("email") if miembro_doc else None),
+            referencia_pasarela=tx.referencia_pago or tx.referencia_externa,
+        )
+    except Exception:
+        logger.exception("Pago %s: no se pudo enviar el recibo de venta", tx.id)
+
+    registrar_evento_transaccion(
+        "pos.venta_registrada_en_linea",
+        id_usuario_actor=tx.id_usuario, id_gimnasio=tx.id_gimnasio,
+        detalle={
+            "id_transaccion": tx.id, "total": venta["total"],
+            "metodo_pago": metodo_pago_str, "items": len(items),
+            "id_miembro_pg": id_miembro_pg,
+        },
+    )
 
     # Descuento de inventario (los combos descuentan sus componentes)
     for item in items:

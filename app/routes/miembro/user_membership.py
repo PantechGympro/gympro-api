@@ -5,6 +5,7 @@ from bson.objectid import ObjectId
 from app.mongo import get_db
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
+from app.utils.recibos import enviar_recibo_membresia, registrar_evento_transaccion
 
 user_membership_bp = Blueprint('user_membership', __name__)
 
@@ -203,7 +204,7 @@ def renew_membership():
             "estado":       "Activa"
         })
 
-        mdb.pagos.insert_one({
+        pago_doc = mdb.pagos.insert_one({
             "id_miembro":   miembro["_id"],
             "id_gimnasio":  gym_id,
             "monto":        float(tm.precio),
@@ -211,6 +212,33 @@ def renew_membership():
             "concepto":     f"Renovación {tm.nombre}",
             "fecha_pago":   datetime.now()
         })
+
+        # -- Recibo por correo al miembro Y al propietario, mas bitacora de
+        #    seguridad -- misma logica que registrar_pago() en owner_gym/pagos.py,
+        #    pues esta ruta es una renovacion de membresia hecha por el propio
+        #    miembro (autoservicio) y no debe quedar fuera de la traza.
+        try:
+            enviar_recibo_membresia(
+                gym_id,
+                numero=str(pago_doc.inserted_id)[-8:].upper(),
+                fecha_str=datetime.now().strftime("%d/%m/%Y %H:%M"),
+                membresia_nombre=tm.nombre, monto=float(tm.precio), metodo_pago=metodo_pago,
+                fecha_inicio_str=fecha_inicio.strftime("%d/%m/%Y"), fecha_fin_str=fecha_fin.strftime("%d/%m/%Y"),
+                nombre_miembro=miembro.get("nombre", "") or "",
+                email_miembro=miembro.get("email"),
+            )
+        except Exception as e:
+            print(f"[user_membership] Error enviando recibo: {e}")
+
+        registrar_evento_transaccion(
+            "membresia.renovada_autoservicio",
+            id_usuario_actor=user_pg_id, id_gimnasio=gym_id,
+            detalle={
+                "id_membresia": tm.id, "membresia_nombre": tm.nombre,
+                "monto": float(tm.precio), "metodo_pago": metodo_pago,
+                "id_miembro": str(miembro["_id"]) if miembro.get("_id") else None,
+            },
+        )
 
         return jsonify({
             "message": "Membresía renovada exitosamente",

@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, g
-from flask_jwt_extended import jwt_required
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from bson import ObjectId
@@ -13,6 +13,7 @@ from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
 from app.utils.luhn import validar_luhn
 from app.utils.tenant import get_tenant_filter
+from app.utils.recibos import enviar_recibo_membresia, registrar_evento_transaccion
 
 pagos_bp = Blueprint("pagos", __name__)
 
@@ -85,6 +86,38 @@ def registrar_pago():
             estado="Activa"
         )
         mm.save()
+
+        # -- Recibo por correo al miembro Y al propietario, mas bitacora de
+        #    seguridad (misma peticion que ya cubre ventas.py: una renovacion
+        #    antes no mandaba ningun correo en absoluto). No-bloqueante: un
+        #    fallo de correo o de bitacora nunca debe deshacer el pago, que
+        #    ya quedo guardado arriba.
+        try:
+            enviar_recibo_membresia(
+                gym_id,
+                numero=str(pago._id)[-8:].upper() if pago._id else "N/A",
+                fecha_str=pago.fecha_pago.strftime("%d/%m/%Y %H:%M"),
+                membresia_nombre=tm.nombre, monto=pago.monto, metodo_pago=pago.metodo_pago,
+                fecha_inicio_str=inicio.strftime("%d/%m/%Y"), fecha_fin_str=fin.strftime("%d/%m/%Y"),
+                nombre_miembro=getattr(miembro, "nombre", "") or "",
+                email_miembro=getattr(miembro, "email", None),
+            )
+        except Exception as e:
+            print(f"[pagos] Error enviando recibo: {e}")
+
+        try:
+            id_actor = int(get_jwt_identity())
+        except (TypeError, ValueError):
+            id_actor = None
+        registrar_evento_transaccion(
+            "membresia.renovada",
+            id_usuario_actor=id_actor, id_gimnasio=gym_id,
+            detalle={
+                "id_membresia": tm.id, "membresia_nombre": tm.nombre,
+                "monto": pago.monto, "metodo_pago": pago.metodo_pago,
+                "id_miembro": str(miembro._id) if miembro._id else None,
+            },
+        )
 
         return jsonify(pago.to_dict()), 201
 

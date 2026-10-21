@@ -33,7 +33,8 @@ from app.models.pg.organizacion import Organizacion
 from app.models.pg.asignacion_usuario import AsignacionUsuario
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.rol import Rol
-from app.constants.roles import normalizar_rol
+from app.models.pg.usuario import Usuario
+from app.constants.roles import normalizar_rol, ROL_PROPIETARIO
 from app.models.pg.bitacora_evento import BitacoraEvento
 
 
@@ -238,3 +239,31 @@ def registrar_evento(id_usuario_actor, accion, *, id_organizacion=None, id_gimna
     )
     db.session.add(evento)
     return evento
+
+
+def usuario_propietario_de(id_gimnasio: int) -> Usuario | None:
+    """
+    El Usuario con rol Propietario de la organizacion de `id_gimnasio` --
+    es decir, el usuario registrado en la sede principal (invariante ya
+    documentado en sucursales.py: el id_gimnasio del JWT de un Propietario
+    es siempre su sede principal). Compartido entre cualquier modulo que
+    necesite avisarle al dueno del gimnasio por correo -- pasarelas.py
+    (cambio de cuenta de cobro) y utils/recibos.py (recibo de cada venta
+    o renovacion de membresia) lo usan por igual, para no resolver esta
+    misma cadena Gimnasio -> Organizacion -> sede principal -> Usuario
+    por separado en cada uno.
+    """
+    gimnasio = Gimnasio.query.get(id_gimnasio)
+    if gimnasio is None:
+        return None
+    sede_principal = Gimnasio.query.filter_by(
+        id_organizacion=gimnasio.id_organizacion, es_sucursal_principal=True
+    ).first()
+    if sede_principal is None:
+        return None
+    return (
+        Usuario.query
+        .join(Rol, Usuario.id_rol == Rol.id)
+        .filter(Usuario.id_gimnasio == sede_principal.id, Rol.nombre == ROL_PROPIETARIO)
+        .first()
+    )
