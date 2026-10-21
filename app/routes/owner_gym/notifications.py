@@ -316,10 +316,25 @@ def init_scheduler(app):
             kwargs={"app": app},
         )
 
+        # Reportes automaticos (corte de caja por correo). Corre a las 06:00
+        # MX, antes de que el propietario llegue al gimnasio, y antes del
+        # chequeo de vencimientos (08:00) para no competir por el mismo
+        # proceso de correo si ambos tardaran.
+        from app.routes.owner_gym.reportes_automaticos import tick_reportes_automaticos
+        scheduler.add_job(
+            func=tick_reportes_automaticos,
+            trigger=CronTrigger(hour=6, minute=0),
+            id="reportes_automaticos",
+            name="Reportes automaticos por correo (corte de caja)",
+            replace_existing=True,
+            kwargs={"app": app},
+        )
+
         scheduler.start()
         _scheduler_status["activo"] = True
         app.logger.info("[Scheduler] Tareas registradas: 'notif_vencimientos' (08:00 MX), "
-                        "'billing_auto_renovacion' (03:00 MX) y 'aviso_no_asistio' (21:00 MX)")
+                        "'billing_auto_renovacion' (03:00 MX), 'aviso_no_asistio' (21:00 MX) "
+                        "y 'reportes_automaticos' (06:00 MX)")
 
     except ImportError:
         app.logger.warning("[Scheduler] APScheduler no disponible. Instalar: pip install apscheduler")

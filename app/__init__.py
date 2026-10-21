@@ -23,6 +23,7 @@ from app.routes.owner_gym.owner_profile       import owner_profile_bp
 from app.routes.owner_gym.owner_trainers      import owner_trainers_bp
 from app.routes.owner_gym.owner_membresias    import owner_membresias_bp
 from app.routes.owner_gym.reportes_negocio    import reportes_negocio_bp
+from app.routes.owner_gym.reportes_automaticos import reportes_automaticos_bp
 from app.routes.owner_gym.owner_productos     import owner_productos_bp
 from app.routes.owner_gym.sucursales          import sucursales_bp
 from app.routes.miembro.user_dashboard        import user_dashboard_bp
@@ -138,6 +139,7 @@ def create_app():
     app.register_blueprint(owner_trainers_bp,      url_prefix="/api/owner_gym")
     app.register_blueprint(owner_membresias_bp,    url_prefix="/api/owner_gym")
     app.register_blueprint(reportes_negocio_bp,    url_prefix="/api/owner_gym")
+    app.register_blueprint(reportes_automaticos_bp, url_prefix="/api/owner_gym")
     app.register_blueprint(owner_productos_bp,     url_prefix="/api/owner_gym")
     app.register_blueprint(sucursales_bp,          url_prefix="/api/owner_gym")
     app.register_blueprint(perfil_publico_bp,      url_prefix="/api/owner_gym")

@@ -316,13 +316,15 @@ def opciones_reporte():
     }), 200
 
 
-@reportes_negocio_bp.route("/reportes/pdf", methods=["GET"])
-@jwt_required()
-@require_role("owner_gym", "Administrador")
-@require_tenant
-@require_funcion_plan("reportes_pdf")  # SCRUM-224
-def reporte_pdf():
-    """Reporte ejecutivo del gimnasio en PDF."""
+def _construir_reporte_pdf(gym, desde, hasta, etiqueta, secciones, comparar, con_graficas):
+    """
+    Construye el PDF del reporte ejecutivo y devuelve (bytes, nombre_archivo).
+
+    Extraído de reporte_pdf() (antes todo este maquetado vivía ahí) para que
+    el job de reportes automáticos (ver reportes_automaticos.py) pueda
+    generar el mismo documento desde un contexto sin request/response de
+    Flask, sin duplicar las ~230 líneas de maquetación en dos sitios.
+    """
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import (
         SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak,
@@ -332,22 +334,8 @@ def reporte_pdf():
     from reportlab.lib.units import cm
     from reportlab.lib.enums import TA_CENTER
 
-    gym_id, error = _resolver_gimnasio_objetivo()
-    if error:
-        return error
-    gym = Gimnasio.query.get(gym_id)
-    if not gym:
-        return jsonify({"msg": "Gimnasio no encontrado"}), 404
+    gym_id = gym.id
 
-    desde, hasta, etiqueta = _resolver_periodo()
-    comparar = request.args.get("comparar") == "1"
-
-    pedidas = [s.strip() for s in (request.args.get("secciones") or "").split(",") if s.strip()]
-    secciones = [s for s in pedidas if s in SECCIONES_VALIDAS] or SECCIONES_VALIDAS
-
-    # Las graficas van desactivadas por omision: un reporte que se imprime para
-    # archivar suele querer solo las cifras, y dibujarlas cuesta tiempo de CPU.
-    con_graficas = request.args.get("graficas") == "1"
     if con_graficas:
         from app.utils import graficas_pdf as gpdf
 
@@ -591,8 +579,39 @@ def reporte_pdf():
 
     nombre_archivo = ep.nombre_archivo_reporte(gym.nombre or "gimnasio", desde)
 
+    return buf.read(), nombre_archivo
+
+
+@reportes_negocio_bp.route("/reportes/pdf", methods=["GET"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+@require_funcion_plan("reportes_pdf")  # SCRUM-224
+def reporte_pdf():
+    """Reporte ejecutivo del gimnasio en PDF."""
+    gym_id, error = _resolver_gimnasio_objetivo()
+    if error:
+        return error
+    gym = Gimnasio.query.get(gym_id)
+    if not gym:
+        return jsonify({"msg": "Gimnasio no encontrado"}), 404
+
+    desde, hasta, etiqueta = _resolver_periodo()
+    comparar = request.args.get("comparar") == "1"
+
+    pedidas = [s.strip() for s in (request.args.get("secciones") or "").split(",") if s.strip()]
+    secciones = [s for s in pedidas if s in SECCIONES_VALIDAS] or SECCIONES_VALIDAS
+
+    # Las graficas van desactivadas por omision: un reporte que se imprime para
+    # archivar suele querer solo las cifras, y dibujarlas cuesta tiempo de CPU.
+    con_graficas = request.args.get("graficas") == "1"
+
+    pdf_bytes, nombre_archivo = _construir_reporte_pdf(
+        gym, desde, hasta, etiqueta, secciones, comparar, con_graficas,
+    )
+
     return Response(
-        buf.read(),
+        pdf_bytes,
         mimetype="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
     )

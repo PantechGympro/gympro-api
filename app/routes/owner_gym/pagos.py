@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from bson import ObjectId
 import math
@@ -234,6 +234,11 @@ def listar_categorias_ventas():
 #   ?tipo=todos|membresia|venta   (default: todos)
 #   ?categoria=<str>              (sólo cuando tipo=venta, filtra por categoría de ítem)
 #   ?anio=<int>&mes=<int>         (periodo; mes=0 o ausente = año completo)
+#   ?desde=<YYYY-MM-DD>&hasta=<YYYY-MM-DD>  (rango libre; tiene prioridad
+#                                  sobre anio/mes -- así la app puede pedir
+#                                  un día o una semana concretos sin que el
+#                                  backend tenga que adivinar "qué es una
+#                                  semana" en cada selector)
 #   ?page=<int>                   (default: 1)
 #   ?per_page=<int>               (default: 10, máximo 50)
 #
@@ -256,11 +261,23 @@ def listar_todos_movimientos():
         skip      = (page - 1) * per_page
 
         # ── Periodo ───────────────────────────────────────────────────────────
+        # desde/hasta (rango libre) tiene prioridad sobre anio/mes -- mismo
+        # criterio que _resolver_periodo() en reportes_negocio.py, para que
+        # "hoy" o "esta semana" en Pagos y en Reportes filtren igual.
         # anio sin mes filtra el año entero; sin anio no se filtra por fecha.
         anio = request.args.get("anio", type=int)
         mes  = request.args.get("mes",  type=int)
+        desde_txt = (request.args.get("desde") or "").strip()
+        hasta_txt = (request.args.get("hasta") or "").strip()
         rango_fechas = None
-        if anio:
+        if desde_txt and hasta_txt:
+            try:
+                desde = datetime.strptime(desde_txt[:10], "%Y-%m-%d")
+                hasta = datetime.strptime(hasta_txt[:10], "%Y-%m-%d") + timedelta(days=1)
+                rango_fechas = {"$gte": desde, "$lt": hasta}
+            except ValueError:
+                pass
+        if rango_fechas is None and anio:
             if mes and 1 <= mes <= 12:
                 desde = datetime(anio, mes, 1)
                 hasta = datetime(anio + (mes == 12), (mes % 12) + 1, 1)
@@ -440,7 +457,8 @@ def listar_todos_movimientos():
             # Importe de TODO el filtro, no solo de esta página.
             "monto_total": monto_total,
             "anios":       anios,
-            "filtro":      {"tipo": tipo, "anio": anio, "mes": mes},
+            "filtro":      {"tipo": tipo, "anio": anio, "mes": mes,
+                            "desde": desde_txt or None, "hasta": hasta_txt or None},
         }), 200
 
     except Exception as e:
