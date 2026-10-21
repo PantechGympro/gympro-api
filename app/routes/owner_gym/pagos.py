@@ -14,13 +14,25 @@ from app.utils.tenant import require_tenant
 from app.utils.luhn import validar_luhn
 from app.utils.tenant import get_tenant_filter
 from app.utils.recibos import enviar_recibo_membresia, registrar_evento_transaccion
+from app.utils.security import require_role
+from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA
 
 pagos_bp = Blueprint("pagos", __name__)
 
 @pagos_bp.route("/api/pagos", methods=["POST"])
 @jwt_required()
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA)
 @require_tenant
 def registrar_pago():
+    """Cobro manual de membresia en la sucursal (Efectivo) o via pasarela.
+
+    Peticion explicita del usuario: el cobro manual (para quien paga en
+    efectivo en la sucursal) debe distinguir si es una RENOVACION (el
+    miembro ya tenia membresia) o una INSCRIPCION Y PRIMER PAGO (alta
+    nueva), porque la inscripcion lleva un costo adicional que el staff
+    captura a mano en cada cobro -- varia por promocion/negociacion y no
+    es un precio fijo del catalogo de TipoMembresia.
+    """
     try:
         mdb    = get_db()
         data   = request.json
@@ -55,13 +67,38 @@ def registrar_pago():
             if not validar_luhn(tarjeta):
                 return jsonify({"error": "Número de tarjeta inválido"}), 400
 
+        # 4b. Renovación vs. inscripción y primer pago -- la inscripción
+        #     lleva un costo adicional que el staff teclea a mano (no un
+        #     precio de catálogo), sumado al precio normal de la membresía.
+        tipo_pago = data.get("tipo_pago", "renovacion")
+        if tipo_pago not in ("renovacion", "inscripcion"):
+            return jsonify({"error": "tipo_pago inválido (usar renovacion o inscripcion)"}), 400
+
+        monto_membresia   = float(tm.precio)
+        monto_inscripcion = 0.0
+        if tipo_pago == "inscripcion":
+            try:
+                monto_inscripcion = float(data.get("costo_inscripcion"))
+            except (TypeError, ValueError):
+                monto_inscripcion = -1.0
+            if monto_inscripcion <= 0:
+                return jsonify({"error": "Falta el costo de inscripción"}), 400
+        monto_total = monto_membresia + monto_inscripcion
+
+        concepto = (
+            f"Inscripción y primer pago — {tm.nombre}" if tipo_pago == "inscripcion"
+            else f"Renovación de membresía — {tm.nombre}"
+        )
+
         # 5. Crear el Pago con datos de PG TipoMembresia
         pago = Pago(
             id_miembro=miembro._id,
-            monto=tm.precio,
+            monto=monto_total,
             metodo_pago=data["metodo_pago"],
-            concepto=f"Pago membresía {tm.nombre}",
+            concepto=concepto,
             id_gimnasio=gym_id,
+            tipo_pago=tipo_pago,
+            costo_inscripcion=(monto_inscripcion if tipo_pago == "inscripcion" else None),
         )
         pago.save()
 
@@ -101,6 +138,8 @@ def registrar_pago():
                 fecha_inicio_str=inicio.strftime("%d/%m/%Y"), fecha_fin_str=fin.strftime("%d/%m/%Y"),
                 nombre_miembro=getattr(miembro, "nombre", "") or "",
                 email_miembro=getattr(miembro, "email", None),
+                tipo_pago=tipo_pago,
+                costo_inscripcion=(monto_inscripcion if tipo_pago == "inscripcion" else None),
             )
         except Exception as e:
             print(f"[pagos] Error enviando recibo: {e}")
@@ -110,12 +149,14 @@ def registrar_pago():
         except (TypeError, ValueError):
             id_actor = None
         registrar_evento_transaccion(
-            "membresia.renovada",
+            "membresia.inscripcion_manual" if tipo_pago == "inscripcion" else "membresia.renovada",
             id_usuario_actor=id_actor, id_gimnasio=gym_id,
             detalle={
                 "id_membresia": tm.id, "membresia_nombre": tm.nombre,
                 "monto": pago.monto, "metodo_pago": pago.metodo_pago,
                 "id_miembro": str(miembro._id) if miembro._id else None,
+                "tipo_pago": tipo_pago,
+                "costo_inscripcion": (monto_inscripcion if tipo_pago == "inscripcion" else None),
             },
         )
 

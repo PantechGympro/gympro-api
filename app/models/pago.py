@@ -19,6 +19,14 @@ class Pago:
         self.id_gimnasio   = kwargs.get("id_gimnasio")
         self.estado        = kwargs.get("estado", "Pagado")
         self.referencia    = kwargs.get("referencia")
+        # Campos opcionales de cobro manual (owner_gym/pagos.py::registrar_pago) --
+        # distinguen una renovacion de una inscripcion y primer pago, cuyo costo
+        # de inscripcion lo captura el staff a mano en cada cobro (no es un precio
+        # fijo del catalogo de membresias). costo_inscripcion queda en None para
+        # cualquier pago que no sea una inscripcion (incluye todo el historico
+        # previo a este campo).
+        self.tipo_pago        = kwargs.get("tipo_pago", "renovacion")
+        self.costo_inscripcion = kwargs.get("costo_inscripcion")
 
     def to_dict(self):
         db = get_db()
@@ -44,7 +52,9 @@ class Pago:
             "monto": self.monto,
             "metodo_pago": self.metodo_pago,
             "concepto": self.concepto,
-            "fecha_pago": self.fecha_pago.isoformat() if isinstance(self.fecha_pago, datetime) else self.fecha_pago
+            "fecha_pago": self.fecha_pago.isoformat() if isinstance(self.fecha_pago, datetime) else self.fecha_pago,
+            "tipo_pago": self.tipo_pago,
+            "costo_inscripcion": self.costo_inscripcion,
         }
 
     def save(self):
@@ -60,6 +70,8 @@ class Pago:
             "id_gimnasio":   self.id_gimnasio,   # tenant — requerido para aislamiento multi-gym
             "estado":        self.estado,
             "referencia":    self.referencia,
+            "tipo_pago":         self.tipo_pago,
+            "costo_inscripcion": self.costo_inscripcion,
         }
         
         if self._id:

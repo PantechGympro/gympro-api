@@ -147,25 +147,54 @@ def enviar_recibo_venta(id_gimnasio, *, venta_num, fecha_str, items, total,
 def enviar_recibo_membresia(id_gimnasio, *, numero, fecha_str, membresia_nombre,
                              monto, metodo_pago, fecha_inicio_str, fecha_fin_str,
                              nombre_miembro="", email_miembro=None,
-                             referencia_pasarela=None):
+                             referencia_pasarela=None, tipo_pago="renovacion",
+                             costo_inscripcion=None):
     """
-    Recibo de una renovacion de membresia (pagada en persona o en linea).
-    Antes de este modulo, una renovacion no mandaba ningun correo -- ni
-    al miembro ni al propietario.
+    Recibo de una renovacion -- o de una inscripcion y primer pago -- de
+    membresia (pagada en persona o en linea). Antes de este modulo, una
+    renovacion no mandaba ningun correo -- ni al miembro ni al propietario.
+
+    tipo_pago/costo_inscripcion son opcionales y retrocompatibles: los
+    llamadores que no los mandan (pagos_online.py, user_membership.py)
+    siguen viendo exactamente el recibo de renovacion de siempre. Cuando
+    tipo_pago="inscripcion" (cobro manual en la sucursal, ver
+    owner_gym/pagos.py::registrar_pago), el recibo desglosa el costo de
+    inscripcion -- que el staff captura a mano, no es un precio fijo del
+    catalogo -- del primer pago de la membresia en si.
     """
-    filas = f"""<tr>
-          <td style="padding:6px 10px;border-bottom:1px solid #2d3148">Membresia: {membresia_nombre}</td>
-          <td style="padding:6px 10px;border-bottom:1px solid #2d3148;text-align:right;color:#10b981;font-weight:700">{_fmt(monto)}</td>
-        </tr>
-        <tr>
-          <td colspan="2" style="padding:6px 10px;font-size:11px;color:#94a3b8">Vigencia: {fecha_inicio_str} a {fecha_fin_str}</td>
-        </tr>"""
+    es_inscripcion = tipo_pago == "inscripcion" and costo_inscripcion is not None
+    if es_inscripcion:
+        monto_membresia_calc = monto - costo_inscripcion
+        filas = f"""<tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148">Costo de inscripción</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148;text-align:right;color:#10b981;font-weight:700">{_fmt(costo_inscripcion)}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148">Primer pago — Membresía: {membresia_nombre}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148;text-align:right;color:#10b981;font-weight:700">{_fmt(monto_membresia_calc)}</td>
+            </tr>
+            <tr>
+              <td colspan="2" style="padding:6px 10px;font-size:11px;color:#94a3b8">Vigencia: {fecha_inicio_str} a {fecha_fin_str}</td>
+            </tr>"""
+        encabezado = "Inscripción y primer pago -- Comprobante"
+        asunto     = f"[GYM PRO] Comprobante de inscripción #{numero}"
+    else:
+        filas = f"""<tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148">Membresia: {membresia_nombre}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148;text-align:right;color:#10b981;font-weight:700">{_fmt(monto)}</td>
+            </tr>
+            <tr>
+              <td colspan="2" style="padding:6px 10px;font-size:11px;color:#94a3b8">Vigencia: {fecha_inicio_str} a {fecha_fin_str}</td>
+            </tr>"""
+        encabezado = "Renovacion de membresia -- Comprobante"
+        asunto     = f"[GYM PRO] Comprobante de renovacion de membresia #{numero}"
+
     pie = f"<p style=\'margin:12px 0 0;font-size:12px;color:#94a3b8\'>Metodo: <strong style=\'color:#f1f5f9\'>{metodo_pago}</strong></p>"
     if referencia_pasarela:
         pie += f"<p style=\'margin:4px 0 0;font-size:12px;color:#94a3b8\'>Referencia: {referencia_pasarela}</p>"
 
     html = _plantilla_recibo(
-        encabezado="Renovacion de membresia -- Comprobante",
+        encabezado=encabezado,
         numero=numero,
         fecha_str=fecha_str,
         lineas_html=filas,
@@ -174,7 +203,6 @@ def enviar_recibo_membresia(id_gimnasio, *, numero, fecha_str, membresia_nombre,
         destinatario_label=(f"Miembro: <strong style=\'color:#f1f5f9\'>{nombre_miembro}</strong>" if nombre_miembro else None),
         pie_extra=pie,
     )
-    asunto = f"[GYM PRO] Comprobante de renovacion de membresia #{numero}"
     destinatarios = [email_miembro, _owner_email(id_gimnasio)]
     _enviar_correo(destinatarios, asunto, html)
 
