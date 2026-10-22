@@ -55,6 +55,7 @@ class Pago:
             "fecha_pago": self.fecha_pago.isoformat() if isinstance(self.fecha_pago, datetime) else self.fecha_pago,
             "tipo_pago": self.tipo_pago,
             "costo_inscripcion": self.costo_inscripcion,
+            "referencia": self.referencia,
         }
 
     def save(self):

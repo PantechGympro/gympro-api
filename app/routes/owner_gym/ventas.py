@@ -41,6 +41,13 @@ def registrar_venta():
         if metodo not in ("Efectivo", "Tarjeta", "Transferencia"):
             return jsonify({"error": "Método de pago inválido"}), 400
 
+        # Transferencia: la referencia (folio o clave de rastreo) es obligatoria
+        # -- es lo único que permite ubicar el movimiento en el estado de cuenta
+        # del banco si hace falta conciliarlo después.
+        referencia = (data.get("referencia") or "").strip()
+        if metodo == "Transferencia" and not referencia:
+            return jsonify({"error": "Falta la referencia de la transferencia"}), 400
+
         # ── Resolver comprador ────────────────────────────────────────────────
         # El historial del miembro (GET /api/ventas) filtra por el ObjectId del
         # documento miembro. Resolvemos y persistimos AMBOS (ObjectId + PG id)
@@ -64,17 +71,23 @@ def registrar_venta():
             except (ValueError, TypeError):
                 miembro_doc = None
         else:
+            # POS de staff (owner/administrador/recepcionista/entrenador): el
+            # miembro es obligatorio -- una venta sin miembro asociado nunca
+            # cuadra en su historial de compras ni en los reportes del negocio.
             id_miembro_raw = data.get("id_miembro")
-            if id_miembro_raw is not None and id_miembro_raw != "":
+            if id_miembro_raw is None or id_miembro_raw == "":
+                return jsonify({"error": "Selecciona un miembro para esta venta"}), 400
+            try:
+                id_miembro_pg = int(id_miembro_raw)
+                miembro_doc = db.miembros.find_one({"id_usuario_pg": id_miembro_pg})
+            except (ValueError, TypeError):
+                # Puede venir ya como ObjectId string (POS de admin)
                 try:
-                    id_miembro_pg = int(id_miembro_raw)
-                    miembro_doc = db.miembros.find_one({"id_usuario_pg": id_miembro_pg})
-                except (ValueError, TypeError):
-                    # Puede venir ya como ObjectId string (POS de admin)
-                    try:
-                        miembro_doc = db.miembros.find_one({"_id": ObjectId(str(id_miembro_raw))})
-                    except Exception:
-                        miembro_doc = None
+                    miembro_doc = db.miembros.find_one({"_id": ObjectId(str(id_miembro_raw))})
+                except Exception:
+                    miembro_doc = None
+            if not miembro_doc:
+                return jsonify({"error": "Miembro no encontrado"}), 404
 
         if miembro_doc:
             id_miembro_oid = miembro_doc["_id"]
@@ -93,7 +106,7 @@ def registrar_venta():
             "nombre_miembro": data.get("nombre_miembro", ""),
             # Datos de pago según método
             "numero_tarjeta": data.get("numero_tarjeta", ""),
-            "referencia":     data.get("referencia", ""),
+            "referencia":     referencia,
         }
         result = db.ventas.insert_one(doc)
 

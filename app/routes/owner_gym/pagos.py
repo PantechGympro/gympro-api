@@ -67,6 +67,13 @@ def registrar_pago():
             if not validar_luhn(tarjeta):
                 return jsonify({"error": "Número de tarjeta inválido"}), 400
 
+        # 4a. Transferencia: la referencia (folio o clave de rastreo) es
+        #     obligatoria -- es lo único que permite ubicar el movimiento en
+        #     el estado de cuenta del banco si hace falta conciliarlo después.
+        referencia = (data.get("referencia") or "").strip()
+        if data["metodo_pago"] == "Transferencia" and not referencia:
+            return jsonify({"error": "Falta la referencia de la transferencia"}), 400
+
         # 4b. Renovación vs. inscripción y primer pago -- la inscripción
         #     lleva un costo adicional que el staff teclea a mano (no un
         #     precio de catálogo), sumado al precio normal de la membresía.
@@ -99,6 +106,7 @@ def registrar_pago():
             id_gimnasio=gym_id,
             tipo_pago=tipo_pago,
             costo_inscripcion=(monto_inscripcion if tipo_pago == "inscripcion" else None),
+            referencia=(referencia or None),
         )
         pago.save()
 
@@ -403,6 +411,7 @@ def listar_todos_movimientos():
                     "monto":       float(doc.get("_monto", 0)),
                     "metodo_pago": doc.get("metodo_pago", ""),
                     "concepto":    doc.get("concepto", ""),
+                    "referencia":  doc.get("referencia") or None,
                     "fecha":       fecha_str,
                     "categoria":   None,
                 })
@@ -423,6 +432,7 @@ def listar_todos_movimientos():
                     "monto":       float(doc.get("_monto", 0)),
                     "metodo_pago": doc.get("metodo_pago", ""),
                     "concepto":    resumen,
+                    "referencia":  doc.get("referencia") or None,
                     "fecha":       fecha_str,
                     "categoria":   cats[0] if len(cats) == 1 else (", ".join(cats) if cats else None),
                 })

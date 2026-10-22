@@ -162,6 +162,13 @@ def renew_membership():
         if metodo_pago not in metodos_validos:
             return jsonify({"error": f"Método de pago inválido. Usar: {', '.join(metodos_validos)}"}), 400
 
+        # Transferencia: la referencia (folio o clave de rastreo) es obligatoria
+        # -- es lo único que permite ubicar el movimiento en el estado de cuenta
+        # del banco si hace falta conciliarlo después.
+        referencia = (data.get('referencia') or '').strip()
+        if metodo_pago == 'Transferencia' and not referencia:
+            return jsonify({"error": "Falta la referencia de la transferencia"}), 400
+
         # id_membresia puede llegar como entero (PG) o string de entero
         try:
             tm = TipoMembresia.query.filter_by(
@@ -210,7 +217,8 @@ def renew_membership():
             "monto":        float(tm.precio),
             "metodo_pago":  metodo_pago,
             "concepto":     f"Renovación {tm.nombre}",
-            "fecha_pago":   datetime.now()
+            "fecha_pago":   datetime.now(),
+            "referencia":   (referencia or None),
         })
 
         # -- Recibo por correo al miembro Y al propietario, mas bitacora de
