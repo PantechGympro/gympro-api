@@ -316,21 +316,27 @@ def get_members():
     recibe más de `per_page` miembros por petición, pero "activos"/"vencidos"/
     etc. siguen contando a todo el gimnasio y una búsqueda por nombre o correo
     encuentra coincidencias fuera de la página visible.
+
+    `inactivos` (bool, default false): igual que `inactivos` en GET /api/miembros
+    -- false lista el padrón activo, true la "papelera" de miembros
+    desactivados, para que recepción pueda ver y reactivar a quien desactivó
+    por error sin tener que pedírselo a Propietario/Administrador.
     """
     err = _require_receptionist()
     if err:
         return err
 
-    db      = get_db()
-    gym_id  = g.tenant_id
-    search  = request.args.get("q", "").strip()
-    now     = datetime.now(timezone.utc)
-    page    = max(1, int(request.args.get("page", 1)))
+    db       = get_db()
+    gym_id   = g.tenant_id
+    search   = request.args.get("q", "").strip()
+    now      = datetime.now(timezone.utc)
+    page     = max(1, int(request.args.get("page", 1)))
+    mostrar_inactivos = request.args.get("inactivos", "false").lower() == "true"
     # Default alineado con el frontend (ReceptionistMembers.jsx, PER_PAGE): 10
     # por página en el padrón de miembros del recepcionista.
     per_page = min(100, max(1, int(request.args.get("per_page", 10))))
 
-    query = {"id_gimnasio_pg": gym_id, "estado": "Activo"}
+    query = {"id_gimnasio_pg": gym_id, "estado": "Inactivo" if mostrar_inactivos else "Activo"}
     if search:
         # HU: tambien se busca por numero de ID (id_usuario_pg) exacto, no
         # solo por nombre/correo -- para que recepcion lo use como atajo
@@ -368,8 +374,26 @@ def get_members():
         db.miembros.find(query, {
             "_id": 1, "nombre": 1, "email": 1, "telefono": 1,
             "id_usuario_pg": 1, "fecha_registro": 1,
+            # Campos adicionales para la ficha de detalle y el modal de
+            # edición -- antes esta lista solo traía lo mínimo para la tabla.
+            "sexo": 1, "peso_inicial": 1, "estatura": 1, "foto_perfil": 1,
+            "objetivo": 1, "peso_objetivo": 1,
         }).sort("nombre", 1).skip(skip).limit(per_page)
     )
+
+    # Igual que en GET /api/miembros: un solo round-trip a Postgres para
+    # saber quién sigue con la contraseña temporal del alta, así el
+    # frontend solo ofrece "Reenviar correo" donde de verdad aplica.
+    ids_pg = [int(m["id_usuario_pg"]) for m in miembros if m.get("id_usuario_pg")]
+    pendientes_ids = set()
+    if ids_pg:
+        from app.models.pg.usuario import Usuario as UsuarioPG
+        pendientes_ids = {
+            u.id for u in UsuarioPG.query.filter(
+                UsuarioPG.id.in_(ids_pg),
+                UsuarioPG.debe_cambiar_password.is_(True),
+            ).all()
+        }
 
     result = []
     for m in miembros:
@@ -397,12 +421,30 @@ def get_members():
             if fecha_fin and fecha_fin.tzinfo is None:
                 fecha_fin = fecha_fin.replace(tzinfo=timezone.utc)
 
+        id_usuario_pg = m.get("id_usuario_pg")
+        try:
+            debe_cambiar_password = int(id_usuario_pg) in pendientes_ids
+        except (TypeError, ValueError):
+            debe_cambiar_password = False
+
         result.append({
             "id":             str(m["_id"]),
-            "id_usuario_pg":  m.get("id_usuario_pg"),
+            "id_usuario_pg":  id_usuario_pg,
             "nombre":         m.get("nombre", ""),
             "email":          m.get("email", ""),
             "telefono":       m.get("telefono", ""),
+            "sexo":           m.get("sexo"),
+            "peso_inicial":   m.get("peso_inicial"),
+            "estatura":       m.get("estatura"),
+            "objetivo":       m.get("objetivo"),
+            "peso_objetivo":  m.get("peso_objetivo"),
+            "foto_perfil":    m.get("foto_perfil"),
+            "fecha_registro": m.get("fecha_registro").isoformat() if isinstance(m.get("fecha_registro"), datetime) else m.get("fecha_registro"),
+            # "activo" refleja el filtro aplicado (estado Activo/Inactivo de
+            # ESTE miembro, no a confundir con mem_status que es de su
+            # MEMBRESÍA) -- lo necesita DetalleUsuarioModal para el badge.
+            "activo":                not mostrar_inactivos,
+            "debe_cambiar_password": debe_cambiar_password,
             "mem_status":     mem_status,
             "tipo_membresia": tipo,
             "fecha_fin":      fecha_fin.isoformat() if isinstance(fecha_fin, datetime) else fecha_fin,
