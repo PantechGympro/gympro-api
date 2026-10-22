@@ -1,11 +1,14 @@
 """
 routes/pagos_online.py — Checkout y webhooks de PayPal / Mercado Pago.
 
-Cubre los tres contextos de cobro de GymPro:
+Cubre los cuatro contextos de cobro de GymPro:
 
-  membresia    el miembro paga su membresía  -> cuenta del GIMNASIO
-  producto     venta de productos (POS)      -> cuenta del GIMNASIO
-  suscripcion  el gimnasio paga su plan SaaS -> cuenta de la PLATAFORMA
+  membresia       el miembro paga su membresía    -> cuenta del GIMNASIO
+  producto        venta de productos (POS)        -> cuenta del GIMNASIO
+  suscripcion     el gimnasio paga su plan SaaS    -> cuenta de la PLATAFORMA
+  lote_capacidad  el gimnasio compra mas capacidad -> cuenta de la PLATAFORMA
+                  (ver models/pg/complemento_capacidad.py: por que es un
+                  cobro unico atado al ciclo, no un cargo recurrente aparte)
 
 Endpoints:
   GET  /api/pagos/metodos                 métodos disponibles para el gimnasio
@@ -30,13 +33,22 @@ from app.utils.tenant import require_tenant
 from app.services.payments import (
     PasarelaError, pasarela_de_gimnasio, pasarela_de_plataforma, proveedores_disponibles,
 )
-from app.utils.recibos import enviar_recibo_membresia, enviar_recibo_venta, registrar_evento_transaccion
+from app.utils.recibos import (
+    enviar_recibo_membresia, enviar_recibo_venta, enviar_recibo_lote_capacidad,
+    registrar_evento_transaccion,
+)
 
 logger = logging.getLogger(__name__)
 
 pagos_online_bp = Blueprint("pagos_online", __name__, url_prefix="/api/pagos")
 
-_CONTEXTOS = ("membresia", "producto", "suscripcion")
+_CONTEXTOS = ("membresia", "producto", "suscripcion", "lote_capacidad")
+
+# Estos dos se cobran con las credenciales de la PLATAFORMA (variables de
+# entorno PLATAFORMA_*), nunca con las del gimnasio -- ver pasarela_de_plataforma()
+# en services/payments. El resto (membresia, producto) cobra a la cuenta propia
+# de cada gimnasio via pasarela_de_gimnasio().
+_CONTEXTOS_PLATAFORMA = ("suscripcion", "lote_capacidad")
 
 
 def _url_base_front() -> str:
@@ -115,7 +127,7 @@ def crear_checkout():
 
     # Resolver de dónde salen las credenciales según el contexto
     try:
-        if contexto == "suscripcion":
+        if contexto in _CONTEXTOS_PLATAFORMA:
             pasarela = pasarela_de_plataforma(proveedor)
             moneda = pasarela.moneda
         else:
@@ -223,7 +235,7 @@ def estado_transaccion(tx_id):
     contexto  = tx.contexto.value if hasattr(tx.contexto, "value") else tx.contexto
 
     try:
-        pasarela = (pasarela_de_plataforma(proveedor) if contexto == "suscripcion"
+        pasarela = (pasarela_de_plataforma(proveedor) if contexto in _CONTEXTOS_PLATAFORMA
                     else pasarela_de_gimnasio(tx.id_gimnasio, proveedor)[0])
         resultado = pasarela.confirmar_pago(tx.referencia_externa)
     except PasarelaError as exc:
@@ -269,7 +281,7 @@ def reconciliar():
         proveedor = tx.proveedor.value if hasattr(tx.proveedor, "value") else tx.proveedor
         contexto  = tx.contexto.value if hasattr(tx.contexto, "value") else tx.contexto
         try:
-            pasarela = (pasarela_de_plataforma(proveedor) if contexto == "suscripcion"
+            pasarela = (pasarela_de_plataforma(proveedor) if contexto in _CONTEXTOS_PLATAFORMA
                         else pasarela_de_gimnasio(tx.id_gimnasio, proveedor)[0])
             resultado = pasarela.confirmar_pago(tx.referencia_externa)
             revisadas += 1
@@ -323,7 +335,7 @@ def webhook(proveedor):
 
     contexto = tx.contexto.value if hasattr(tx.contexto, "value") else tx.contexto
     try:
-        pasarela = (pasarela_de_plataforma(proveedor) if contexto == "suscripcion"
+        pasarela = (pasarela_de_plataforma(proveedor) if contexto in _CONTEXTOS_PLATAFORMA
                     else pasarela_de_gimnasio(tx.id_gimnasio, proveedor)[0])
         resultado = pasarela.interpretar_webhook(payload, dict(request.headers))
     except Exception as exc:
@@ -484,10 +496,90 @@ def _registrar_pago_aprobado(tx: TransaccionPago) -> None:
         elif contexto == "producto":
             _aplicar_venta(tx, meta)
 
+        elif contexto == "lote_capacidad":
+            _aplicar_lote_capacidad(tx, meta)
+
         meta["aplicado"] = True
         tx.metadatos = meta
     except Exception as exc:
         logger.exception("No se pudo aplicar el efecto del pago %s: %s", tx.id, exc)
+
+
+def _aplicar_lote_capacidad(tx: TransaccionPago, meta: dict) -> None:
+    """
+    Activa (o extiende, si ya habia uno del mismo tamano vigente) el lote
+    de capacidad comprado. Igual que _aplicar_membresia(): recibo por
+    correo al propietario + fila de bitacora -- toda compra de dinero
+    real deja los dos rastros (ver utils/recibos.py).
+    """
+    from app.models.pg.complemento_capacidad import ComplementoCapacidad, precio_lote_mxn
+
+    try:
+        cantidad = int(meta.get("cantidad_miembros"))
+    except (TypeError, ValueError):
+        cantidad = None
+    ciclo = meta.get("ciclo") if meta.get("ciclo") in ("mensual", "anual") else "mensual"
+
+    precio_cat = precio_lote_mxn(cantidad, ciclo) if cantidad else None
+    if precio_cat is None:
+        logger.error("Pago %s: lote de capacidad invalido (cantidad=%s)", tx.id, cantidad)
+        return
+
+    dias = 365 if ciclo == "anual" else 30
+    ahora = datetime.now(timezone.utc)
+
+    # Si ya hay un lote del MISMO tamano vigente para esta sucursal, se
+    # extiende su vigencia en vez de abrir una fila aparte -- comprar el
+    # mismo lote dos veces en un ciclo no debe duplicar la capacidad,
+    # solo adelantar su vencimiento.
+    existente = (ComplementoCapacidad.query
+                 .filter_by(id_gimnasio=tx.id_gimnasio, cantidad_miembros=cantidad, estado="activo")
+                 .first())
+    if existente and existente.vigente(ahora):
+        base = existente.fecha_fin
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        existente.fecha_fin = base + timedelta(days=dias)
+        existente.ciclo = ciclo
+        existente.precio_mxn = precio_cat
+        existente.id_transaccion = tx.id
+        lote = existente
+    else:
+        lote = ComplementoCapacidad(
+            id_gimnasio=tx.id_gimnasio, cantidad_miembros=cantidad, ciclo=ciclo,
+            precio_mxn=precio_cat, estado="activo",
+            fecha_inicio=ahora, fecha_fin=ahora + timedelta(days=dias),
+            id_transaccion=tx.id,
+        )
+        db.session.add(lote)
+
+    proveedor = tx.proveedor.value if hasattr(tx.proveedor, "value") else tx.proveedor
+    metodo_pago_str = "PayPal" if proveedor == "paypal" else "Mercado Pago"
+
+    try:
+        enviar_recibo_lote_capacidad(
+            tx.id_gimnasio,
+            numero=str(tx.id), fecha_str=datetime.now().strftime("%d/%m/%Y %H:%M"),
+            cantidad_miembros=cantidad, ciclo=ciclo, monto=float(tx.monto),
+            metodo_pago=metodo_pago_str,
+            fecha_inicio_str=lote.fecha_inicio.strftime("%d/%m/%Y"),
+            fecha_fin_str=lote.fecha_fin.strftime("%d/%m/%Y"),
+            referencia_pasarela=tx.referencia_pago or tx.referencia_externa,
+        )
+    except Exception:
+        logger.exception("Pago %s: no se pudo enviar el recibo del lote de capacidad", tx.id)
+
+    registrar_evento_transaccion(
+        "capacidad.lote_comprado",
+        id_usuario_actor=tx.id_usuario, id_gimnasio=tx.id_gimnasio,
+        detalle={
+            "id_transaccion": tx.id, "cantidad_miembros": cantidad, "ciclo": ciclo,
+            "monto": float(tx.monto), "metodo_pago": metodo_pago_str, "proveedor": proveedor,
+        },
+    )
+
+    logger.info("Pago %s: lote de +%s miembros (%s) activado para gimnasio %s",
+                tx.id, cantidad, ciclo, tx.id_gimnasio)
 
 
 def _aplicar_membresia(tx: TransaccionPago, meta: dict) -> None:

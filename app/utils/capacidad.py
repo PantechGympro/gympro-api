@@ -52,9 +52,12 @@ punto único: cualquier endpoint que dependa de una función de plan lo
 usa (vía @require_funcion_plan en utils/security.py) en vez de leer
 `limites` a mano.
 """
+from datetime import datetime, timezone
+
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.organizacion import Organizacion
 from app.models.pg.plan_suscripcion import PlanSuscripcion
+from app.models.pg.complemento_capacidad import ComplementoCapacidad
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.constants.roles import ROL_ENTRENADOR, ROL_RECEPCIONISTA, ROL_ADMINISTRADOR
@@ -129,10 +132,24 @@ def contar_staff_activo(id_gimnasio):
     ).count()
 
 
+def extra_miembros_de(id_gimnasio):
+    """
+    Capacidad extra VIGENTE comprada en lotes (ver
+    models/pg/complemento_capacidad.py) para sumar al tope base del plan
+    de `id_gimnasio`. "Vigente" se decide por fecha_fin en el momento de
+    esta consulta -- no hay un job que marque lotes vencidos, ver el
+    docstring de ese modelo.
+    """
+    ahora = datetime.now(timezone.utc)
+    lotes = ComplementoCapacidad.query.filter_by(id_gimnasio=id_gimnasio, estado="activo").all()
+    return sum(l.cantidad_miembros for l in lotes if l.vigente(ahora))
+
+
 def verificar_capacidad_miembro(id_gimnasio, *, incremento=1):
     """
     AC1: antes de dar de alta `incremento` miembro(s) nuevos en
-    `id_gimnasio`, confirma que no se exceda max_miembros de su plan.
+    `id_gimnasio`, confirma que no se exceda max_miembros de su plan más
+    la capacidad extra que haya comprado en lotes (extra_miembros_de()).
     No hace nada si el plan no define tope (None = sin límite -- hoy
     ningún plan vigente lo deja así tras el AC6 de este mismo ticket).
 
@@ -144,6 +161,7 @@ def verificar_capacidad_miembro(id_gimnasio, *, incremento=1):
     tope = plan.max_miembros if plan else None
     if tope is None:
         return
+    tope += extra_miembros_de(id_gimnasio)
     actual = contar_miembros_activos(id_gimnasio)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
@@ -237,9 +255,15 @@ def estado_capacidad(id_gimnasio):
     propietario pueda avisar ANTES de topar, no solo cuando una alta ya
     fue rechazada. "cerca_del_tope" se activa al 90% de ocupación --
     umbral de alerta temprana, no una regla de negocio del ticket.
+
+    tope_miembros ya incluye la capacidad extra comprada en lotes (ver
+    extra_miembros_de()) -- "extra_miembros" se devuelve aparte solo para
+    que el frontend pueda mostrar "tu plan te da X, más Y por lotes".
     """
     plan = _plan_de(id_gimnasio)
-    tope_miembros   = plan.max_miembros if plan else None
+    tope_base       = plan.max_miembros if plan else None
+    extra           = extra_miembros_de(id_gimnasio)
+    tope_miembros   = (tope_base + extra) if tope_base is not None else None
     tope_staff      = (plan.limites or {}).get("max_staff") if plan else None
     actual_miembros = contar_miembros_activos(id_gimnasio)
     actual_staff    = contar_staff_activo(id_gimnasio)
@@ -252,7 +276,10 @@ def estado_capacidad(id_gimnasio):
             "en_el_tope":     tope is not None and actual >= tope,
         }
 
+    bloque_miembros = _bloque(actual_miembros, tope_miembros)
+    bloque_miembros["extra_miembros"] = extra
+
     return {
-        "miembros": _bloque(actual_miembros, tope_miembros),
+        "miembros": bloque_miembros,
         "staff":    _bloque(actual_staff, tope_staff),
     }

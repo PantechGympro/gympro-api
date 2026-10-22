@@ -207,6 +207,41 @@ def enviar_recibo_membresia(id_gimnasio, *, numero, fecha_str, membresia_nombre,
     _enviar_correo(destinatarios, asunto, html)
 
 
+def enviar_recibo_lote_capacidad(id_gimnasio, *, numero, fecha_str, cantidad_miembros,
+                                  ciclo, monto, metodo_pago, fecha_inicio_str, fecha_fin_str,
+                                  referencia_pasarela=None):
+    """
+    Recibo de la compra de un lote de capacidad extra (ver
+    routes/pagos_online.py::_aplicar_lote_capacidad y
+    models/pg/complemento_capacidad.py). A diferencia de venta/membresia,
+    aqui no hay "miembro comprador" -- quien paga es el propio gimnasio
+    para ampliar su propio tope, asi que el recibo va solo al propietario.
+    """
+    filas = f"""<tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148">+{cantidad_miembros} miembros ({'anual' if ciclo == 'anual' else 'mensual'})</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #2d3148;text-align:right;color:#10b981;font-weight:700">{_fmt(monto)}</td>
+            </tr>
+            <tr>
+              <td colspan="2" style="padding:6px 10px;font-size:11px;color:#94a3b8">Vigencia: {fecha_inicio_str} a {fecha_fin_str}</td>
+            </tr>"""
+
+    pie = f"<p style=\'margin:12px 0 0;font-size:12px;color:#94a3b8\'>Metodo: <strong style=\'color:#f1f5f9\'>{metodo_pago}</strong></p>"
+    if referencia_pasarela:
+        pie += f"<p style=\'margin:4px 0 0;font-size:12px;color:#94a3b8\'>Referencia: {referencia_pasarela}</p>"
+
+    html = _plantilla_recibo(
+        encabezado="Lote de capacidad -- Comprobante",
+        numero=numero,
+        fecha_str=fecha_str,
+        lineas_html=filas,
+        total_label="TOTAL PAGADO",
+        total=monto,
+        pie_extra=pie,
+    )
+    asunto = f"[GYM PRO] Comprobante de lote de capacidad #{numero}"
+    _enviar_correo([_owner_email(id_gimnasio)], asunto, html)
+
+
 def registrar_evento_transaccion(accion, *, id_usuario_actor, id_gimnasio, detalle):
     """
     Fila de bitacora_eventos para una transaccion de dinero ya aprobada
