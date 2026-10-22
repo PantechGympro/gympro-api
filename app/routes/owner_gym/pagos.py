@@ -74,6 +74,29 @@ def registrar_pago():
         if data["metodo_pago"] == "Transferencia" and not referencia:
             return jsonify({"error": "Falta la referencia de la transferencia"}), 400
 
+        # 4b2. Fecha del pago: por defecto es ahora, pero el staff puede
+        #      indicar que el pago ocurrió en otro día (p. ej. una
+        #      transferencia ya hecha que no se pudo registrar antes por no
+        #      existir todavía ese método) -- la renovación y el conteo de
+        #      días de la membresía deben arrancar desde esa fecha, no desde
+        #      hoy. Acepta "YYYY-MM-DD" (hora opcional, se usa la hora
+        #      actual) o "YYYY-MM-DDTHH:MM".
+        fecha_pago_raw = (data.get("fecha_pago") or "").strip()
+        fecha_pago_dt  = None
+        if fecha_pago_raw:
+            try:
+                if "T" in fecha_pago_raw:
+                    fecha_pago_dt = datetime.strptime(fecha_pago_raw[:16], "%Y-%m-%dT%H:%M")
+                else:
+                    fecha_pago_dt = datetime.combine(
+                        datetime.strptime(fecha_pago_raw[:10], "%Y-%m-%d").date(),
+                        datetime.now().time().replace(microsecond=0),
+                    )
+            except ValueError:
+                return jsonify({"error": "Fecha de pago inválida"}), 400
+            if fecha_pago_dt.date() > date.today():
+                return jsonify({"error": "La fecha del pago no puede ser futura"}), 400
+
         # 4b. Renovación vs. inscripción y primer pago -- la inscripción
         #     lleva un costo adicional que el staff teclea a mano (no un
         #     precio de catálogo), sumado al precio normal de la membresía.
@@ -107,11 +130,14 @@ def registrar_pago():
             tipo_pago=tipo_pago,
             costo_inscripcion=(monto_inscripcion if tipo_pago == "inscripcion" else None),
             referencia=(referencia or None),
+            fecha_pago=fecha_pago_dt,
         )
         pago.save()
 
-        # 6. Calcular fechas
-        inicio   = date.today()
+        # 6. Calcular fechas -- si el staff indicó que el pago ocurrió en otro
+        #    día, la renovación y el conteo de días de la membresía arrancan
+        #    desde esa fecha, no desde hoy.
+        inicio   = fecha_pago_dt.date() if fecha_pago_dt else date.today()
         duracion = int(tm.duracion_meses or 1)
         fin      = inicio + relativedelta(months=duracion)
 

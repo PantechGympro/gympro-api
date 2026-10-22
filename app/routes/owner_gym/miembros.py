@@ -65,6 +65,11 @@ def listar_miembros():
             {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
             {"email":  regex_email},
         ]
+        # Búsqueda exacta por ID (id_usuario_pg / "número de socio") cuando
+        # el texto es solo dígitos -- mismo criterio que ya usa
+        # recepcionista_routes.py::get_members().
+        if search.strip().isdigit():
+            filtro_miembros["$or"].append({"id_usuario_pg": int(search.strip())})
 
     skip            = (page - 1) * per_page
     total_miembros  = db.miembros.count_documents(filtro_miembros)
