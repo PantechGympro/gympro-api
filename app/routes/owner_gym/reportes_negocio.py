@@ -582,6 +582,75 @@ def _construir_reporte_pdf(gym, desde, hasta, etiqueta, secciones, comparar, con
     return buf.read(), nombre_archivo
 
 
+@reportes_negocio_bp.route("/sucursales/metricas", methods=["GET"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+def metricas_comparativas_sucursales():
+    """
+    Cifras de negocio (ingresos, altas, activos, asistencias) de CADA
+    sucursal sobre la que el usuario actual tiene alcance, en un solo
+    arreglo -- para la tabla comparativa por sucursal del panel de
+    "Sucursales" (HU-45 / OwnerSucursales.jsx).
+
+    Hasta ahora esa vista solo podía mostrar ocupación (GET
+    /sucursales/capacidad, en sucursales.py) porque ingresos/altas solo se
+    calculaban sucursal por sucursal, dentro del reporte en PDF
+    (_construir_reporte_pdf). Este endpoint reutiliza _recolectar() y
+    _resolver_periodo() -- las mismas funciones del reporte -- en vez de
+    duplicar las agregaciones de Mongo, así que la cifra que ve el
+    propietario aquí es siempre consistente con la que después descarga
+    en el PDF. Vive en este archivo (no en sucursales.py) justo por eso;
+    ambos blueprints comparten el prefijo /api/owner_gym, así que la ruta
+    final (/api/owner_gym/sucursales/metricas) queda donde el frontend la
+    espera sin necesitar un import cruzado entre módulos de rutas.
+
+    Alcance: igual que GET /reportes/sucursales -- todas las sucursales de
+    la organización si es Propietario, solo las asignadas si es
+    Administrador (ver sucursales_de_administrador/HU-42). Acepta los
+    mismos parámetros de periodo que /reportes/pdf (desde/hasta o
+    anio/mes); sin ninguno, cae al mes en curso.
+    """
+    mi_gym = Gimnasio.query.get(g.tenant_id)
+    if not mi_gym:
+        return jsonify({"periodo": "", "desde": None, "hasta": None, "sucursales": []}), 200
+
+    claims = get_jwt()
+    if normalizar_rol(claims.get("role")) == ROL_ADMINISTRADOR:
+        ids = sucursales_de_administrador(int(get_jwt_identity()))
+        sucursales = Gimnasio.query.filter(Gimnasio.id.in_(ids)).order_by(Gimnasio.nombre).all()
+    else:
+        sucursales = Gimnasio.query.filter_by(
+            id_organizacion=mi_gym.id_organizacion
+        ).order_by(Gimnasio.nombre).all()
+
+    desde, hasta, etiqueta = _resolver_periodo()
+
+    salida = []
+    for s in sucursales:
+        datos = _recolectar(s.id, desde, hasta)
+        salida.append({
+            "id_gimnasio":           s.id,
+            "nombre":                s.nombre,
+            "es_sucursal_principal": s.es_sucursal_principal,
+            "activo":                s.activo,
+            "ingresos_total":        datos["ingresos_total"],
+            "ingresos_membresias":   datos["ingresos_membresias"],
+            "ingresos_pos":          datos["ingresos_pos"],
+            "altas":                 datos["altas"],
+            "activos":               datos["activos"],
+            "inactivos":             datos["inactivos"],
+            "asistencias":           datos["asistencias"],
+        })
+
+    return jsonify({
+        "periodo":    etiqueta,
+        "desde":      desde.strftime("%Y-%m-%d"),
+        "hasta":      (hasta - timedelta(days=1)).strftime("%Y-%m-%d"),
+        "sucursales": salida,
+    }), 200
+
+
 @reportes_negocio_bp.route("/reportes/pdf", methods=["GET"])
 @jwt_required()
 @require_role("owner_gym", "Administrador")
