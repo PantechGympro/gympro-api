@@ -32,6 +32,19 @@ FRECUENCIA_LABEL = {
     "anual":   "Anual",
 }
 
+# momento_envio: en que punto del periodo se manda el correo.
+#   "dia_siguiente" (por omision, comportamiento original) -- el dia DESPUES
+#     de que el periodo cerro, con el corte ya completo (ayer/semana pasada/
+#     mes pasado/año pasado).
+#   "mismo_dia" -- el ULTIMO dia del periodo que se esta cerrando, con los
+#     datos acumulados hasta ese momento (hoy/esta semana/este mes/este año).
+MOMENTOS_VALIDOS = ["mismo_dia", "dia_siguiente"]
+
+MOMENTO_LABEL = {
+    "mismo_dia":     "Mismo dia",
+    "dia_siguiente": "Dia siguiente",
+}
+
 
 class ConfiguracionReporteAutomatico(db.Model):
     """Receta de un reporte ejecutivo que se genera y envia solo, por correo."""
@@ -54,6 +67,11 @@ class ConfiguracionReporteAutomatico(db.Model):
     comparar    = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
     graficas    = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
     activo      = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
+
+    # Cuando se manda dentro del dia que le toca -- ver nota de MOMENTOS_VALIDOS.
+    momento_envio = db.Column(db.String(12), nullable=False,
+                              default="dia_siguiente", server_default="dia_siguiente")
+    hora_envio    = db.Column(db.Integer, nullable=False, default=6, server_default="6")
 
     ultima_ejecucion = db.Column(db.DateTime(timezone=True), nullable=True)
     ultimo_error     = db.Column(db.String(300), nullable=True)
@@ -78,6 +96,9 @@ class ConfiguracionReporteAutomatico(db.Model):
             "comparar":         self.comparar,
             "graficas":         self.graficas,
             "activo":           self.activo,
+            "momento_envio":       self.momento_envio,
+            "momento_envio_label": MOMENTO_LABEL.get(self.momento_envio, self.momento_envio),
+            "hora_envio":          self.hora_envio,
             "ultima_ejecucion": self.ultima_ejecucion.isoformat() if self.ultima_ejecucion else None,
             "ultimo_error":     self.ultimo_error,
             "creado_en":        self.creado_en.isoformat() if self.creado_en else None,

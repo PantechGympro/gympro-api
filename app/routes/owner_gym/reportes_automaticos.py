@@ -36,11 +36,12 @@ from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.reporte_automatico import (
     ConfiguracionReporteAutomatico, FRECUENCIAS_VALIDAS, FRECUENCIA_LABEL,
+    MOMENTOS_VALIDOS,
 )
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role, require_funcion_plan
 from app.utils.alcance import usuario_tiene_alcance, usuario_propietario_de
-from app.utils.timezone import APP_TZ, local_today_bounds_naive
+from app.utils.timezone import APP_TZ, local_today_bounds_naive, local_now_naive
 from app.constants.roles import normalizar_rol, ROL_ADMINISTRADOR
 from app.routes.owner_gym.reportes_negocio import (
     _resolver_gimnasio_objetivo, _construir_reporte_pdf, SECCIONES_VALIDAS, MESES_ES,
@@ -73,30 +74,43 @@ def _verificar_acceso_gimnasio(id_gimnasio):
     return True
 
 
-def _periodo_para_frecuencia(frecuencia, hoy0):
+def _periodo_para_frecuencia(frecuencia, momento_envio, hoy0):
     """
-    El periodo que ya CERRÓ visto desde `hoy0` (medianoche local del día en
-    que corre el job) -- nunca el periodo en curso, para que el corte de
-    caja automático siempre llegue completo, no a medias.
+    El periodo a reportar, visto desde `hoy0` (medianoche local del día en
+    que corre el job).
+
+    Con momento_envio="dia_siguiente" (el comportamiento original) es el
+    periodo que ya CERRÓ -- nunca el periodo en curso, para que el corte de
+    caja llegue completo, no a medias. Con "mismo_dia" es el periodo EN
+    CURSO que se está cerrando justo hoy (se manda esa misma noche, con lo
+    acumulado hasta la hora configurada).
     Devuelve (desde, hasta, etiqueta), mismo formato que _resolver_periodo().
     """
     from datetime import timedelta
 
+    mismo_dia = momento_envio == "mismo_dia"
+
     if frecuencia == "diaria":
-        desde = hoy0 - timedelta(days=1)
-        hasta = hoy0
+        desde = hoy0 if mismo_dia else hoy0 - timedelta(days=1)
+        hasta = desde + timedelta(days=1)
         return desde, hasta, desde.strftime("%d/%m/%Y")
 
     if frecuencia == "semanal":
         lunes_esta_semana = hoy0 - timedelta(days=hoy0.weekday())
-        desde = lunes_esta_semana - timedelta(days=7)
-        hasta = lunes_esta_semana
+        desde = lunes_esta_semana if mismo_dia else lunes_esta_semana - timedelta(days=7)
+        hasta = desde + timedelta(days=7)
         etiqueta = (f"Semana del {desde.strftime('%d/%m/%Y')} al "
                     f"{(hasta - timedelta(days=1)).strftime('%d/%m/%Y')}")
         return desde, hasta, etiqueta
 
     if frecuencia == "mensual":
         primero_mes_actual = datetime(hoy0.year, hoy0.month, 1)
+        if mismo_dia:
+            mes_sig  = 1 if hoy0.month == 12 else hoy0.month + 1
+            anio_sig = hoy0.year + 1 if hoy0.month == 12 else hoy0.year
+            desde = primero_mes_actual
+            hasta = datetime(anio_sig, mes_sig, 1)
+            return desde, hasta, f"{MESES_ES[hoy0.month - 1].capitalize()} {hoy0.year}"
         mes_ant  = 12 if hoy0.month == 1 else hoy0.month - 1
         anio_ant = hoy0.year - 1 if hoy0.month == 1 else hoy0.year
         desde = datetime(anio_ant, mes_ant, 1)
@@ -104,9 +118,38 @@ def _periodo_para_frecuencia(frecuencia, hoy0):
         return desde, hasta, f"{MESES_ES[mes_ant - 1].capitalize()} {anio_ant}"
 
     # anual
+    if mismo_dia:
+        desde = datetime(hoy0.year, 1, 1)
+        hasta = datetime(hoy0.year + 1, 1, 1)
+        return desde, hasta, f"Año {hoy0.year}"
     desde = datetime(hoy0.year - 1, 1, 1)
     hasta = datetime(hoy0.year, 1, 1)
     return desde, hasta, f"Año {hoy0.year - 1}"
+
+
+def _hoy_es_cierre(frecuencia, momento_envio, hoy0):
+    """
+    True si `hoy0` es el día en que, según `momento_envio`, le toca a esta
+    frecuencia dispararse -- "dia_siguiente" el día DESPUÉS de que el
+    periodo cerró (comportamiento original: lunes/día 1/1-enero); "mismo_dia"
+    el ÚLTIMO día del periodo que se está cerrando (domingo/último día del
+    mes/31-diciembre). Diaria es igual en ambos casos: todos los días son,
+    a la vez, "el día siguiente" de ayer y "el mismo día" de hoy.
+    """
+    from datetime import timedelta
+
+    if frecuencia == "diaria":
+        return True
+    if frecuencia == "semanal":
+        return hoy0.weekday() == (6 if momento_envio == "mismo_dia" else 0)  # domingo | lunes
+    if frecuencia == "mensual":
+        if momento_envio == "mismo_dia":
+            return (hoy0 + timedelta(days=1)).month != hoy0.month
+        return hoy0.day == 1
+    # anual
+    if momento_envio == "mismo_dia":
+        return hoy0.month == 12 and hoy0.day == 31
+    return hoy0.day == 1 and hoy0.month == 1
 
 
 def _ya_ejecuto_hoy(cfg, hoy0):
@@ -158,6 +201,23 @@ def _validar_payload(data, *, crear):
     if crear or "activo" in data:
         campos["activo"] = bool(data.get("activo", True))
 
+    if crear or "momento_envio" in data:
+        momento = (data.get("momento_envio") or "dia_siguiente").strip()
+        if momento not in MOMENTOS_VALIDOS:
+            return None, (jsonify({
+                "msg": f"momento_envio debe ser uno de: {', '.join(MOMENTOS_VALIDOS)}",
+            }), 400)
+        campos["momento_envio"] = momento
+
+    if crear or "hora_envio" in data:
+        try:
+            hora = int(data.get("hora_envio", 6))
+        except (TypeError, ValueError):
+            return None, (jsonify({"msg": "hora_envio debe ser un número entero entre 0 y 23"}), 400)
+        if not (0 <= hora <= 23):
+            return None, (jsonify({"msg": "hora_envio debe ser un número entero entre 0 y 23"}), 400)
+        campos["hora_envio"] = hora
+
     return campos, None
 
 
@@ -184,7 +244,7 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
         if not destino:
             raise RuntimeError("El gimnasio no tiene un Propietario con correo registrado")
 
-        desde, hasta, etiqueta = _periodo_para_frecuencia(cfg.frecuencia, hoy0)
+        desde, hasta, etiqueta = _periodo_para_frecuencia(cfg.frecuencia, cfg.momento_envio, hoy0)
         secciones = cfg.lista_secciones() or SECCIONES_VALIDAS
 
         pdf_bytes, nombre_archivo = _construir_reporte_pdf(
@@ -225,9 +285,11 @@ _reportes_auto_status = {"ultima_ejecucion": None, "ultimo_resultado": None}
 
 def tick_reportes_automaticos(app=None):
     """
-    Corre una vez al día. Por cada configuración activa que hoy le toque
-    (según su frecuencia) y que no se haya mandado ya hoy, genera el PDF
-    del periodo que acaba de cerrar y lo envía por correo al Propietario.
+    Corre cada hora en punto. Por cada configuración activa cuya hora
+    configurada (hora_envio) coincide con la hora local actual, y a la que
+    hoy le toca dispararse (según su frecuencia y momento_envio -- ver
+    _hoy_es_cierre), y que no se haya mandado ya hoy, genera el PDF del
+    periodo correspondiente y lo envía por correo al Propietario.
 
     No bloqueante por fila: un fallo en una configuración (SMTP, datos del
     gimnasio, lo que sea) no debe impedir que las demás se procesen -- se
@@ -239,18 +301,15 @@ def tick_reportes_automaticos(app=None):
 
     try:
         hoy0, _ = local_today_bounds_naive()
-        dia_debido = {
-            "diaria":  True,
-            "semanal": hoy0.weekday() == 0,   # lunes
-            "mensual": hoy0.day == 1,
-            "anual":   hoy0.day == 1 and hoy0.month == 1,
-        }
+        hora_actual = local_now_naive().hour
 
         configs = ConfiguracionReporteAutomatico.query.filter_by(activo=True).all()
         procesadas = enviadas = fallidas = 0
 
         for cfg in configs:
-            if not dia_debido.get(cfg.frecuencia):
+            if cfg.hora_envio != hora_actual:
+                continue
+            if not _hoy_es_cierre(cfg.frecuencia, cfg.momento_envio, hoy0):
                 continue
             if _ya_ejecuto_hoy(cfg, hoy0):
                 continue
