@@ -69,7 +69,7 @@ class ConfiguracionReporteAutomatico(db.Model):
     activo      = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
 
     # Cuando se manda dentro del dia que le toca -- ver nota de MOMENTOS_VALIDOS.
-    momento_envio = db.Column(db.String(12), nullable=False,
+    momento_envio = db.Column(db.String(20), nullable=False,
                               default="dia_siguiente", server_default="dia_siguiente")
     hora_envio    = db.Column(db.Integer, nullable=False, default=6, server_default="6")
 

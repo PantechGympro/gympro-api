@@ -28,7 +28,7 @@ depends_on    = None
 def upgrade():
     op.add_column(
         "configuracion_reporte_automatico",
-        sa.Column("momento_envio", sa.String(length=12), nullable=False,
+        sa.Column("momento_envio", sa.String(length=20), nullable=False,
                   server_default="dia_siguiente"),
     )
     op.add_column(
