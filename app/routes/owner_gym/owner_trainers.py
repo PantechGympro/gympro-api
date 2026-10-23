@@ -6,23 +6,26 @@ Endpoints:
     GET  /api/owner_gym/staff/<id>          Detalle de un usuario staff
     POST /api/owner_gym/staff               Crear usuario staff (entrenador o recepcionista)
     PATCH /api/owner_gym/staff/<id>/toggle  Activar / desactivar
+    POST /api/owner_gym/staff/trasladar     Mover staff a otra sucursal
 """
 from flask import Blueprint, jsonify, request, g
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from werkzeug.security import generate_password_hash
 
 from app.extensions import db
 from app.models.pg.usuario   import Usuario
 from app.models.pg.rol        import Rol
 from app.models.pg.gimnasio   import Gimnasio
+from app.models.pg.asignacion_usuario import AsignacionUsuario
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
-from app.utils.alcance import crear_asignacion
+from app.utils.alcance import crear_asignacion, usuario_tiene_alcance, registrar_evento
 from app.utils.capacidad import verificar_capacidad_staff, LimiteDePlanExcedido
 from app.utils.busqueda import normalizar_columna
 from app.utils.credenciales_acceso import (
     generar_password_temporal, enviar_credenciales_acceso, reenviar_credenciales_acceso,
 )  # SCRUM-224
+from app.constants.roles import normalizar_rol, ROL_ADMINISTRADOR
 
 owner_trainers_bp = Blueprint("owner_trainers", __name__)
 
@@ -285,3 +288,98 @@ def toggle_staff(user_id: int):
     db.session.commit()
     estado = "activado" if usuario.activo else "desactivado"
     return jsonify({"msg": f"Usuario {estado}", **usuario.to_dict()}), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/owner_gym/staff/trasladar
+# ---------------------------------------------------------------------------
+@owner_trainers_bp.route("/staff/trasladar", methods=["POST"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+def trasladar_staff():
+    """
+    Traslada uno o más integrantes del staff (Entrenador/Recepcionista) de
+    ESTA sucursal a otra de la misma organización -- mismo criterio de
+    alcance que traslado_sucursal.py::trasladar_miembros (HU-48), pero
+    más simple: el staff vive solo en PostgreSQL (Usuario.id_gimnasio +
+    AsignacionUsuario), no tiene contraparte en Mongo que sincronizar, así
+    que no hace falta la compensación manual de aquel endpoint -- basta
+    con el rollback normal de la transacción si algo falla.
+    """
+    gym_id = g.tenant_id
+    data   = request.get_json(silent=True) or {}
+    ids_crudos = data.get("ids_usuario")
+    if not isinstance(ids_crudos, list) or not ids_crudos:
+        return jsonify({"msg": "ids_usuario debe ser una lista con al menos un elemento"}), 400
+    try:
+        ids_usuario = [int(i) for i in ids_crudos]
+    except (TypeError, ValueError):
+        return jsonify({"msg": "ids_usuario contiene un id inválido"}), 400
+
+    destino_pedido = data.get("id_gimnasio_destino")
+    try:
+        destino = int(destino_pedido) if destino_pedido else gym_id
+    except (TypeError, ValueError):
+        return jsonify({"msg": "id_gimnasio_destino inválido"}), 400
+
+    mi_gym      = Gimnasio.query.get(gym_id)
+    gym_destino = Gimnasio.query.get(destino)
+    if not mi_gym or not gym_destino or gym_destino.id_organizacion != mi_gym.id_organizacion:
+        return jsonify({"msg": "Sucursal destino no encontrada"}), 404
+
+    if destino == gym_id:
+        return jsonify({"msg": "Ningún integrante requería traslado", "movidos": 0}), 200
+
+    role_ids = _staff_filter(gym_id)
+    usuarios = Usuario.query.filter(
+        Usuario.id.in_(ids_usuario),
+        Usuario.id_gimnasio == gym_id,
+        Usuario.id_rol.in_(role_ids),
+    ).all()
+    if len(usuarios) != len(set(ids_usuario)):
+        return jsonify({"msg": "Uno o más integrantes del staff no existen en esta sucursal"}), 404
+
+    # AC8 (igual que para miembros): Administrador necesita alcance sobre
+    # AMBAS sucursales (origen y destino); Propietario puede mover entre
+    # cualquier par de su organización (ya garantizado arriba por
+    # id_organizacion).
+    claims = get_jwt()
+    if normalizar_rol(claims.get("role")) == ROL_ADMINISTRADOR:
+        actor_id = int(get_jwt_identity())
+        for id_gym in (gym_id, destino):
+            if not usuario_tiene_alcance(actor_id, [ROL_ADMINISTRADOR], id_gimnasio_objetivo=id_gym):
+                return jsonify({"msg": "No tienes asignada una de las sucursales involucradas"}), 403
+
+    try:
+        verificar_capacidad_staff(destino, incremento=len(usuarios))
+    except LimiteDePlanExcedido as e:
+        caben = max(e.tope - e.actual, 0)
+        return jsonify({"msg": str(e), "caben": caben, "solicitados": len(usuarios)}), 409
+
+    for u in usuarios:
+        u.id_gimnasio = destino
+        asignacion = AsignacionUsuario.query.filter_by(id_usuario=u.id, id_gimnasio=gym_id).first()
+        if asignacion:
+            asignacion.id_gimnasio = destino
+        else:
+            # No debería faltar (crear_staff siempre llama crear_asignacion),
+            # pero si falta por datos legados, se crea ahora en vez de dejar
+            # al staff sin asignación tras el traslado.
+            db.session.add(AsignacionUsuario(
+                id_usuario=u.id, id_organizacion=gym_destino.id_organizacion,
+                id_gimnasio=destino, id_rol=u.id_rol,
+            ))
+
+    registrar_evento(
+        int(get_jwt_identity()), "staff.trasladar_sucursal",
+        id_organizacion=gym_destino.id_organizacion, id_gimnasio=destino,
+        detalle={"ids_usuario": ids_usuario, "id_gimnasio_destino": destino, "origen": gym_id},
+    )
+    db.session.commit()
+
+    return jsonify({
+        "movidos": len(usuarios),
+        "ids_usuario": [u.id for u in usuarios],
+        "sucursal_destino": {"id": gym_destino.id, "nombre": gym_destino.nombre},
+    }), 200

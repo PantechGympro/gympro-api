@@ -3,6 +3,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from bson import ObjectId
+from bson.errors import InvalidId
 import math
 
 from app.mongo import get_db
@@ -199,6 +200,232 @@ def registrar_pago():
     except Exception as e:
         print(f"Error en registrar_pago: {str(e)}")
         return jsonify({"error": "Error interno del servidor", "detalle": str(e)}), 500
+
+
+def _pago_mas_reciente_del_miembro(mdb, id_miembro):
+    """El Pago más RECIÉN REGISTRADO de un miembro (por orden de inserción,
+    vía _id -- no por fecha_pago, que puede venir retroactiva a propósito
+    por la función de backdating de arriba, y entonces no sirve para saber
+    qué se registró después de qué)."""
+    return mdb.pagos.find_one({"id_miembro": id_miembro}, sort=[("_id", -1)])
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/pagos/<id_pago> — corregir un pago mal capturado
+# ---------------------------------------------------------------------------
+@pagos_bp.route("/api/pagos/<id_pago>", methods=["PUT"])
+@jwt_required()
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA)
+@require_tenant
+def editar_pago(id_pago):
+    """
+    Corrige un pago de membresía ya registrado (monto, método, referencia,
+    concepto o fecha capturados mal).
+
+    Si se corrige fecha_pago Y este es el pago MÁS RECIÉN REGISTRADO de
+    ese miembro (nadie volvió a renovar después), la membresía activa que
+    ese pago generó se recorre la misma cantidad de días -- así la fecha
+    de vencimiento queda consistente con la fecha corregida. Si ya hay un
+    pago posterior de ese miembro, la fecha del Pago se corrige igual pero
+    la membresía NO se toca (ese pago ya no es el que la generó).
+    """
+    try:
+        mdb    = get_db()
+        gym_id = g.tenant_id
+        try:
+            oid = ObjectId(id_pago)
+        except (InvalidId, TypeError):
+            return jsonify({"error": "Id de pago inválido"}), 400
+
+        doc = mdb.pagos.find_one({"_id": oid, "id_gimnasio": gym_id})
+        if not doc:
+            return jsonify({"error": "Pago no encontrado"}), 404
+
+        data    = request.json or {}
+        cambios = {}
+
+        if "metodo_pago" in data:
+            metodo = (data.get("metodo_pago") or "").strip()
+            if metodo not in ("Efectivo", "Tarjeta", "Transferencia"):
+                return jsonify({"error": "Método de pago inválido"}), 400
+            cambios["metodo_pago"] = metodo
+
+        metodo_final = cambios.get("metodo_pago", doc.get("metodo_pago"))
+        if "referencia" in data or metodo_final == "Transferencia":
+            referencia = (data.get("referencia") if "referencia" in data else doc.get("referencia")) or ""
+            referencia = referencia.strip()
+            if metodo_final == "Transferencia" and not referencia:
+                return jsonify({"error": "Falta la referencia de la transferencia"}), 400
+            cambios["referencia"] = referencia or None
+
+        if "monto" in data:
+            try:
+                monto = float(data["monto"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "Monto inválido"}), 400
+            if monto <= 0:
+                return jsonify({"error": "El monto debe ser mayor a 0"}), 400
+            cambios["monto"] = monto
+
+        if "concepto" in data:
+            concepto = (data.get("concepto") or "").strip()
+            if concepto:
+                cambios["concepto"] = concepto
+
+        fecha_vieja = doc.get("fecha_pago")
+        if isinstance(fecha_vieja, str):
+            try:
+                fecha_vieja = datetime.fromisoformat(fecha_vieja)
+            except ValueError:
+                fecha_vieja = None
+
+        fecha_nueva_dt = None
+        if "fecha_pago" in data and (data.get("fecha_pago") or "").strip():
+            fecha_pago_raw = data["fecha_pago"].strip()
+            try:
+                if "T" in fecha_pago_raw:
+                    fecha_nueva_dt = datetime.strptime(fecha_pago_raw[:16], "%Y-%m-%dT%H:%M")
+                else:
+                    hora_vieja = fecha_vieja.time() if fecha_vieja else datetime.now().time().replace(microsecond=0)
+                    fecha_nueva_dt = datetime.combine(
+                        datetime.strptime(fecha_pago_raw[:10], "%Y-%m-%d").date(), hora_vieja,
+                    )
+            except ValueError:
+                return jsonify({"error": "Fecha de pago inválida"}), 400
+            if fecha_nueva_dt.date() > date.today():
+                return jsonify({"error": "La fecha del pago no puede ser futura"}), 400
+            cambios["fecha_pago"] = fecha_nueva_dt
+
+        if not cambios:
+            return jsonify({"error": "No hay cambios que aplicar"}), 400
+
+        # -- Si se corrigió la fecha y nadie renovó después, recorrer
+        #    también la membresía que este pago activó (misma diferencia
+        #    de días, sin tocar la duración).
+        if fecha_nueva_dt and fecha_vieja and doc.get("tipo_pago") in ("renovacion", "inscripcion"):
+            es_el_mas_reciente = (
+                _pago_mas_reciente_del_miembro(mdb, doc["id_miembro"]) or {}
+            ).get("_id") == doc["_id"]
+            if es_el_mas_reciente:
+                mm = mdb.miembro_membresia.find_one(
+                    {"id_miembro": doc["id_miembro"], "estado": "Activa"}
+                )
+                if mm:
+                    delta_dias = (fecha_nueva_dt.date() - fecha_vieja.date()).days
+                    if delta_dias:
+                        try:
+                            mm_inicio = datetime.strptime(str(mm["fecha_inicio"])[:10], "%Y-%m-%d").date()
+                            mm_fin    = datetime.strptime(str(mm["fecha_fin"])[:10],    "%Y-%m-%d").date()
+                            mdb.miembro_membresia.update_one(
+                                {"_id": mm["_id"]},
+                                {"$set": {
+                                    "fecha_inicio": (mm_inicio + timedelta(days=delta_dias)).strftime("%Y-%m-%d"),
+                                    "fecha_fin":    (mm_fin    + timedelta(days=delta_dias)).strftime("%Y-%m-%d"),
+                                }},
+                            )
+                        except (ValueError, TypeError):
+                            pass  # fecha de membresía con formato inesperado -- no bloqueante
+
+        mdb.pagos.update_one({"_id": oid}, {"$set": cambios})
+
+        try:
+            id_actor = int(get_jwt_identity())
+        except (TypeError, ValueError):
+            id_actor = None
+        registrar_evento_transaccion(
+            "membresia.pago_editado", id_usuario_actor=id_actor, id_gimnasio=gym_id,
+            detalle={"id_pago": str(oid), "cambios": list(cambios.keys())},
+        )
+
+        actualizado = Pago(**mdb.pagos.find_one({"_id": oid}))
+        return jsonify(actualizado.to_dict()), 200
+
+    except Exception as e:
+        print(f"Error en editar_pago: {e}")
+        return jsonify({"error": "Error interno del servidor", "detalle": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/pagos/<id_pago> — eliminar un pago registrado por error
+# ---------------------------------------------------------------------------
+@pagos_bp.route("/api/pagos/<id_pago>", methods=["DELETE"])
+@jwt_required()
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA)
+@require_tenant
+def eliminar_pago(id_pago):
+    """
+    Elimina un pago de membresía registrado por error. Si fue una
+    renovación/inscripción, también revierte la membresía que activó: la
+    deja "Expirada" y reactiva la que estaba vigente justo antes (si
+    existía) -- el mismo efecto que tenía el miembro antes de este cobro.
+
+    Solo se permite si es el pago MÁS RECIÉN REGISTRADO de ese miembro: si
+    ya hay un pago posterior, borrar este dejaría el historial
+    inconsistente con la membresía vigente actual (que ya no depende de
+    este pago), así que se rechaza y se pide eliminar primero los más
+    nuevos.
+    """
+    try:
+        mdb    = get_db()
+        gym_id = g.tenant_id
+        try:
+            oid = ObjectId(id_pago)
+        except (InvalidId, TypeError):
+            return jsonify({"error": "Id de pago inválido"}), 400
+
+        doc = mdb.pagos.find_one({"_id": oid, "id_gimnasio": gym_id})
+        if not doc:
+            return jsonify({"error": "Pago no encontrado"}), 404
+
+        mas_reciente = _pago_mas_reciente_del_miembro(mdb, doc["id_miembro"])
+        if mas_reciente and mas_reciente["_id"] != doc["_id"]:
+            return jsonify({
+                "error": "Hay pagos más recientes de este miembro. Elimina primero los más nuevos antes de borrar este.",
+            }), 409
+
+        if doc.get("tipo_pago") in ("renovacion", "inscripcion"):
+            mm_activa = mdb.miembro_membresia.find_one(
+                {"id_miembro": doc["id_miembro"], "estado": "Activa"}
+            )
+            if mm_activa:
+                mdb.miembro_membresia.update_one(
+                    {"_id": mm_activa["_id"]}, {"$set": {"estado": "Expirada"}}
+                )
+                # Reactivar la que estaba vigente justo antes de este cobro
+                # -- la más recién marcada "Expirada" distinta de la que
+                # acabamos de expirar (es la que registrar_pago() expiró en
+                # su momento, paso 7, al crear esta misma membresía).
+                anteriores = list(
+                    mdb.miembro_membresia.find({
+                        "id_miembro": doc["id_miembro"], "estado": "Expirada",
+                        "_id": {"$ne": mm_activa["_id"]},
+                    }).sort("_id", -1).limit(1)
+                )
+                if anteriores:
+                    mdb.miembro_membresia.update_one(
+                        {"_id": anteriores[0]["_id"]}, {"$set": {"estado": "Activa"}}
+                    )
+
+        mdb.pagos.delete_one({"_id": oid})
+
+        try:
+            id_actor = int(get_jwt_identity())
+        except (TypeError, ValueError):
+            id_actor = None
+        registrar_evento_transaccion(
+            "membresia.pago_eliminado", id_usuario_actor=id_actor, id_gimnasio=gym_id,
+            detalle={
+                "id_pago": str(oid), "id_miembro": str(doc["id_miembro"]),
+                "monto": doc.get("monto"), "tipo_pago": doc.get("tipo_pago"),
+            },
+        )
+
+        return jsonify({"msg": "Pago eliminado"}), 200
+
+    except Exception as e:
+        print(f"Error en eliminar_pago: {e}")
+        return jsonify({"error": "Error interno del servidor", "detalle": str(e)}), 500
+
 
 @pagos_bp.route("/api/pagos", methods=["GET"])
 @jwt_required()
