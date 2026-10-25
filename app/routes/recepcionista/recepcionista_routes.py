@@ -725,6 +725,7 @@ def create_cita():
     try:
         from flask_mail import Message
         from app.extensions import mail
+        from app.utils.email_remitentes import remitente
 
         notas_html = f"<p style='color:#9AA4B8;font-size:13px;'><em>{data.get('notes','')}</em></p>" if data.get("notes") else ""
 
@@ -765,6 +766,7 @@ def create_cita():
             """
             msg_miembro = Message(
                 subject=f"GymPro — Cita agendada para el {fecha_fmt}",
+                sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
                 recipients=[miembro_doc["email"]],
                 html=_base_email("Cita confirmada", miembro_doc.get("nombre", client_name), cuerpo_miembro),
             )
@@ -778,6 +780,7 @@ def create_cita():
             """
             msg_trainer = Message(
                 subject=f"GymPro — Nueva cita asignada: {client_name} el {fecha_fmt}",
+                sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
                 recipients=[trainer_pg.email],
                 html=_base_email("Nueva cita asignada", trainer_pg.nombre, cuerpo_trainer),
             )

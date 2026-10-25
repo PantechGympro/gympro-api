@@ -29,6 +29,7 @@ from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.gym_types               import GYM_TYPES, get_gym_type_config, seed_default_memberships
 from app.utils.alcance                 import crear_organizacion_para_gimnasio, crear_asignacion
 from app.constants.roles               import ROL_PROPIETARIO
+from app.utils.email_remitentes        import remitente, correo_contacto
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str) -> None:
     try:
         msg = Message(
             subject  = f"Bienvenido a GymPro SaaS — {nombre_gym}",
+            sender   = remitente("MAIL_SENDER_CUENTAS"),
             recipients = [email],
             html     = f"""
 <html><body style="font-family:sans-serif;color:#333;max-width:600px;margin:auto">
@@ -66,7 +68,7 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str) -> None:
       </ol>
     </div>
     <p style="color:#888;font-size:13px">
-      Si tienes dudas escribe a soporteGympro@gmail.com<br>
+      Si tienes dudas escribe a {correo_contacto()}<br>
       Equipo GymPro SaaS
     </p>
   </div>

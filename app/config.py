@@ -69,14 +69,37 @@ class Config:
         "poolclass": NullPool,
     }
 
-    # ── Email ─────────────────────────────────────────────────────────────────
-    MAIL_SERVER        = os.getenv("MAIL_SERVER", "smtp.gmail.com")
-    MAIL_PORT          = int(os.getenv("MAIL_PORT", 587))
-    MAIL_USE_TLS       = os.getenv("MAIL_USE_TLS", "True") == "True"
-    MAIL_USERNAME      = os.getenv("MAIL_USERNAME")
-    MAIL_PASSWORD      = os.getenv("MAIL_PASSWORD")
-    MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER")
-    MAIL_RECIPIENT     = os.getenv("MAIL_RECIPIENT", os.getenv("MAIL_USERNAME"))
+    # ── Email (Resend — relay SMTP sobre el dominio verificado gympro.lat) ──────
+    # Gmail como SMTP generico tenia mala entregabilidad -- sin dominio propio
+    # verificado (SPF/DKIM/DMARC), buena parte del correo transaccional caia en
+    # spam, sobre todo en Hotmail/Outlook. Resend expone un relay SMTP normal
+    # (smtp.resend.com), asi que NINGUNO de los ~12 call-sites que hacen
+    # mail.send(Message(...)) en el backend tuvo que cambiar -- solo estas
+    # variables y el remitente por categoria (ver utils/email_remitentes.py).
+    #
+    # IMPORTANTE: con Resend, MAIL_USERNAME ya NO es un correo -- es el literal
+    # "resend" que exige su protocolo SMTP (la contraseña es el API key). Por
+    # eso MAIL_RECIPIENT y cualquier "sender=" en el código deben caer de
+    # vuelta a MAIL_DEFAULT_SENDER si falta algo, nunca a MAIL_USERNAME --
+    # ese fallback viejo rompía backups/routes.py y backups/service.py
+    # (mandaban "resend" como remitente en vez de un correo real).
+    MAIL_SERVER         = os.getenv("MAIL_SERVER", "smtp.resend.com")
+    MAIL_PORT           = int(os.getenv("MAIL_PORT", 587))
+    MAIL_USE_TLS        = os.getenv("MAIL_USE_TLS", "True") == "True"
+    MAIL_USERNAME       = os.getenv("MAIL_USERNAME", "resend")
+    MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD")
+    MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "soporte@gympro.lat")
+    MAIL_RECIPIENT      = os.getenv("MAIL_RECIPIENT", "soporte@gympro.lat")
+
+    # Remitentes especificos por tipo de correo, todos bajo el mismo dominio
+    # verificado -- a diferencia de Gmail (una cuenta == un remitente), Resend
+    # no limita cuantas direcciones se usen dentro de un dominio propio, asi
+    # que cada categoria de correo tiene la suya (ver utils/email_remitentes.py
+    # para el porque de cada una y como se usan).
+    MAIL_SENDER_CUENTAS        = os.getenv("MAIL_SENDER_CUENTAS", "cuentas@gympro.lat")
+    MAIL_SENDER_FACTURACION    = os.getenv("MAIL_SENDER_FACTURACION", "facturacion@gympro.lat")
+    MAIL_SENDER_NOTIFICACIONES = os.getenv("MAIL_SENDER_NOTIFICACIONES", "notificaciones@gympro.lat")
+    MAIL_SENDER_CONTACTO       = os.getenv("MAIL_SENDER_CONTACTO", "contacto@gympro.lat")
 
     # ── Rate Limiting (Flask-Limiter + Redis) ─────────────────────────────────
     # Redis compartido entre todos los workers de Gunicorn para contadores globales.

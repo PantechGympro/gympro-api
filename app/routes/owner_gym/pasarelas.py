@@ -80,6 +80,7 @@ from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import registrar_evento, usuario_propietario_de
 from app.utils.crypto import cifrar_dict, descifrar_dict, enmascarar, crypto_disponible
+from app.utils.email_remitentes import remitente, correo_contacto
 from app.services.payments import PROVEEDORES_INFO, construir_pasarela, plataforma_en_produccion
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 
@@ -186,6 +187,7 @@ def _enviar_aviso_cambio(id_gimnasio: int, proveedor: str, accion: str,
     try:
         msg = Message(
             subject=f"GymPro — Cambio en tu cuenta de cobro de {nombre_prov}",
+            sender=remitente("MAIL_SENDER_FACTURACION"),
             recipients=[propietario.email],
             html=f"""
 <html><body style="font-family:sans-serif;color:#333;max-width:600px;margin:auto">
@@ -206,7 +208,7 @@ def _enviar_aviso_cambio(id_gimnasio: int, proveedor: str, accion: str,
       entrando a la cuenta anterior.
     </p>
     <p style="color:#888;font-size:13px">
-      Si tú no hiciste este cambio, contacta de inmediato a soporteGympro@gmail.com<br>
+      Si tú no hiciste este cambio, contacta de inmediato a {correo_contacto()}<br>
       Equipo GymPro SaaS
     </p>
   </div>

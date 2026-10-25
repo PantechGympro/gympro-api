@@ -23,6 +23,7 @@ from app.extensions import db, limiter, mail, redis_cliente
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
 from app.utils.alcance     import crear_asignacion, sucursales_de_administrador, usuario_tiene_alcance
+from app.utils.email_remitentes import remitente
 from app.constants.roles  import ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 from app.utils.capacidad  import permite_funcion
 
@@ -701,7 +702,7 @@ _RESET_MAX_TRIES = 5    # intentos permitidos por código
 
 def _send_reset_email(email: str, code: str) -> None:
     """Envía el código de restablecimiento por correo (flask-mail)."""
-    sender = current_app.config.get("MAIL_DEFAULT_SENDER") or current_app.config.get("MAIL_USERNAME")
+    sender = remitente("MAIL_SENDER_CUENTAS")
     body = (
         "Hola,\n\n"
         f"Tu código para restablecer la contraseña de GymPro es:\n\n    {code}\n\n"

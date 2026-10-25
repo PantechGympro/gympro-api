@@ -183,12 +183,13 @@ def restore_backup():
 def test_email():
     from flask_mail import Message
     from app.extensions import mail
+    from app.utils.email_remitentes import remitente
 
     try:
         msg = Message(
             subject="Prueba de Configuración - Sistema de Backups",
-            sender=current_app.config.get("MAIL_USERNAME"),
-            recipients=[current_app.config.get("MAIL_RECIPIENT") or current_app.config.get("MAIL_USERNAME")],
+            sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
+            recipients=[current_app.config.get("MAIL_RECIPIENT") or current_app.config.get("MAIL_DEFAULT_SENDER")],
             body="Si recibes este correo, la configuración de email está funcionando correctamente."
         )
         mail.send(msg)

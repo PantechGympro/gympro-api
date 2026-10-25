@@ -18,6 +18,7 @@ from bson import json_util
 from bson.objectid import ObjectId
 
 from app.extensions import mail
+from app.utils.email_remitentes import remitente_app
 from app.mongo import get_db
 
 # ================= CONFIG =================
@@ -517,7 +518,7 @@ def send_email_notification(app, files, backup_type):
     desde el panel.
     """
     try:
-        recipient = app.config.get("MAIL_RECIPIENT") or app.config.get("MAIL_USERNAME")
+        recipient = app.config.get("MAIL_RECIPIENT") or app.config.get("MAIL_DEFAULT_SENDER")
         if not recipient:
             return False
 
@@ -526,7 +527,7 @@ def send_email_notification(app, files, backup_type):
 
         msg = Message(
             subject=f"[Backup] Respaldo {backup_type.upper()} generado",
-            sender=app.config.get("MAIL_USERNAME"),
+            sender=remitente_app(app, "MAIL_SENDER_NOTIFICACIONES"),
             recipients=[recipient],
             body=(
                 f"El respaldo {backup_type} se generó correctamente.\n\n"

@@ -26,25 +26,24 @@ owner_gym/miembros.py, owner_gym/owner_trainers.py y recepcionista_routes.py
 
 Sobre por qué un correo puede no llegar
 ----------------------------------------
-enviar_credenciales_acceso() solo sabe si el SMTP (Gmail, ver MAIL_SERVER en
+enviar_credenciales_acceso() solo sabe si el SMTP (Resend, ver MAIL_SERVER en
 config.py) aceptó el mensaje para su entrega — no si terminó en la bandeja
 de entrada, en spam/correo no deseado, o si el proveedor de destino lo
-descartó en silencio. Esto es especialmente común con Hotmail/Outlook/Live
+descartó en silencio. Esto era especialmente común con Hotmail/Outlook/Live
 (dominios de Microsoft), que filtran de forma agresiva correo transaccional
 nuevo que contiene una contraseña. Por eso:
-  - El correo ahora incluye una versión en texto plano además del HTML
-    (`body=`, no solo `html=`) -- un correo sin alternativa de texto plano
-    es una señal común de spam para varios filtros.
+  - El correo incluye una versión en texto plano además del HTML (`body=`,
+    no solo `html=`) -- un correo sin alternativa de texto plano es una
+    señal común de spam para varios filtros.
   - enviar_credenciales_acceso() devuelve True/False según si el envío por
     SMTP tuvo éxito, para que quien llama pueda avisar si de plano el envío
-    falló (p. ej. credenciales de correo del proyecto mal configuradas) --
-    pero un True no garantiza que la persona la vea en su bandeja de
-    entrada, por eso existe el botón de reenviar.
-  - Si esto se vuelve recurrente, vale la pena migrar de SMTP de Gmail a un
-    proveedor de correo transaccional (SendGrid, Mailgun, Amazon SES) con
-    un dominio propio verificado (SPF/DKIM/DMARC bajo nuestro control) --
-    mejora real de entregabilidad que ningún cambio de código puede
-    garantizar por sí solo mientras se use una cuenta de Gmail genérica.
+    falló -- pero un True no garantiza que la persona la vea en su bandeja
+    de entrada, por eso existe el botón de reenviar.
+  - Se migró de SMTP de Gmail a Resend con dominio propio verificado
+    (gympro.lat, SPF/DKIM/DMARC bajo nuestro control) -- mejora real de
+    entregabilidad que ningún cambio de código puede lograr por sí solo
+    mientras se use una cuenta de Gmail genérica. Ver utils/email_remitentes.py
+    para el remitente que le corresponde a cada tipo de correo.
 
 La propia persona cambia esta contraseña generada en su primer login —
 ver Usuario.debe_cambiar_password (migración 025) y
@@ -57,6 +56,7 @@ import string
 from flask_mail import Message
 
 from app.extensions import mail
+from app.utils.email_remitentes import remitente, correo_contacto
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +94,12 @@ def _mensaje_credenciales(email: str, nombre: str, password: str,
         "contraseña se te pedirá cambiarla por una propia antes de continuar.\n\n"
         "Si no esperabas este correo o no te llegó a la bandeja de entrada "
         "principal, revisa también la carpeta de correo no deseado / spam.\n\n"
-        "Si tienes dudas escribe a soporteGympro@gmail.com\n"
+        f"Si tienes dudas escribe a {correo_contacto()}\n"
         "Equipo GymPro"
     )
     return Message(
         subject    = asunto,
+        sender     = remitente("MAIL_SENDER_CUENTAS"),
         recipients = [email],
         body       = texto_plano,
         html       = f"""
@@ -126,7 +127,7 @@ def _mensaje_credenciales(email: str, nombre: str, password: str,
       forma estricta los correos con contraseñas.
     </p>
     <p style="color:#888;font-size:13px">
-      Si tienes dudas escribe a soporteGympro@gmail.com<br>
+      Si tienes dudas escribe a {correo_contacto()}<br>
       Equipo GymPro
     </p>
   </div>

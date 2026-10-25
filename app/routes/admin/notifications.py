@@ -38,6 +38,7 @@ def chequear_vencimientos(app=None):
     from app.mongo import get_db
     from flask_mail import Message
     from app.extensions import mail
+    from app.utils.email_remitentes import remitente
 
     ctx = app.app_context() if app else None
     if ctx:
@@ -117,6 +118,7 @@ def chequear_vencimientos(app=None):
             try:
                 msg = Message(
                     subject=asunto,
+                    sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
                     recipients=[email],
                     html=html,
                 )

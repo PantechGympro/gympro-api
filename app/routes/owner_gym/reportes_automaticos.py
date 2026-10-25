@@ -230,6 +230,7 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
     """
     from flask_mail import Message
     from app.extensions import mail
+    from app.utils.email_remitentes import remitente
 
     if hoy0 is None:
         hoy0, _ = local_today_bounds_naive()
@@ -262,7 +263,8 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
             "<p style=\"margin-top:28px;font-size:12px;color:#888;\">"
             "GymPro SaaS — Este mensaje es automático, por favor no respondas.</p></div>"
         )
-        msg = Message(subject=asunto, recipients=[destino], html=html)
+        msg = Message(subject=asunto, recipients=[destino], html=html,
+                       sender=remitente("MAIL_SENDER_FACTURACION"))
         msg.attach(nombre_archivo, "application/pdf", pdf_bytes)
         mail.send(msg)
 

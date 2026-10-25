@@ -43,6 +43,7 @@ from flask import current_app
 from flask_mail import Message
 
 from app.extensions import mail, db
+from app.utils.email_remitentes import remitente
 from app.utils.alcance import registrar_evento, usuario_propietario_de
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,8 @@ def _enviar_correo(destinatarios, asunto, html):
     if not limpios:
         return
     try:
-        msg = Message(subject=asunto, recipients=limpios, html=html)
+        msg = Message(subject=asunto, recipients=limpios, html=html,
+                       sender=remitente("MAIL_SENDER_FACTURACION"))
         with current_app.app_context():
             mail.send(msg)
     except Exception as exc:
