@@ -55,6 +55,7 @@ from app.routes.compartido.notificaciones     import notificaciones_bp
 from app.routes.compartido.citas_lectura      import citas_miembro_bp, citas_entrenador_bp
 from app.routes.compartido.verificacion_sucursal import verificacion_bp
 from app.routes.compartido.traslado_sucursal     import traslado_bp
+from app.routes.compartido.nutricion_externa     import nutricion_externa_bp
 from app.backups.routes                       import backups_bp
 from app.backups.tenant_routes                import tenant_backups_bp
 from app.routes.superadmin.gimnasios          import gimnasios_admin_bp
@@ -122,6 +123,7 @@ def create_app():
     app.register_blueprint(miembro_membresias_bp, url_prefix="/api")
     app.register_blueprint(verificacion_bp,       url_prefix="/api")
     app.register_blueprint(traslado_bp,            url_prefix="/api")
+    app.register_blueprint(nutricion_externa_bp)
     app.register_blueprint(billing_bp)
     app.register_blueprint(billing_stripe_bp)
     app.register_blueprint(pasarelas_bp)
