@@ -1,0 +1,37 @@
+name: Sincronizar main -> dev-*
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dev-miguel, dev-francisco, dev-maximiliano, dev-carlos]
+    steps:
+      - name: Checkout ${{ matrix.target }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.target }}
+          fetch-depth: 0
+
+      - name: Configurar autor del merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fusionar main en ${{ matrix.target }}
+        run: |
+          git fetch origin main
+          if git merge --no-edit origin/main; then
+            git push origin HEAD:${{ matrix.target }}
+          else
+            git merge --abort
+            echo "::error title=Conflicto al sincronizar::main tiene cambios que chocan con ${{ matrix.target }}. Resuélvelo a mano: git checkout ${{ matrix.target }} && git merge main, resolver, git push."
+            exit 1
+          fi
