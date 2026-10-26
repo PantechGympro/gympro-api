@@ -25,7 +25,7 @@ jobs:
       - name: Compilar todos los módulos (sintaxis válida)
         run: python -m compileall -q app migrations wsgi.py run.py reactivar_gym.py
 
-      - name: Lint con flake8 (solo errores graves: sintaxis, nombres indefinidos)
+      - name: "Lint con flake8 (solo errores graves: sintaxis, nombres indefinidos)"
         run: |
           pip install flake8
           flake8 app wsgi.py run.py --count --select=E9,F63,F7,F82 --show-source --statistics
