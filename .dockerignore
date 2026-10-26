@@ -39,9 +39,10 @@ htmlcov/
 .coverage
 
 # ─── Documentación y scripts de desarrollo ───────────────────────────────────
-reactivar_gym.py
-spark/DB/
 
 # ─── README y docs (no necesarios en la imagen) ──────────────────────────────
 README.md
 *.md
+
+# Config/skills de Claude Code — herramientas de desarrollo, no pertenecen a la imagen
+.claude/

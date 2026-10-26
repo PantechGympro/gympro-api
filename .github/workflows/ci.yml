@@ -23,7 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Compilar todos los módulos (sintaxis válida)
-        run: python -m compileall -q app migrations wsgi.py run.py reactivar_gym.py
+        run: python -m compileall -q app migrations wsgi.py run.py
 
       - name: "Lint con flake8 (solo errores graves: sintaxis, nombres indefinidos)"
         run: |
