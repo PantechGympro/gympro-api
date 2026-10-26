@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compilar todos los módulos (sintaxis válida)
+        run: python -m compileall -q app migrations wsgi.py run.py reactivar_gym.py
+
+      - name: Lint con flake8 (solo errores graves: sintaxis, nombres indefinidos)
+        run: |
+          pip install flake8
+          flake8 app wsgi.py run.py --count --select=E9,F63,F7,F82 --show-source --statistics

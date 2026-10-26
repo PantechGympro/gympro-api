@@ -5,7 +5,17 @@ contenedor Docker. Persiste en PostgreSQL (datos relacionales) y MongoDB (datos
 flexibles), usa Redis para caché y rate limiting, y expone módulos de inteligencia
 artificial basados en scikit-learn.
 
-Documentación completa del proyecto: [../doc/README.md](../doc/README.md)
+> **Arquitectura multi-repo:** este repo es parte de GymPro, dividido en 3 repos bajo la
+> organización [PantechGympro](https://github.com/PantechGympro):
+> [`gympro-api`](https://github.com/PantechGympro/gympro-api) (este),
+> [`gympro-web`](https://github.com/PantechGympro/gympro-web) y
+> [`gympro-mobile`](https://github.com/PantechGympro/gympro-mobile).
+>
+> Para levantar el stack completo con Docker Compose aún se necesita el
+> `docker-compose.yml` original (la separación de infraestructura en su propio repo
+> está pendiente — ver plan de migración interno). Mientras tanto, clona este repo como
+> `api/` junto a `gympro-web` como `web/`, con el `docker-compose.yml` del monorepo
+> original al mismo nivel.
 
 ---
 
@@ -150,8 +160,8 @@ POSTGRES_URI=postgresql+psycopg2://gymuser:gympassword@postgres:5432/gymprodb
 SPARK_ENABLED=true
 ```
 
-Detalles del alta en PayPal y Mercado Pago:
-[../doc/PAGOS_CONFIGURACION.md](../doc/PAGOS_CONFIGURACION.md)
+Detalles del alta en PayPal y Mercado Pago: ver la documentación del monorepo original
+(`doc/PAGOS_CONFIGURACION.md`), archivado como referencia histórica.
 
 Importante: como el compose usa `env_file`, tras cambiar `api/.env` hay que recrear el
 contenedor para que tome los nuevos valores: `docker compose up -d --force-recreate api`.
