@@ -8,6 +8,13 @@ gimnasio decidio hacer publico desde su panel (ver
 routes/owner_gym/perfil_publico.py): fotos que subio y testimonios que
 escribio. Nunca datos operativos (miembros, pagos, etc.) -- eso sigue
 detras de autenticacion en todos los demas blueprints.
+
+El catalogo de planes de suscripcion (/planes) es la excepcion logica:
+no lo sube ningun gimnasio, es el catalogo propio de GymPro (tabla
+planes_suscripcion, ver models/pg/plan_suscripcion.py y la pantalla de
+administracion en superadmin/SuperadminPlanes.jsx) -- pero igual de
+publico, porque un visitante tiene que poder ver que planes existen y
+cuanto cuestan antes de registrarse.
 """
 from flask import Blueprint, jsonify
 
@@ -15,11 +22,31 @@ from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.gimnasio_imagen import GimnasioImagen
 from app.models.pg.testimonio import Testimonio
+from app.models.pg.plan_suscripcion import PlanSuscripcion
 
 landing_bp = Blueprint("landing", __name__)
 
 MAX_GIMNASIOS_EN_CARRUSEL  = 24
 MAX_TESTIMONIOS_EN_LANDING = 20
+
+
+@landing_bp.route("/planes", methods=["GET"])
+def planes_publicos():
+    """
+    Catalogo de planes de suscripcion activos, en el orden en que deben
+    mostrarse (columna 'orden', ver PlanSuscripcion.to_dict()). Un plan
+    desactivado desde SuperadminPlanes.jsx (activo=False) -- por ejemplo
+    uno descontinuado que todavia tiene gimnasios suscritos -- no debe
+    seguir ofreciendose a visitantes nuevos, aunque su fila siga existiendo
+    para no romper las suscripciones que ya lo usan.
+    """
+    filas = (
+        PlanSuscripcion.query
+        .filter(PlanSuscripcion.activo.is_(True))
+        .order_by(PlanSuscripcion.orden)
+        .all()
+    )
+    return jsonify([p.to_dict() for p in filas]), 200
 
 
 @landing_bp.route("/gimnasios", methods=["GET"])
