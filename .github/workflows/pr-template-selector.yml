@@ -1,0 +1,98 @@
+name: Seleccionar plantilla de PR segun tipo de commit
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  select-template:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detectar prefijo Conventional Commits y aplicar plantilla
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const pull_number = pr.number;
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner, repo, pull_number, per_page: 100,
+            });
+
+            const typeRegex = /^(\w+)(\([^)]*\))?!?:\s/;
+            const counts = {};
+            for (const c of commits) {
+              const firstLine = c.commit.message.split('\n')[0];
+              const match = firstLine.match(typeRegex);
+              if (match) {
+                const type = match[1].toLowerCase();
+                counts[type] = (counts[type] || 0) + 1;
+              }
+            }
+
+            if (Object.keys(counts).length === 0) {
+              console.log('Ningun commit sigue Conventional Commits; no se aplica plantilla automatica.');
+              return;
+            }
+
+            const priority = ['feat', 'fix'];
+            const dominant = Object.entries(counts).sort((a, b) => {
+              if (b[1] !== a[1]) return b[1] - a[1];
+              return priority.indexOf(b[0]) - priority.indexOf(a[0]);
+            })[0][0];
+
+            const categoryMap = { feat: 'feature', fix: 'fix' };
+            const category = categoryMap[dominant] || 'maintenance';
+
+            const templatePath = path.join('.github', 'pr-templates', `${category}.md`);
+            if (!fs.existsSync(templatePath)) {
+              console.log(`No existe ${templatePath}; no se aplica plantilla automatica.`);
+              return;
+            }
+            const templateContent = fs.readFileSync(templatePath, 'utf8');
+            const note = `<!-- Prefijo detectado: \`${dominant}\` -> plantilla sugerida: \`${category}.md\` (${JSON.stringify(counts)}) -->\n\n`;
+
+            const defaultTemplatePath = path.join('.github', 'PULL_REQUEST_TEMPLATE.md');
+            const defaultContent = fs.existsSync(defaultTemplatePath)
+              ? fs.readFileSync(defaultTemplatePath, 'utf8').trim()
+              : '';
+            const currentBody = (pr.body || '').trim();
+            const isUntouched = currentBody === '' || currentBody === defaultContent;
+
+            if (isUntouched) {
+              await github.rest.pulls.update({
+                owner, repo, pull_number,
+                body: note + templateContent,
+              });
+              console.log(`Body de la PR actualizado con la plantilla "${category}".`);
+            } else {
+              const marker = 'Detecte que el tipo de commit dominante';
+              const commentBody =
+                `Detecte que el tipo de commit dominante en esta PR es \`${dominant}\` ` +
+                `(conteo: ${JSON.stringify(counts)}), lo que sugiere la plantilla **${category}.md**.\n\n` +
+                `Como ya escribiste una descripcion, no la reemplace. Si quieres usarla, aqui esta:\n\n` +
+                `<details><summary>Ver plantilla sugerida (${category}.md)</summary>\n\n` +
+                '```markdown\n' + templateContent + '\n```\n' +
+                `</details>`;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pull_number, per_page: 100,
+              });
+              const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(marker));
+
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: commentBody });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pull_number, body: commentBody });
+              }
+              console.log(`Comentario con plantilla sugerida ("${category}") publicado/actualizado.`);
+            }

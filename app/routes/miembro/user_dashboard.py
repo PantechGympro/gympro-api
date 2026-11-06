@@ -8,6 +8,8 @@ from app.models.pg.usuario import Usuario
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
 from app.utils.sync import resolver_capturado_en
+from app.utils.logros import calcular_logros_miembro, resumen_recientes
+from app.utils.racha import calcular_racha
 from app.utils.checkin_qr import validar_token, QrTokenExpirado, QrTokenInvalido
 
 user_dashboard_bp = Blueprint('user_dashboard', __name__)
@@ -731,7 +733,7 @@ def _get_workout_stats(mdb, id_miembro):
             "id_miembro": id_miembro,
             "fecha":      {"$gte": start_of_month, "$lt": start_of_next}
         })
-        racha            = _calcular_racha(mdb, id_miembro)
+        racha            = calcular_racha(mdb, id_miembro)
 
         progreso = list(mdb.progreso_fisico.find(
             {"id_miembro": id_miembro}
@@ -763,38 +765,6 @@ def _get_workout_stats(mdb, id_miembro):
         print(f"Error _get_workout_stats: {e}")
         return {"currentWeek": 0, "totalWorkouts": 0,
                 "caloriesBurned": 0, "streakDays": 0, "currentWeight": 0}
-
-
-def _calcular_racha(mdb, id_miembro):
-    try:
-        asistencias = list(mdb.asistencias.find(
-            {"id_miembro": id_miembro}
-        ).sort("fecha", -1))
-        if not asistencias: return 0
-
-        fechas = []
-        for a in asistencias:
-            f = a.get("fecha")
-            if isinstance(f, datetime): f = f.date()
-            elif isinstance(f, str):    f = datetime.strptime(f[:10], "%Y-%m-%d").date()
-            if f not in fechas: fechas.append(f)
-        fechas.sort(reverse=True)
-
-        hoy  = datetime.now().date()
-        if (hoy - fechas[0]).days > 1: return 0
-
-        racha          = 0
-        fecha_esperada = hoy if (hoy - fechas[0]).days == 0 else hoy - timedelta(days=1)
-        for f in fechas:
-            if f == fecha_esperada:
-                racha         += 1
-                fecha_esperada -= timedelta(days=1)
-            elif f < fecha_esperada:
-                break
-        return racha
-    except Exception as e:
-        print(f"Error _calcular_racha: {e}")
-        return 0
 
 
 def _get_today_workout(mdb, id_miembro):
@@ -877,45 +847,27 @@ def _get_weekly_progress(mdb, id_miembro):
 
 
 def _get_recent_achievements(mdb, id_miembro):
-    achievements = []
+    """
+    Logros recientes para el widget del home (HU-26 / SCRUM-206).
+
+    Antes recalculaba aquí mismo, en cada carga del dashboard, una versión
+    ad-hoc y NO persistida de "racha"/"asistencias del mes" -- sin catálogo
+    de niveles, sin fecha de obtención guardada, sin "rutinas completadas"
+    ni "superación de carga previa" (pedidos explícitos de HU-26), y con
+    colores en formato CSS ("var(--accent)") que el cliente móvil no puede
+    interpretar (React Native no entiende var(), así que el ícono de racha
+    salía sin color ahí). Se delega al motor real de logros
+    (app/utils/logros.py), que persiste cada medalla con su fecha en
+    `logros_miembro` y cubre las 5 categorías del alcance de HU-26; este
+    widget solo toma los 3 conseguidos más recientes en el mismo shape de
+    siempre para no tener que tocar la pantalla del home.
+    """
     try:
-        racha = _calcular_racha(mdb, id_miembro)
-        if racha >= 7:
-            achievements.append({"icon":"FaFire","title":f"Racha de {racha} días",
-                                  "description":"Completado hoy","color":"var(--accent)"})
-        elif racha >= 3:
-            achievements.append({"icon":"FaFire","title":f"Racha de {racha} días",
-                                  "description":"¡Sigue así!","color":"var(--warning-color)"})
-
-        progresos = list(mdb.progreso_fisico.find(
-            {"id_miembro": id_miembro}
-        ).sort("fecha_registro", -1).limit(2))
-        if len(progresos) >= 2:
-            diff = float(progresos[0].get("peso", 0) or 0) - float(progresos[1].get("peso", 0) or 0)
-            if abs(diff) >= 1:
-                achievements.append({
-                    "icon":"FaDumbbell",
-                    "title":f"{'+' if diff>0 else ''}{diff:.1f}kg de progreso",
-                    "description":"Última medición","color":"var(--success-color)"
-                })
-
-        now = datetime.now()
-        inicio = datetime(now.year, now.month, 1)
-        fin    = datetime(now.year + 1, 1, 1) if now.month == 12 \
-                 else datetime(now.year, now.month + 1, 1)
-        asis_mes = mdb.asistencias.count_documents({
-            "id_miembro": id_miembro,
-            "fecha":      {"$gte": inicio, "$lt": fin}
-        })
-        if asis_mes >= 20:
-            achievements.append({"icon":"FaTrophy","title":f"{asis_mes} entrenamientos",
-                                  "description":"¡Campeón del mes!","color":"var(--accent)"})
-        elif asis_mes >= 12:
-            achievements.append({"icon":"FaBolt","title":f"{asis_mes} entrenamientos",
-                                  "description":"Este mes","color":"var(--warning-color)"})
+        logros = calcular_logros_miembro(mdb, id_miembro)
+        return resumen_recientes(logros, limite=3)
     except Exception as e:
         print(f"Error _get_recent_achievements: {e}")
-    return achievements
+        return []
 
 
 def _get_active_membership(mdb, id_miembro):
