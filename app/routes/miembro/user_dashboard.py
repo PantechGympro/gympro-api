@@ -202,6 +202,21 @@ def register_progress():
         gym_id     = g.tenant_id
         data       = request.json or {}
 
+        # SCRUM-256: un peso ausente, vacío o en 0 no es una medición real.
+        # Antes float(data.get("peso", 0)) convertía cualquiera de los tres
+        # en un cero válido que contaminaba la gráfica de evolución, el IMC
+        # y los modelos de analítica. Se rechaza explícitamente en vez de
+        # inventar un valor, antes de tocar la base de datos.
+        peso_crudo = data.get('peso')
+        if peso_crudo in (None, ''):
+            return jsonify({"error": "El peso es requerido"}), 400
+        try:
+            peso_val = float(peso_crudo)
+        except (TypeError, ValueError):
+            return jsonify({"error": "El peso es requerido"}), 400
+        if peso_val <= 0:
+            return jsonify({"error": "El peso es requerido"}), 400
+
         miembro = mdb.miembros.find_one({
             "id_usuario_pg":  user_pg_id,
             "id_gimnasio_pg": gym_id
@@ -215,7 +230,7 @@ def register_progress():
         # quede ordenado por cuándo pasó, no por cuándo se sincronizó.
         nuevo_progreso = {
             "id_miembro":    miembro["_id"],
-            "peso":          float(data.get('peso', 0)),
+            "peso":          peso_val,
             "cintura":       float(data['cintura'])  if data.get('cintura')  else None,
             "cadera":        float(data['cadera'])   if data.get('cadera')   else None,
             "fecha_registro":resolver_capturado_en(data)
