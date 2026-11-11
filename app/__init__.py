@@ -28,6 +28,7 @@ from app.routes.owner_gym.owner_productos     import owner_productos_bp
 from app.routes.owner_gym.sucursales          import sucursales_bp
 from app.routes.owner_gym.complementos_capacidad import complementos_capacidad_bp
 from app.routes.owner_gym.personal_operativo  import personal_bp
+from app.routes.owner_gym.moderacion_chat     import moderacion_chat_bp
 from app.routes.miembro.user_dashboard        import user_dashboard_bp
 from app.routes.miembro.logros                 import logros_bp
 from app.routes.miembro.user_payments         import user_payments_bp
@@ -57,6 +58,7 @@ from app.routes.compartido.citas_lectura      import citas_miembro_bp, citas_ent
 from app.routes.compartido.verificacion_sucursal import verificacion_bp
 from app.routes.compartido.traslado_sucursal     import traslado_bp
 from app.routes.compartido.nutricion_externa     import nutricion_externa_bp
+from app.routes.compartido.chat_moderacion       import chat_moderacion_bp
 from app.backups.routes                       import backups_bp
 from app.backups.tenant_routes                import tenant_backups_bp
 from app.routes.superadmin.gimnasios          import gimnasios_admin_bp
@@ -85,6 +87,8 @@ def create_app():
     from app.models.pg.tipo_clase          import TipoClase           # noqa: F401
     from app.models.pg.gimnasio_imagen     import GimnasioImagen       # noqa: F401
     from app.models.pg.testimonio          import Testimonio           # noqa: F401
+    from app.models.pg.bloqueo_chat        import BloqueoChat          # noqa: F401
+    from app.models.pg.reporte_chat        import ReporteChat          # noqa: F401
 
     db.init_app(app)
     migrate.init_app(app, db, directory="migrations")
@@ -126,6 +130,7 @@ def create_app():
     app.register_blueprint(verificacion_bp,       url_prefix="/api")
     app.register_blueprint(traslado_bp,            url_prefix="/api")
     app.register_blueprint(nutricion_externa_bp)
+    app.register_blueprint(chat_moderacion_bp)
     app.register_blueprint(billing_bp)
     app.register_blueprint(billing_stripe_bp)
     app.register_blueprint(pasarelas_bp)
@@ -150,6 +155,7 @@ def create_app():
     app.register_blueprint(sucursales_bp,          url_prefix="/api/owner_gym")
     app.register_blueprint(complementos_capacidad_bp, url_prefix="/api/owner_gym")
     app.register_blueprint(personal_bp,            url_prefix="/api/owner_gym")
+    app.register_blueprint(moderacion_chat_bp,     url_prefix="/api/owner_gym")
     app.register_blueprint(perfil_publico_bp,      url_prefix="/api/owner_gym")
     app.register_blueprint(tenant_backups_bp,      url_prefix="/api/owner_gym")
     app.register_blueprint(recepcionista_bp,       url_prefix="/api/recepcionista")

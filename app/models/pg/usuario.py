@@ -58,6 +58,16 @@ class Usuario(db.Model):
     # Teléfono de la PERSONA, distinto del teléfono de contacto del gimnasio.
     telefono     = db.Column(db.String(30), nullable=True)
 
+    # ── HU-12 (migración 031) — suspensión de acceso al CHAT ───────────────────
+    # Independiente de `activo`: el Propietario puede cortarle el chat a un
+    # entrenador/recepcionista/miembro SIN desactivar su cuenta (AC3). La
+    # verificación real vive en utils/chat_moderacion.py::verificar_acceso_chat,
+    # consultada por training.py y trainer_routes.py en cada GET/POST de chat.
+    chat_suspendido        = db.Column(db.Boolean, default=False, nullable=False, server_default="false")
+    chat_suspendido_motivo = db.Column(db.Text, nullable=True)
+    chat_suspendido_en     = db.Column(db.DateTime(timezone=True), nullable=True)
+    chat_suspendido_por    = db.Column(db.Integer, db.ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True)
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def set_password(self, password: str) -> None:
@@ -88,4 +98,9 @@ class Usuario(db.Model):
             # Para que el frontend pueda ofrecer "reenviar credenciales" solo
             # mientras la cuenta sigue en su contraseña temporal inicial.
             "debe_cambiar_password": bool(self.debe_cambiar_password),
+            # HU-12: estado de moderación del chat -- el panel de staff y la
+            # bandeja de reportes lo muestran para saber si ya está cortado.
+            "chat_suspendido":        bool(self.chat_suspendido),
+            "chat_suspendido_motivo": self.chat_suspendido_motivo if self.chat_suspendido else None,
+            "chat_suspendido_en":     self.chat_suspendido_en.isoformat() if self.chat_suspendido_en else None,
         }

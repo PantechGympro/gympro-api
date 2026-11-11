@@ -11,6 +11,7 @@ from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
 from app.utils.security import require_funcion_plan
 from app.utils.busqueda import normalizar_columna, patron_insensible
+from app.utils.chat_moderacion import verificar_acceso_chat
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
 
@@ -1961,6 +1962,11 @@ def chat_trainer_historial(miembro_pg_id):
     trainer_id = int(get_jwt_identity())
     gym_id     = g.tenant_id
 
+    # HU-12 / AC1, AC3
+    error = verificar_acceso_chat(trainer_id, miembro_pg_id)
+    if error:
+        return jsonify(error[0]), error[1]
+
     msgs = list(mdb.mensajes_chat.find({
         "id_miembro_pg":    miembro_pg_id,
         "id_entrenador_pg": trainer_id,
@@ -1991,6 +1997,11 @@ def chat_trainer_enviar(miembro_pg_id):
     trainer_id = int(get_jwt_identity())
     gym_id     = g.tenant_id
     data       = request.get_json() or {}
+
+    error = verificar_acceso_chat(trainer_id, miembro_pg_id)
+    if error:
+        return jsonify(error[0]), error[1]
+
     texto      = (data.get("texto") or "").strip()
 
     if not texto:
