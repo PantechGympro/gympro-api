@@ -29,6 +29,7 @@ from app.routes.owner_gym.sucursales          import sucursales_bp
 from app.routes.owner_gym.complementos_capacidad import complementos_capacidad_bp
 from app.routes.owner_gym.personal_operativo  import personal_bp
 from app.routes.miembro.user_dashboard        import user_dashboard_bp
+from app.routes.miembro.logros                 import logros_bp
 from app.routes.miembro.user_payments         import user_payments_bp
 from app.routes.miembro.user_profile          import user_profile_bp
 from app.routes.miembro.user_health           import user_health_bp
@@ -112,6 +113,7 @@ def create_app():
     app.register_blueprint(user_body_progress_bp)
     app.register_blueprint(user_membership_bp)
     app.register_blueprint(user_dashboard_bp)
+    app.register_blueprint(logros_bp)
     app.register_blueprint(spark_mapreduce_bp)
     app.register_blueprint(spark_kmeans_bp)
     app.register_blueprint(spark_regresion_bp)
