@@ -178,5 +178,13 @@ def _registrar_visita(mdb, id_miembro, id_gimnasio_visitado):
         "hora_entrada":       now.strftime("%H:%M:%S"),
         "hora_salida":        None,
         "origen":             "verificacion_sucursal",
+        # Bug SCRUM (nov/2026): sin "id_gimnasio" esta visita quedaba fuera
+        # de las metricas de negocio de la sucursal donde en realidad
+        # ocurrio (reportes_negocio.py, spark_mapreduce.py -- "que dias hay
+        # mas gente"). Va la sucursal VISITADA (donde el miembro esta
+        # fisicamente), no su sucursal de origen -- id_gimnasio_visita se
+        # mantiene igual, con el mismo valor, para el resaltado del
+        # historial (HU-47/SCRUM-218).
+        "id_gimnasio":         id_gimnasio_visitado,
         "id_gimnasio_visita":  id_gimnasio_visitado,
     })

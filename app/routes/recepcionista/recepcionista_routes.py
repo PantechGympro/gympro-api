@@ -252,6 +252,13 @@ def register_checkin():
         "hora_entrada": now.strftime("%H:%M:%S"),
         "hora_salida":  None,
         "registrado_por": get_jwt().get("sub"),
+        # Bug SCRUM (nov/2026): a esta asistencia le faltaba "id_gimnasio",
+        # que es el campo que filtran las metricas de negocio por gimnasio
+        # (reportes_negocio.py, spark_mapreduce.py::_mapreduce_asistencia --
+        # "que dias hay mas gente", spark_platform.py). Sin el, los checkins
+        # hechos por el/la recepcionista (o cualquier otro staff) eran
+        # invisibles para esas metricas aunque si quedaban guardados.
+        "id_gimnasio": gym_id,
         # HU-47/SCRUM-218: mismo campo que usa la verificación entre
         # sucursales (verificacion_sucursal.py) para poder mostrar "dónde
         # fue" en el historial -- en un check-in normal de recepción
