@@ -17,6 +17,7 @@ from app.mongo import get_db
 from app.utils.tenant import require_tenant
 from app.models.pg.usuario import Usuario
 from app.models.pg.ejercicio import Ejercicio
+from app.utils.chat_moderacion import verificar_acceso_chat
 
 training_bp = Blueprint("member_training", __name__)
 
@@ -323,6 +324,13 @@ def chat_historial(trainer_id):
     mid    = _pg_id()
     gym_id = _gym_id()
 
+    # HU-12 / AC1, AC3: chat suspendido o bloqueo vigente con este
+    # entrenador -- corta tanto la lectura como el envío (ver
+    # utils/chat_moderacion.py).
+    error = verificar_acceso_chat(mid, trainer_id)
+    if error:
+        return jsonify(error[0]), error[1]
+
     msgs = list(db.mensajes_chat.find({
         "id_miembro_pg":    mid,
         "id_entrenador_pg": trainer_id,
@@ -353,6 +361,11 @@ def chat_enviar(trainer_id):
     data   = request.get_json() or {}
     mid    = _pg_id()
     gym_id = _gym_id()
+
+    error = verificar_acceso_chat(mid, trainer_id)
+    if error:
+        return jsonify(error[0]), error[1]
+
     texto  = (data.get("texto") or "").strip()
 
     if not texto:
