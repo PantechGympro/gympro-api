@@ -15,13 +15,19 @@ Endpoints (todos requieren JWT + tenant):
 """
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_mail import Message
 
-from app.extensions import db
+from app.extensions import db, mail
+from app.mongo import get_db as get_mongo_db
 from app.models.pg.usuario import Usuario
+from app.models.pg.rol import Rol
 from app.models.pg.bloqueo_chat import BloqueoChat
 from app.models.pg.reporte_chat import ReporteChat, MOTIVOS_REPORTE_CHAT
 from app.utils.tenant import require_tenant
-from app.utils.alcance import registrar_evento
+from app.utils.alcance import registrar_evento, usuario_propietario_de
+from app.utils.email_remitentes import remitente
+from app.constants.roles import ROL_ADMINISTRADOR, ROL_RECEPCIONISTA
+from app.routes.compartido.notificaciones import crear_notificacion
 
 chat_moderacion_bp = Blueprint("chat_moderacion", __name__, url_prefix="/api/chat")
 
@@ -124,6 +130,102 @@ def desbloquear_usuario(id_usuario: int):
     return jsonify({"msg": "Usuario desbloqueado"}), 200
 
 
+def _destinatarios_staff(gym_id: int) -> list:
+    """
+    HU-12/AC2: quienes deben enterarse de un reporte de chat en este
+    gimnasio/sucursal -- el Propietario (alcance de organizacion:
+    usuario_propietario_de() ya resuelve Gimnasio -> Organizacion -> sede
+    principal -> Usuario, el mismo helper que ya usan pasarelas.py y
+    utils/recibos.py para esto) mas los Administradores y Recepcionistas
+    de ESTA sucursal (su alcance es de sucursal, no de organizacion -- ver
+    constants/roles.py). Deduplicado por id de usuario, por si el
+    Propietario tambien figura en la tabla con rol de sucursal.
+    """
+    vistos = {}
+
+    propietario = usuario_propietario_de(gym_id)
+    if propietario:
+        vistos[propietario.id] = propietario
+
+    staff_sucursal = (
+        Usuario.query
+        .join(Rol, Usuario.id_rol == Rol.id)
+        .filter(Usuario.id_gimnasio == gym_id, Rol.nombre.in_([ROL_ADMINISTRADOR, ROL_RECEPCIONISTA]))
+        .all()
+    )
+    for u in staff_sucursal:
+        vistos[u.id] = u
+
+    return list(vistos.values())
+
+
+def _avisar_staff_reporte(gym_id: int, reporte: ReporteChat, reportante, reportado) -> None:
+    """
+    HU-12/AC2: escala un reporte de chat recien creado al staff que debe
+    evaluar el caso -- aviso in-app + push (crear_notificacion ya hace
+    ambos, ver routes/compartido/notificaciones.py) y ademas correo,
+    porque el staff no siempre tiene la app abierta y un entrenador (o
+    cualquier rol) senalado amerita que se enteren aunque no esten viendo
+    el celular en ese momento.
+
+    Se llama DESPUES de db.session.commit(): un fallo de push o de correo
+    jamas debe tumbar la creacion del reporte en si, que ya quedo a salvo.
+    Todo lo de aqui es best-effort (try/except silencioso).
+    """
+    staff = _destinatarios_staff(gym_id)
+    if not staff:
+        return
+
+    motivo_legible    = (reporte.motivo or "").replace("_", " ")
+    nombre_reportante = reportante.nombre if reportante else "Un usuario"
+    titulo  = "Nuevo reporte en el chat"
+    mensaje = f"{nombre_reportante} reporto a {reportado.nombre} ({motivo_legible}). Revisalo en Moderacion de chat."
+
+    try:
+        mdb = get_mongo_db()
+        for u in staff:
+            try:
+                crear_notificacion(
+                    mdb, u.id, gym_id, "chat_reporte", titulo, mensaje,
+                    referencia_tipo="reporte_chat", referencia_id=str(reporte.id),
+                )
+            except Exception:
+                pass  # un push fallido no debe impedir avisarle a los demas
+    except Exception:
+        pass  # sin Mongo disponible, el correo de abajo sigue siendo el respaldo
+
+    destinatarios_email = [u.email for u in staff if u.email]
+    if not destinatarios_email:
+        return
+
+    comentario_html = (
+        f"<p><strong>Comentario:</strong> {reporte.comentario}</p>" if reporte.comentario else ""
+    )
+    html = f"""
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0f0f1a;color:#fff;padding:32px;border-radius:12px;">
+      <h2 style="color:#f87171;margin-top:0;">GymPro — Reporte en el chat</h2>
+      <p><strong>{nombre_reportante}</strong> reporto a <strong>{reportado.nombre}</strong>
+         ({reportado.rol.nombre if reportado.rol else 'usuario'}) en el chat.</p>
+      <p><strong>Motivo:</strong> {motivo_legible}</p>
+      {comentario_html}
+      <p>Entra a Moderacion de chat para revisar la conversacion y resolver el caso
+         (desestimar, advertir o suspender el acceso al chat de la persona reportada).</p>
+      <p style="margin-top:28px;font-size:12px;color:#888;">
+        GymPro — Este mensaje es automatico, por favor no respondas.
+      </p>
+    </div>"""
+    try:
+        msg = Message(
+            subject=f"Reporte en el chat — {reportado.nombre}",
+            sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
+            recipients=destinatarios_email,
+            html=html,
+        )
+        mail.send(msg)
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /api/chat/reportes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,15 +279,22 @@ def crear_reporte():
     db.session.add(reporte)
     db.session.flush()  # para tener reporte.id en el detalle de la bitácora
 
-    # AC2 (escalar al propietario): no hace falta "enviar" nada aparte --
-    # el reporte ya queda filtrado por id_gimnasio, así que la bandeja del
-    # propietario de ESTE gimnasio (routes/owner_gym/moderacion_chat.py)
-    # lo va a listar sin que un reporte cruce nunca a otro gimnasio.
+    # AC2 (escalar al staff): el reporte ya queda filtrado por id_gimnasio,
+    # así que la bandeja de moderación de ESTE gimnasio/sucursal
+    # (routes/owner_gym/moderacion_chat.py) lo va a listar sin que un
+    # reporte cruce nunca a otro gimnasio. Además de quedar ahí, se avisa
+    # de inmediato (aviso in-app + push + correo) al Propietario, los
+    # Administradores y los Recepcionistas de la sucursal, para que estén
+    # atentos al usuario reportado y evalúen el caso sin tener que estar
+    # revisando la bandeja a cada rato.
     registrar_evento(
         actor_id, "chat.reportar_usuario", id_gimnasio=gym_id,
         detalle={"id_reporte": reporte.id, "id_usuario_reportado": reportado_id, "motivo": motivo},
     )
     db.session.commit()
+
+    reportante = Usuario.query.get(actor_id)
+    _avisar_staff_reporte(gym_id, reporte, reportante, reportado)
 
     return jsonify({
         "msg": "Reporte enviado. El propietario del gimnasio lo revisará.",
