@@ -1,0 +1,36 @@
+name: Deploy a staging (VPS)
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, gympro-vps]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Asegurar rsync en el runner
+        run: command -v rsync >/dev/null || (apt-get update && apt-get install -y rsync)
+
+      - name: Sincronizar codigo con el clon persistente del VPS
+        run: |
+          mkdir -p ~/GymPro-Staging/gympro-api
+          rsync -a --delete --exclude='.env' --exclude='.git' ./ ~/GymPro-Staging/gympro-api/
+
+      - name: Reconstruir stack de staging
+        run: |
+          cd ~/GymPro-Staging/gympro-infra
+          docker compose up -d --build
+
+      - name: Estado de los contenedores
+        run: |
+          cd ~/GymPro-Staging/gympro-infra
+          sleep 5
+          docker compose ps
