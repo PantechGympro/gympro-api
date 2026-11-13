@@ -29,6 +29,28 @@ owner_profile_bp = Blueprint("owner_profile", __name__)
 # la misma fila de Gimnasio, cada quien sobre la que le corresponde.
 
 
+@owner_profile_bp.route("/horarios", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_horarios_atencion():
+    """
+    HU-39: horario de atención del gimnasio, de solo lectura y SIN
+    restricción de rol (a diferencia de GET /perfil) -- lo usa la app
+    móvil del miembro para validar la hora de recogida de productos
+    antes de enviarla al servidor (la validación real/autoritativa ocurre
+    en el backend, en POST /api/ventas; esto es solo para que la app no
+    deje elegir algo que el servidor va a rechazar).
+    """
+    gym = Gimnasio.query.get(g.tenant_id)
+    if not gym:
+        return jsonify({"msg": "Gimnasio no encontrado"}), 404
+    config = gym.configuracion or {}
+    return jsonify({
+        "horarios":     horarios_desde_configuracion(config),
+        "horario_hoy":  horario_de_hoy(config),
+    }), 200
+
+
 @owner_profile_bp.route("/perfil", methods=["GET"])
 @jwt_required()
 @require_role("owner_gym", "Administrador")
