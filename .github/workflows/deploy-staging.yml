@@ -27,10 +27,13 @@ jobs:
       - name: Reconstruir stack de staging
         run: |
           cd ~/GymPro-Staging/gympro-infra
-          docker compose up -d --build
+          # -p gympro-staging: mismo nombre de proyecto que el stack que ya corre
+          # en el VPS, para que Compose actualice esos contenedores en vez de
+          # crear un proyecto paralelo (ver fix equivalente en gympro-infra).
+          docker compose -p gympro-staging -f docker-compose.yml -f docker-compose.override.yml up -d --build
 
       - name: Estado de los contenedores
         run: |
           cd ~/GymPro-Staging/gympro-infra
           sleep 5
-          docker compose ps
+          docker compose -p gympro-staging -f docker-compose.yml -f docker-compose.override.yml ps
