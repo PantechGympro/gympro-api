@@ -1,0 +1,37 @@
+name: Deploy a produccion (VPS)
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, gympro-vps]
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Asegurar rsync en el runner
+        run: command -v rsync >/dev/null || (apt-get update && apt-get install -y rsync)
+
+      - name: Sincronizar codigo con el clon persistente del VPS
+        run: |
+          mkdir -p ~/GymPro-Prod/gympro-api
+          rsync -a --delete --exclude='.env' --exclude='.git' ./ ~/GymPro-Prod/gympro-api/
+
+      - name: Reconstruir stack de produccion
+        run: |
+          cd ~/GymPro-Prod/gympro-infra
+          docker compose -f docker-compose.server.yml up -d --build
+
+      - name: Estado de los contenedores
+        run: |
+          cd ~/GymPro-Prod/gympro-infra
+          sleep 5
+          docker compose -f docker-compose.server.yml ps
