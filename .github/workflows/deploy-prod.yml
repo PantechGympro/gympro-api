@@ -17,6 +17,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verificar horario permitido (23:00-05:59 hora CDMX)
+        run: |
+          hora=$(TZ="America/Mexico_City" date +%H)
+          ahora=$(TZ="America/Mexico_City" date '+%Y-%m-%d %H:%M %Z')
+          if [ "$hora" -ge 23 ] || [ "$hora" -lt 6 ]; then
+            echo "Hora actual en CDMX: $ahora. Dentro de la ventana permitida (23:00-05:59), continuando."
+          else
+            echo "::error::Son las $ahora en Ciudad de Mexico. El deploy a produccion solo se aplica entre 23:00 y 05:59 (gimnasio cerrado) para no interrumpir la operacion. Vuelve a correr este job (Re-run jobs) o dispara el workflow de nuevo dentro de ese horario."
+            exit 1
+          fi
+
       - name: Asegurar rsync en el runner
         run: command -v rsync >/dev/null || (apt-get update && apt-get install -y rsync)
 
