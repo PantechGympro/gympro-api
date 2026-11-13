@@ -41,7 +41,12 @@ def listar_miembros():
     db        = get_db()
     gym_id    = g.tenant_id
     page      = request.args.get('page', 1, type=int)
-    per_page  = 6
+    # Default 6 (el que ya usan las pantallas de roster con paginacion real,
+    # MiembrosDashboard.jsx x2): un cliente que necesite el padron completo de
+    # una vez (busqueda en vivo para cobrar/vender -- CobrarMembresia.jsx,
+    # PointOfSale.jsx, PagosDashboard.jsx) puede pedir un per_page mayor.
+    # Tope en 500: cubre con margen el plan Enterprise (400 miembros).
+    per_page  = min(500, max(1, request.args.get('per_page', 6, type=int)))
     mostrar_inactivos = request.args.get('inactivos', 'false') == 'true'
     search    = request.args.get('search', '', type=str)
 

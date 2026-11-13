@@ -18,6 +18,7 @@ from app.utils.tenant import require_tenant
 from app.models.pg.usuario import Usuario
 from app.models.pg.ejercicio import Ejercicio
 from app.utils.chat_moderacion import verificar_acceso_chat
+from app.routes.compartido.notificaciones import crear_notificacion
 
 training_bp = Blueprint("member_training", __name__)
 
@@ -384,6 +385,22 @@ def chat_enviar(trainer_id):
     }
     result = db.mensajes_chat.insert_one(doc)
     doc["id"] = str(result.inserted_id)
+
+    # Avisar al entrenador de que le llegó un mensaje -- in-app + push
+    # (así el entrenador sabe que se le mandó algo aunque no tenga la
+    # app abierta, en vez de enterarse solo si entra a revisar el chat).
+    try:
+        remitente_usr = Usuario.query.get(mid)
+        nombre = remitente_usr.nombre if remitente_usr else "Un miembro"
+        preview = texto if len(texto) <= 120 else texto[:117] + "..."
+        crear_notificacion(
+            db, trainer_id, gym_id, "chat_mensaje",
+            f"Nuevo mensaje de {nombre}", preview,
+            referencia_tipo="chat", referencia_id=str(mid),
+        )
+    except Exception:
+        pass  # el mensaje ya quedó guardado; el aviso es complementario
+
     return jsonify({"mensaje": _ser(doc)}), 201
 
 

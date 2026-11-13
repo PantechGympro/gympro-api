@@ -736,6 +736,19 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
             if id_miembro_pg is None:
                 id_miembro_pg = miembro_doc.get("id_usuario_pg")
 
+    # HU-39: dia/hora de recogida, si vinieron en los metadatos del cobro.
+    # El pago ya se realizo -- una hora invalida nunca rechaza la venta, solo
+    # se omite (recepcion la reprograma con el miembro).
+    fecha_recogida = (meta.get("fecha_recogida") or "").strip() or None
+    hora_recogida  = (meta.get("hora_recogida") or "").strip() or None
+    if fecha_recogida and hora_recogida:
+        from app.routes.owner_gym.ventas import _validar_hora_recogida
+        _error = _validar_hora_recogida(tx.id_gimnasio, fecha_recogida, hora_recogida)
+        if _error:
+            logger.warning("Pago %s: hora de recogida invalida (%s), se omite", tx.id, _error[0])
+            fecha_recogida = None
+            hora_recogida  = None
+
     venta = {
         "id_gimnasio":    tx.id_gimnasio,
         "items":          items,
@@ -747,8 +760,25 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
         "fecha":          datetime.now(),
         "referencia_pasarela": tx.referencia_pago or tx.referencia_externa,
         "id_transaccion":      tx.id,
+        # HU-39: entrega del producto comprado.
+        "estado_entrega": "pendiente" if (fecha_recogida and hora_recogida) else None,
+        "fecha_recogida": fecha_recogida,
+        "hora_recogida":  hora_recogida,
     }
-    mdb.ventas.insert_one(venta)
+    _result_venta = mdb.ventas.insert_one(venta)
+
+    if venta["estado_entrega"] == "pendiente":
+        try:
+            from app.routes.owner_gym.ventas import _notificar_compra_pendiente
+            _notificar_compra_pendiente(
+                mdb, tx.id_gimnasio, str(_result_venta.inserted_id),
+                nombre_comprador=venta.get("nombre_miembro") or (miembro_doc or {}).get("nombre"),
+                items=items, total=venta["total"], metodo=venta["metodo_pago"],
+                fecha_recogida=fecha_recogida, hora_recogida=hora_recogida,
+                id_entrenador_pg=(miembro_doc or {}).get("id_entrenador_pg"),
+            )
+        except Exception:
+            logger.exception("Pago %s: no se pudo notificar compra pendiente", tx.id)
 
     # -- Recibo por correo al miembro Y al propietario, mas bitacora de
     #    seguridad -- mismo tratamiento que POST /api/ventas (en persona).
