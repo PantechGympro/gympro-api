@@ -149,18 +149,33 @@ def get_user_health():
         str_fecha = fecha_act.strftime('%Y-%m-%d') if isinstance(fecha_act, datetime) else (str(fecha_act) if fecha_act else None)
 
         # ── Datos del onboarding (condiciones_medicas, alergias, etc.) ─────────
-        conds_medicas = miembro.get("condiciones_medicas", [])
+        # Estos 4 campos tienen DOS vias de escritura con formatos distintos:
+        #   - complete_user_profile() (onboarding, user_profile.py) guarda lo
+        #     que mande el formulario tal cual -- hoy texto libre desde el
+        #     wizard web ("Polen, latex"), pero el campo acepta list[str] en
+        #     el payload igual (ver docstring de ese endpoint).
+        #   - update_user_medical() (PUT /api/user/health/medical, en este
+        #     archivo) SIEMPRE normaliza a string separado por comas antes
+        #     de guardar.
+        # O sea Mongo puede tener aqui una lista O un string segun por donde
+        # se haya guardado la ultima vez -- hacer `.split(",")` a secas
+        # revienta con 500 (AttributeError) en cuanto el valor es una lista.
+        # _a_lista() acepta cualquiera de las dos formas (y cualquier otra
+        # cosa rara) sin tronar.
+        def _a_lista(valor):
+            if isinstance(valor, list):
+                return [str(x).strip() for x in valor if str(x).strip()]
+            if isinstance(valor, str):
+                return [s.strip() for s in valor.split(",") if s.strip()]
+            return []
+
+        conds_medicas = _a_lista(miembro.get("condiciones_medicas", []))
         if "Ninguna" in conds_medicas:
             conds_medicas = []
 
-        alergias_raw = miembro.get("alergias", "")
-        alergias_list = [a.strip() for a in alergias_raw.split(",") if a.strip()] if alergias_raw else []
-
-        medicamentos_raw = miembro.get("medicamentos", "")
-        medicamentos_list = [m.strip() for m in medicamentos_raw.split(",") if m.strip()] if medicamentos_raw else []
-
-        lesiones_raw = miembro.get("lesiones_previas", "")
-        lesiones_list = [l.strip() for l in lesiones_raw.split(",") if l.strip()] if lesiones_raw else []
+        alergias_list     = _a_lista(miembro.get("alergias", ""))
+        medicamentos_list = _a_lista(miembro.get("medicamentos", ""))
+        lesiones_list      = _a_lista(miembro.get("lesiones_previas", ""))
 
         consentimiento_medico = miembro.get("consentimiento_datos_medicos") or {}
 

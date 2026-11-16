@@ -1,3 +1,4 @@
+import re
 from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from bson.objectid import ObjectId
@@ -11,6 +12,7 @@ from app.models.pg.ejercicio import Ejercicio
 from app.utils.tenant import require_tenant
 from app.utils.security import require_funcion_plan
 from app.utils.busqueda import normalizar_columna, patron_insensible
+from app.utils.object_storage import subir_base64
 from app.utils.chat_moderacion import verificar_acceso_chat
 from app.routes.compartido.notificaciones import crear_notificacion
 
@@ -143,7 +145,12 @@ def get_trainer_clients():
         gym_id = g.tenant_id
 
         page     = int(request.args.get('page', 1))
-        per_page = 6
+        # Default 6 (roster paginado de TrainerClients.jsx) -- igual que
+        # owner_gym/miembros.py, un caller que necesite el padron completo
+        # de una vez (selector de cliente en Dietas/Rutinas, que antes se
+        # quedaba solo con los primeros 6) puede pedir un per_page mayor.
+        # Tope en 500 por el mismo motivo que ahi.
+        per_page = min(500, max(1, int(request.args.get('per_page', 6))))
         skip     = (page - 1) * per_page
         search   = request.args.get('search', '')
         status   = request.args.get('status', 'all')
@@ -172,13 +179,27 @@ def get_trainer_clients():
             "id_gimnasio_pg":   gym_id,
         }
         if search:
-            match_base["nombre"] = {"$regex": search, "$options": "i"}
+            # SCRUM-105: nombre insensible a mayusculas/acentos (patron_insensible).
+            # Tambien se busca por email (tal cual, es un identificador tecnico) y,
+            # si el texto son solo digitos, por numero de socio (id_usuario_pg) --
+            # mismo criterio que owner_gym/miembros.py y recepcionista_routes.py.
+            or_clientes = [
+                {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
+                {"email":  {"$regex": re.escape(search), "$options": "i"}},
+            ]
+            if search.strip().isdigit():
+                or_clientes.append({"id_usuario_pg": int(search.strip())})
+            match_base["$or"] = or_clientes
 
         pipeline = [
             {"$match": match_base},
             {
                 "$facet": {
                     "data": [
+                        # Orden deterministico antes de paginar -- sin esto
+                        # el orden natural de Mongo no esta garantizado entre
+                        # paginas (podria repetir u omitir clientes).
+                        {"$sort": {"nombre": 1}},
                         {"$skip": skip},
                         {"$limit": per_page},
                         # sesiones completadas del miembro
@@ -264,6 +285,11 @@ def get_trainer_clients():
                 "bodyFat":      ultimo_progreso.get("grasa_corporal"),
                 "lastMeasured": _iso(ultimo_progreso.get("fecha_registro")),
                 "monthAttendance": r.get("asistencias_mes", 0),
+                # nov/2026: no viajaba -- el entrenador (web y movil) nunca podia
+                # ver la foto de su cliente, ni en la lista ni en la ficha. Tal
+                # cual viene del documento (data URI o nombre de archivo servido
+                # por /api/uploads/<archivo>); el cliente normaliza segun el caso.
+                "foto_perfil":  r.get("foto_perfil"),
             })
 
         if status != "all":
@@ -1436,7 +1462,18 @@ def create_exercise():
     if Ejercicio.query.filter_by(id_gimnasio=gym_id, id_entrenador=trainer_id, nombre=nombre).first():
         return jsonify({'error': 'Ya tienes un ejercicio con ese nombre'}), 409
 
-    raw_imgs = data.get('imagenes') or []
+    # MinIO (nov/2026): las imagenes/video nuevos se suben al object storage
+    # y solo se guarda su URL en Postgres; si MinIO no responde, cae de
+    # vuelta a guardar el base64 inline tal como se hacia antes (ver
+    # app/utils/object_storage.py -- subir_base64 nunca lanza, devuelve None).
+    raw_imgs  = [img for img in (data.get('imagenes') or []) if img][:3]
+    imagenes  = [
+        subir_base64(img, carpeta="ejercicios/imagenes", nombre=f"{gym_id}-{trainer_id}") or img
+        for img in raw_imgs
+    ] or None
+    raw_video = data.get('video') or None
+    video     = (subir_base64(raw_video, carpeta="ejercicios/video", nombre=f"{gym_id}-{trainer_id}") or raw_video) if raw_video else None
+
     ej = Ejercicio(
         id_gimnasio    = gym_id,
         id_entrenador  = trainer_id,
@@ -1447,8 +1484,8 @@ def create_exercise():
         series         = int(data['series']) if data.get('series') else None,
         repeticiones   = data.get('repeticiones') or None,
         duracion_min   = int(data['duracion_min']) if data.get('duracion_min') else None,
-        imagenes       = [img for img in raw_imgs if img][:3] or None,
-        video          = data.get('video') or None,
+        imagenes       = imagenes,
+        video          = video,
     )
     pg_db.session.add(ej)
     pg_db.session.commit()
@@ -1483,9 +1520,16 @@ def update_exercise(exercise_id):
     if 'repeticiones'   in data: ej.repeticiones   = data['repeticiones'] or None
     if 'duracion_min'   in data: ej.duracion_min   = int(data['duracion_min']) if data['duracion_min'] else None
     if 'imagenes'       in data:
-        raw = data['imagenes'] or []
-        ej.imagenes = [img for img in raw if img][:3] or None
-    if 'video'          in data: ej.video          = data['video'] or None
+        # MinIO (nov/2026): mismo criterio que en el alta -- subir y guardar
+        # la URL, con fallback a base64 inline si MinIO no responde.
+        raw = [img for img in (data['imagenes'] or []) if img][:3]
+        ej.imagenes = [
+            subir_base64(img, carpeta="ejercicios/imagenes", nombre=f"{gym_id}-{trainer_id}") or img
+            for img in raw
+        ] or None
+    if 'video'          in data:
+        raw_video  = data['video'] or None
+        ej.video   = (subir_base64(raw_video, carpeta="ejercicios/video", nombre=f"{gym_id}-{trainer_id}") or raw_video) if raw_video else None
 
     pg_db.session.commit()
     return jsonify(ej.to_dict()), 200

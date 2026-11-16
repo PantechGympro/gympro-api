@@ -21,6 +21,7 @@ from app.models.pg.plan_suscripcion import PlanSuscripcion
 from app.constants.roles import ROL_PROPIETARIO, ROL_ENTRENADOR, ROL_RECEPCIONISTA
 from app.mongo import get_db
 from app.utils.security import require_role
+from app.utils.busqueda import normalizar_columna
 
 gimnasios_admin_bp = Blueprint("gimnasios_admin", __name__)
 
@@ -202,10 +203,18 @@ def listar_gimnasios():
         query = query.join(Organizacion, Gimnasio.id_organizacion == Organizacion.id) \
                      .filter(Organizacion.plan == plan_param)
     if q_param:
+        # SCRUM-105: nombre de gimnasio insensible a mayusculas/acentos
+        # (normalizar_columna); el email de contacto queda fuera de alcance
+        # a proposito (identificador tecnico). Tambien se busca por ID
+        # exacto cuando el texto son solo digitos.
         like = f"%{q_param}%"
-        query = query.filter(
-            db.or_(Gimnasio.nombre.ilike(like), Gimnasio.email_contacto.ilike(like))
-        )
+        condiciones_gym = [
+            normalizar_columna(Gimnasio.nombre).ilike(normalizar_columna(like)),
+            Gimnasio.email_contacto.ilike(like),
+        ]
+        if q_param.isdigit():
+            condiciones_gym.append(Gimnasio.id == int(q_param))
+        query = query.filter(db.or_(*condiciones_gym))
 
     query = query.order_by(Gimnasio.created_at.desc())
     paginado = query.paginate(page=page, per_page=per_page, error_out=False)

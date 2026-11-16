@@ -88,13 +88,16 @@ def listar_staff():
         # SCRUM-105: el nombre se compara ignorando mayúsculas/acentos
         # (normalizar_columna, única fuente de esa lógica -- ver
         # utils/busqueda.py); el email queda fuera de alcance a propósito
-        # (identificador técnico) y se sigue comparando tal cual.
-        q = q.filter(
-            db.or_(
-                normalizar_columna(Usuario.nombre).ilike(normalizar_columna(f"%{search}%")),
-                Usuario.email.ilike(f"%{search}%"),
-            )
-        )
+        # (identificador técnico) y se sigue comparando tal cual. También se
+        # busca por ID exacto cuando el texto son solo dígitos -- mismo
+        # criterio que owner_gym/miembros.py.
+        condiciones_staff = [
+            normalizar_columna(Usuario.nombre).ilike(normalizar_columna(f"%{search}%")),
+            Usuario.email.ilike(f"%{search}%"),
+        ]
+        if search.isdigit():
+            condiciones_staff.append(Usuario.id == int(search))
+        q = q.filter(db.or_(*condiciones_staff))
 
     usuarios = q.order_by(Usuario.nombre).all()
     return jsonify([u.to_dict() for u in usuarios]), 200

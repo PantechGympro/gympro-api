@@ -24,6 +24,7 @@ from app.models.pg.gimnasio import Gimnasio
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role
 from app.utils.alcance import usuario_tiene_alcance, registrar_evento
+from app.utils.busqueda import patron_insensible
 from app.constants.roles import normalizar_rol, ROL_ADMINISTRADOR
 
 personal_bp = Blueprint("personal_operativo", __name__)
@@ -60,7 +61,10 @@ def listar_personal():
     if puesto:
         query["puesto"] = puesto
     if search:
-        query["nombre"] = {"$regex": search, "$options": "i"}
+        # SCRUM-105: nombre insensible a mayusculas/acentos (patron_insensible).
+        # Este personal no tiene cuenta ni email en el sistema, por lo que no
+        # aplica busqueda por correo o ID aqui.
+        query["nombre"] = {"$regex": patron_insensible(search), "$options": "i"}
 
     docs = list(mdb.personal_operativo.find(query).sort("nombre", 1))
     return jsonify([PersonalOperativo(**d).to_dict() for d in docs]), 200
