@@ -28,6 +28,7 @@ from app.routes.compartido.notificaciones import crear_notificacion
 from app.utils.tenant import require_tenant
 from app.utils.checkin_qr import emitir_token
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, ROL_RECEPCIONISTA, normalizar_rol
+from app.utils.busqueda import patron_insensible
 
 recepcionista_bp = Blueprint("recepcionista", __name__)
 
@@ -348,8 +349,10 @@ def get_members():
         # HU: tambien se busca por numero de ID (id_usuario_pg) exacto, no
         # solo por nombre/correo -- para que recepcion lo use como atajo
         # cuando el miembro da su numero en vez de su nombre.
+        # SCRUM-105: nombre insensible a mayusculas/acentos (patron_insensible);
+        # el email queda fuera de alcance a proposito (identificador tecnico).
         condiciones = [
-            {"nombre": {"$regex": search, "$options": "i"}},
+            {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
             {"email":  {"$regex": search, "$options": "i"}},
         ]
         if search.isdigit():

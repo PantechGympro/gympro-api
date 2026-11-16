@@ -85,7 +85,7 @@ def _resumen_items(items):
 
 def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, items,
                                  total, metodo, fecha_recogida, hora_recogida,
-                                 id_entrenador_pg=None):
+                                 id_entrenador_pg=None, estado_pago=None):
     """
     HU-39 AC2/AC3: avisa al propietario, a los recepcionistas y al
     entrenador asignado del miembro (si tiene uno) de una compra pendiente
@@ -102,6 +102,15 @@ def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, ite
         f"\u2014 ${float(total):.2f} ({metodo}). Pasara a recogerlo el {fecha_fmt} "
         f"a las {hora_recogida}."
     )
+    # nov/2026: si eligio pagar en efectivo al recoger, el dinero no se ha
+    # cobrado todavia -- se lo advertimos a quien reciba la notificacion.
+    if estado_pago == "pendiente":
+        mensaje += (
+            f" Pago PENDIENTE: cobra ${float(total):.2f} en efectivo antes de "
+            f"entregarle el producto."
+        )
+
+    titulo = "Producto por entregar y cobrar" if estado_pago == "pendiente" else "Producto por entregar"
 
     destinatarios_pg = set()
     try:
@@ -136,7 +145,7 @@ def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, ite
                 id_usuario_pg=uid,
                 id_gimnasio_pg=id_gimnasio,
                 tipo="compra_pendiente_entrega",
-                titulo="Producto por entregar",
+                titulo=titulo,
                 mensaje=mensaje,
                 referencia_tipo="venta",
                 referencia_id=venta_id,
@@ -156,7 +165,7 @@ def registrar_venta():
       {
         "items": [{"id": int, "nombre": str, "precio": float, "qty": int, "categoria": str}],
         "total": float,
-        "metodo_pago": "Efectivo" | "Tarjeta"
+        "metodo_pago": "Efectivo" | "Tarjeta" | "Transferencia" | "TotalPass"
       }
     """
     try:
@@ -171,7 +180,10 @@ def registrar_venta():
         if not items:
             return jsonify({"error": "El carrito está vacío"}), 400
 
-        if metodo not in ("Efectivo", "Tarjeta", "Transferencia"):
+        # TotalPass (nov/2026): solo una etiqueta manual del staff -- marca que
+        # la visita/venta la cubre el convenio TotalPass, para poder reportarlo
+        # despues. No valida nada contra TotalPass ni requiere referencia.
+        if metodo not in ("Efectivo", "Tarjeta", "Transferencia", "TotalPass"):
             return jsonify({"error": "Método de pago inválido"}), 400
 
         # Transferencia: la referencia (folio o clave de rastreo) es obligatoria
@@ -205,22 +217,24 @@ def registrar_venta():
                 miembro_doc = None
         else:
             # POS de staff (owner/administrador/recepcionista/entrenador): el
-            # miembro es obligatorio -- una venta sin miembro asociado nunca
-            # cuadra en su historial de compras ni en los reportes del negocio.
+            # miembro es OPCIONAL (pedido del gym, nov/2026 -- "cobrar visita"
+            # y otras ventas de mostrador a quien no esta registrado no deben
+            # exigir elegir un miembro que no existe). Si se manda uno, se
+            # valida y se asocia igual que antes; si no se manda, la venta
+            # queda sin miembro asociado (nombre_miembro puede ir vacio).
             id_miembro_raw = data.get("id_miembro")
-            if id_miembro_raw is None or id_miembro_raw == "":
-                return jsonify({"error": "Selecciona un miembro para esta venta"}), 400
-            try:
-                id_miembro_pg = int(id_miembro_raw)
-                miembro_doc = db.miembros.find_one({"id_usuario_pg": id_miembro_pg})
-            except (ValueError, TypeError):
-                # Puede venir ya como ObjectId string (POS de admin)
+            if id_miembro_raw is not None and id_miembro_raw != "":
                 try:
-                    miembro_doc = db.miembros.find_one({"_id": ObjectId(str(id_miembro_raw))})
-                except Exception:
-                    miembro_doc = None
-            if not miembro_doc:
-                return jsonify({"error": "Miembro no encontrado"}), 404
+                    id_miembro_pg = int(id_miembro_raw)
+                    miembro_doc = db.miembros.find_one({"id_usuario_pg": id_miembro_pg})
+                except (ValueError, TypeError):
+                    # Puede venir ya como ObjectId string (POS de admin)
+                    try:
+                        miembro_doc = db.miembros.find_one({"_id": ObjectId(str(id_miembro_raw))})
+                    except Exception:
+                        miembro_doc = None
+                if not miembro_doc:
+                    return jsonify({"error": "Miembro no encontrado"}), 404
 
         if miembro_doc:
             id_miembro_oid = miembro_doc["_id"]
@@ -264,6 +278,12 @@ def registrar_venta():
             "estado_entrega": "pendiente" if (fecha_recogida and hora_recogida) else None,
             "fecha_recogida": fecha_recogida or None,
             "hora_recogida":  hora_recogida or None,
+            # nov/2026: pago pendiente cuando el propio miembro elige pagar en
+            # efectivo al recoger -- no hay cobro real hasta que pasa por
+            # recepcion. Si cobra el staff en mostrador, o si ya paso por una
+            # pasarela (ver _aplicar_venta en pagos_online.py), el pago ya
+            # esta hecho al crearse la venta.
+            "estado_pago":    "pendiente" if (es_compra_miembro and metodo == "Efectivo") else "pagado",
         }
         result = db.ventas.insert_one(doc)
 
@@ -314,6 +334,7 @@ def registrar_venta():
                     items=items, total=doc["total"], metodo=metodo,
                     fecha_recogida=doc["fecha_recogida"], hora_recogida=doc["hora_recogida"],
                     id_entrenador_pg=_id_entrenador_pg,
+                    estado_pago=doc.get("estado_pago"),
                 )
             except Exception as e:
                 print(f"[ventas] Error notificando compra pendiente: {e}")
@@ -358,6 +379,7 @@ def registrar_venta():
             "nombre_miembro": doc["nombre_miembro"],
             "referencia":     doc["referencia"],
             "estado_entrega": doc.get("estado_entrega"),
+            "estado_pago":    doc.get("estado_pago"),
             "fecha_recogida": doc.get("fecha_recogida"),
             "hora_recogida":  doc.get("hora_recogida"),
         }), 201
@@ -460,6 +482,7 @@ def listar_ventas():
                 "fecha":          v["fecha"].isoformat() if isinstance(v.get("fecha"), datetime) else str(v.get("fecha")),
                 "nombre_miembro": v.get("nombre_miembro", ""),
                 "estado_entrega": v.get("estado_entrega"),
+                "estado_pago":    v.get("estado_pago"),
                 "fecha_recogida": v.get("fecha_recogida"),
                 "hora_recogida":  v.get("hora_recogida"),
             })
@@ -521,6 +544,7 @@ def listar_pendientes_entrega():
                 "items":          v.get("items", []),
                 "total":          v.get("total", 0),
                 "metodo_pago":    v.get("metodo_pago"),
+                "estado_pago":    v.get("estado_pago"),
                 "fecha_recogida": fecha_v,
                 "hora_recogida":  hora_v,
                 "vencida":        vencida,
@@ -567,16 +591,26 @@ def marcar_entregada(venta_id):
             id_actor = None
         nombre_actor = claims.get("nombre") or "Personal del gimnasio"
 
+        # nov/2026: si el pago en efectivo seguia pendiente, entregar el
+        # producto es tambien el momento en que recepcion cobra -- se cierran
+        # entrega y pago en la misma accion, sin pantalla aparte.
+        pago_estaba_pendiente = venta.get("estado_pago") == "pendiente"
+
         ahora = datetime.now(timezone.utc)
-        db.ventas.update_one(
-            {"_id": oid},
-            {"$set": {
-                "estado_entrega":       "entregado",
-                "entregado_por_pg":     id_actor,
-                "entregado_por_nombre": nombre_actor,
-                "entregado_en":         ahora,
-            }},
-        )
+        cambios = {
+            "estado_entrega":       "entregado",
+            "entregado_por_pg":     id_actor,
+            "entregado_por_nombre": nombre_actor,
+            "entregado_en":         ahora,
+        }
+        if pago_estaba_pendiente:
+            cambios.update({
+                "estado_pago":        "pagado",
+                "cobrado_por_pg":     id_actor,
+                "cobrado_por_nombre": nombre_actor,
+                "pagado_en":          ahora,
+            })
+        db.ventas.update_one({"_id": oid}, {"$set": cambios})
 
         # AC6: confirmación de entrega al miembro.
         id_miembro_pg = venta.get("id_miembro_pg")
@@ -599,16 +633,21 @@ def marcar_entregada(venta_id):
             registrar_evento_transaccion(
                 "pos.venta_entregada",
                 id_usuario_actor=id_actor, id_gimnasio=gym_id,
-                detalle={"venta_id": venta_id, "entregado_por": nombre_actor},
+                detalle={
+                    "venta_id": venta_id, "entregado_por": nombre_actor,
+                    "cobro_efectivo_cerrado": pago_estaba_pendiente,
+                },
             )
         except Exception as e:
             print(f"[ventas] No se pudo registrar bitácora de entrega: {e}")
 
         return jsonify({
-            "ok":              True,
-            "estado_entrega":  "entregado",
-            "entregado_por":   nombre_actor,
-            "entregado_en":    ahora.isoformat(),
+            "ok":                     True,
+            "estado_entrega":         "entregado",
+            "estado_pago":            "pagado" if pago_estaba_pendiente else venta.get("estado_pago"),
+            "cobro_efectivo_cerrado": pago_estaba_pendiente,
+            "entregado_por":          nombre_actor,
+            "entregado_en":           ahora.isoformat(),
         }), 200
 
     except Exception as e:

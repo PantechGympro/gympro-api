@@ -764,6 +764,9 @@ def _aplicar_venta(tx: TransaccionPago, meta: dict) -> None:
         "estado_entrega": "pendiente" if (fecha_recogida and hora_recogida) else None,
         "fecha_recogida": fecha_recogida,
         "hora_recogida":  hora_recogida,
+        # nov/2026: pago siempre confirmado aqui -- esta funcion solo se
+        # llama cuando la pasarela (PayPal/Mercado Pago) ya aprobo el cobro.
+        "estado_pago":    "pagado",
     }
     _result_venta = mdb.ventas.insert_one(venta)
 

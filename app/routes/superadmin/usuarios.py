@@ -20,6 +20,7 @@ from app.models.pg.rol import Rol
 from app.utils.security import require_role
 from app.utils.alcance import registrar_evento
 from app.constants.roles import normalizar_rol, ROL_SUPERADMIN, ROL_PROPIETARIO, ROL_MIEMBRO, ROL_ENTRENADOR
+from app.utils.busqueda import normalizar_columna
 
 usuarios_admin_bp = Blueprint("usuarios_admin", __name__)
 
@@ -66,13 +67,17 @@ def listar_usuarios():
     if activo_param is not None:
         query = query.filter(Usuario.activo == (activo_param.lower() == "true"))
     if q_param:
+        # SCRUM-105: nombre insensible a mayusculas/acentos (normalizar_columna);
+        # el email queda fuera de alcance a proposito (identificador tecnico).
+        # Tambien se busca por ID exacto cuando el texto son solo digitos.
         like = f"%{q_param}%"
-        query = query.filter(
-            db.or_(
-                Usuario.nombre.ilike(like),
-                Usuario.email.ilike(like),
-            )
-        )
+        condiciones_usuario = [
+            normalizar_columna(Usuario.nombre).ilike(normalizar_columna(like)),
+            Usuario.email.ilike(like),
+        ]
+        if q_param.isdigit():
+            condiciones_usuario.append(Usuario.id == int(q_param))
+        query = query.filter(db.or_(*condiciones_usuario))
 
     query    = query.order_by(Usuario.created_at.desc())
     paginado = query.paginate(page=page, per_page=per_page, error_out=False)

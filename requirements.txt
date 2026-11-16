@@ -32,6 +32,9 @@ numpy==1.26.4          # álgebra lineal
 pandas==2.2.3
 openpyxl==3.1.5        # motor Excel para pandas ExcelWriter (engine="openpyxl")
 
+# ── Almacenamiento de objetos (imagenes/video — MinIO, S3-compatible) ───────
+boto3==1.35.76
+
 # ── Utilidades ────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
 fpdf2==2.8.2

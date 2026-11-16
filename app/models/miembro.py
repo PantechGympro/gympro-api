@@ -36,9 +36,17 @@ class Miembro:
 
     def to_dict(self):
         db = get_db()
-        # Solo retornar foto si es base64 válida; paths legacy del filesystem se ignoran
-        fp = self.foto_perfil
-        foto_url = fp if (fp and fp.startswith("data:image")) else None
+        # nov/2026: antes solo se devolvia si era base64 (fp.startswith("data:image")) --
+        # eso tenia sentido cuando la unica forma de guardar una foto era en base64, pero
+        # desde que /api/user/profile/photo (y la movil) empezaron a guardar el archivo en
+        # disco y dejar solo el NOMBRE en foto_perfil (ver user_profile.py), este filtro
+        # borraba silenciosamente la foto de CUALQUIER miembro que la hubiera cambiado por
+        # ese flujo -- quedaba null en /api/miembros aunque la foto existiera y se viera
+        # bien en el propio perfil del miembro. El cliente (web/movil) ya sabe distinguir
+        # un data URI de un nombre de archivo y construir la URL correcta en cada caso
+        # (ver Avatar en MiembrosDashboard.jsx / useAuthedImage en la app), asi que aqui
+        # basta con no inventar ni filtrar nada.
+        foto_url = self.foto_perfil or None
 
         # --- Obtener datos del Usuario (multi-path) ---
         # Prioridad 1: campos desnormalizados del Sprint 2 (nombre/email en el doc)
