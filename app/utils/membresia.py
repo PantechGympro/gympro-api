@@ -92,6 +92,26 @@ def evaluar_membresia(db, id_miembro, ahora=None):
     """
     ahora = ahora or datetime.now(timezone.utc)
     docs = list(db.miembro_membresia.find({"id_miembro": id_miembro}))
+    return _evaluar_docs(docs, ahora)
+
+
+def evaluar_membresias_lote(db, ids_miembros, ahora=None):
+    """
+    Igual que `evaluar_membresia` pero para varios miembros con UNA sola
+    consulta (listados paginados: evita el N+1). Devuelve {id_miembro: estado}
+    con una entrada por cada id recibido, también para quien no tiene docs.
+    """
+    ahora = ahora or datetime.now(timezone.utc)
+    ids = list(ids_miembros)
+    por_miembro = {i: [] for i in ids}
+    if ids:
+        for d in db.miembro_membresia.find({"id_miembro": {"$in": ids}}):
+            por_miembro.setdefault(d["id_miembro"], []).append(d)
+    return {i: _evaluar_docs(docs, ahora) for i, docs in por_miembro.items()}
+
+
+def _evaluar_docs(docs, ahora):
+    """Regla de vigencia sobre los documentos de membresía de UN miembro."""
     if not docs:
         return {"vigente": False, "estado": "sin_membresia", "codigo": "sin_membresia", "doc": None,
                 "fecha_fin": None, "fecha_fin_local": None, "dias_restantes": None,

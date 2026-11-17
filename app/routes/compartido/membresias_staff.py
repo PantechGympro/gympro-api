@@ -4,7 +4,7 @@ routes/compartido/membresias_staff.py
 Dos funciones de operación diaria para el personal del gimnasio:
 
   GET  /api/membresias/por-vencer          — Propietario, Administrador, Recepcionista
-  GET  /api/checkins/manual/buscar?q=...   — Propietario, Administrador
+  GET  /api/checkins/manual/buscar        — Propietario, Administrador (lista paginada; ?q= filtra)
   POST /api/checkins/manual                — Propietario, Administrador
 
 Decisiones de diseño
@@ -42,11 +42,12 @@ ROLES_VENCIMIENTOS = (ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA, ROL
 ROLES_CHECKIN_MANUAL = (ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN)
 
 DIAS_DEFECTO, DIAS_MAX = 7, 60
+PER_PAGE_DEFECTO, PER_PAGE_MAX = 10, 50
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-from app.utils.membresia import a_utc as _a_utc, evaluar_membresia  # noqa: E402  (fuente única, ver utils/membresia.py)
+from app.utils.membresia import a_utc as _a_utc, evaluar_membresia, evaluar_membresias_lote  # noqa: E402  (fuente única, ver utils/membresia.py)
 
 
 def _formato_local(dt_utc):
@@ -170,33 +171,52 @@ def membresias_por_vencer():
 @require_role(*ROLES_CHECKIN_MANUAL)
 def buscar_para_checkin():
     """
-    Búsqueda rápida por nombre, correo, teléfono o número de socio. Devuelve
-    como máximo 10 coincidencias, con el estado de membresía ya calculado para
-    que la pantalla avise ANTES de intentar el check-in.
+    Lista de miembros para registrar entradas, con el estado de membresía ya
+    calculado para que la pantalla avise ANTES de intentar el check-in.
+
+    Query:
+      q         (opcional) nombre, correo, teléfono o número de socio. Con 2+
+                caracteres (o un número de socio) filtra; sin él devuelve el
+                padrón completo del gimnasio, ordenado por nombre, para que la
+                pantalla nunca se vea vacía.
+      page      (int)  — default 1.
+      per_page  (int)  — default 10, máximo 50.
+
+    Respuesta: { miembros, total, page, pages, per_page }.
     """
     q = (request.args.get("q") or "").strip()
-    if len(q) < 2:
-        return jsonify({"miembros": []}), 200
+    page = max(1, request.args.get("page", 1, type=int) or 1)
+    per_page = min(PER_PAGE_MAX, max(1, request.args.get("per_page", PER_PAGE_DEFECTO, type=int) or PER_PAGE_DEFECTO))
+
+    filtro = {"id_gimnasio_pg": g.tenant_id, "estado": "Activo"}
+    if len(q) >= 2 or q.isdigit():
+        condiciones = [
+            {"nombre":   {"$regex": patron_insensible(q), "$options": "i"}},
+            {"email":    {"$regex": re.escape(q), "$options": "i"}},
+            {"telefono": {"$regex": re.escape(q)}},
+        ]
+        if q.isdigit():
+            condiciones.append({"id_usuario_pg": int(q)})
+        filtro["$or"] = condiciones
+    elif q:
+        # Una sola letra no es una búsqueda útil: no devolvemos nada y la
+        # pantalla pide escribir un poco más.
+        return jsonify({"miembros": [], "total": 0, "page": 1, "pages": 0, "per_page": per_page}), 200
 
     db = get_db()
-    condiciones = [
-        {"nombre":   {"$regex": patron_insensible(q), "$options": "i"}},
-        {"email":    {"$regex": re.escape(q), "$options": "i"}},
-        {"telefono": {"$regex": re.escape(q)}},
-    ]
-    if q.isdigit():
-        condiciones.append({"id_usuario_pg": int(q)})
-
+    total = db.miembros.count_documents(filtro)
     miembros = list(db.miembros.find(
-        {"id_gimnasio_pg": g.tenant_id, "estado": "Activo", "$or": condiciones},
+        filtro,
         {"nombre": 1, "email": 1, "telefono": 1, "id_usuario_pg": 1, "foto_perfil": 1},
-    ).sort("nombre", 1).limit(10))
+    ).sort([("nombre", 1), ("_id", 1)]).skip((page - 1) * per_page).limit(per_page))
 
     ahora = datetime.now(timezone.utc)
+    estados = evaluar_membresias_lote(db, [m["_id"] for m in miembros], ahora)
     resultado = []
     for m in miembros:
-        mem, _motivo = _membresia_vigente(db, m["_id"])
-        fin = _a_utc(mem.get("fecha_fin")) if mem else None
+        est = estados[m["_id"]]
+        mem = est["doc"]
+        fin = est["fecha_fin"]
         resultado.append({
             "id":              str(m["_id"]),
             "id_usuario_pg":   m.get("id_usuario_pg"),
@@ -205,10 +225,13 @@ def buscar_para_checkin():
             "telefono":        m.get("telefono", ""),
             "foto_perfil":     m.get("foto_perfil"),
             "tipo_membresia":  _nombre_tipo(mem) if mem else None,
-            "estado":          _estado(fin, ahora),
+            "estado":          est["estado"],   # misma regla que el guard del POST
             "fecha_fin_local": _formato_local(fin),
         })
-    return jsonify({"miembros": resultado}), 200
+    return jsonify({
+        "miembros": resultado, "total": total, "page": page,
+        "pages": -(-total // per_page), "per_page": per_page,
+    }), 200
 
 
 # Textos que verá la persona de staff (el `codigo` es el contrato estable).
