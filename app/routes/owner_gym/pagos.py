@@ -6,6 +6,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import math
 
+from app.utils.pagos_pendientes import FILTRO_VENTA_COBRADA, cancelar_renovaciones_abiertas
 from app.mongo import get_db
 from app.models.pago import Pago
 from app.models.miembro_membresia import MiembroMembresia
@@ -158,6 +159,16 @@ def registrar_pago():
             estado="Activa"
         )
         mm.save()
+
+        # Si el miembro había pedido renovar desde su cuenta (pago por confirmar),
+        # este cobro es el que vale: se cancela esa solicitud para no dejar nada
+        # abierto ni poder activar/cobrar dos veces. No-bloqueante.
+        try:
+            cancelar_renovaciones_abiertas(
+                mdb, gym_id, miembro._id, "Pago registrado en recepción",
+                id_actor=int(get_jwt_identity()))
+        except Exception as e:
+            print(f"[pagos] No se pudo cerrar la solicitud pendiente: {e}")
 
         # -- Recibo por correo al miembro Y al propietario, mas bitacora de
         #    seguridad (misma peticion que ya cubre ventas.py: una renovacion
@@ -579,7 +590,7 @@ def listar_todos_movimientos():
 
         elif tipo == "venta":
             # Solo ventas POS (con filtro opcional de categoría)
-            venta_match: dict = {"id_gimnasio": gym_id}
+            venta_match: dict = {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}
             if categoria:
                 venta_match["items.categoria"] = categoria
 
@@ -610,7 +621,7 @@ def listar_todos_movimientos():
                 {"$unionWith": {
                     "coll": "ventas",
                     "pipeline": [
-                        {"$match": {"id_gimnasio": gym_id}},
+                        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
                         {"$addFields": {
                             "_tipo":     {"$literal": "venta"},
                             "_fecha_dt": {"$toDate": "$fecha"},

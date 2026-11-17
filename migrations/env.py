@@ -33,10 +33,9 @@ from app.models.pg.tipo_clase          import TipoClase          # noqa: F401
 
 config = context.config
 
-postgres_uri = os.getenv(
-    "POSTGRES_URI",
-    "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
-)
+postgres_uri = os.getenv("POSTGRES_URI")
+if not postgres_uri:
+    raise RuntimeError("Falta la variable de entorno POSTGRES_URI (revisa tu .env).")
 config.set_main_option("sqlalchemy.url", postgres_uri)
 
 if config.config_file_name is not None:

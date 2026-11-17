@@ -77,7 +77,7 @@ from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.utils.tenant import require_tenant
-from app.utils.security import require_role
+from app.utils.security import require_role, require_funcion_plan
 from app.utils.alcance import registrar_evento, usuario_propietario_de
 from app.utils.crypto import cifrar_dict, descifrar_dict, enmascarar, crypto_disponible
 from app.utils.email_remitentes import remitente, correo_contacto
@@ -450,6 +450,7 @@ def listar_pasarelas():
 @pasarelas_bp.route("/<proveedor>", methods=["PUT"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def guardar_pasarela(proveedor):
     if not _puede_escribir(get_jwt()):
         return jsonify({"msg": "Solo el propietario puede configurar la cuenta de cobro"}), 403
@@ -462,6 +463,7 @@ def guardar_pasarela(proveedor):
 @pasarelas_bp.route("/<proveedor>/probar", methods=["POST"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def probar_pasarela(proveedor):
     if not _puede_escribir(get_jwt()):
         return jsonify({"msg": "Solo el propietario puede probar los cobros"}), 403
@@ -474,6 +476,7 @@ def probar_pasarela(proveedor):
 @pasarelas_bp.route("/<proveedor>/toggle", methods=["PATCH"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def toggle_pasarela(proveedor):
     if not _puede_escribir(get_jwt()):
         return jsonify({"msg": "Solo el propietario puede cambiar los cobros"}), 403
@@ -515,6 +518,7 @@ def listar_pasarelas_sucursal(id_gimnasio):
 @jwt_required()
 @require_role(ROL_PROPIETARIO)
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def guardar_pasarela_sucursal(id_gimnasio, proveedor):
     if not _sucursal_de_mi_organizacion(id_gimnasio):
         return jsonify({"msg": "Sucursal no encontrada"}), 404
@@ -528,6 +532,7 @@ def guardar_pasarela_sucursal(id_gimnasio, proveedor):
 @jwt_required()
 @require_role(ROL_PROPIETARIO)
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def probar_pasarela_sucursal(id_gimnasio, proveedor):
     if not _sucursal_de_mi_organizacion(id_gimnasio):
         return jsonify({"msg": "Sucursal no encontrada"}), 404
@@ -541,6 +546,7 @@ def probar_pasarela_sucursal(id_gimnasio, proveedor):
 @jwt_required()
 @require_role(ROL_PROPIETARIO)
 @require_tenant
+@require_funcion_plan("cobros_en_linea")
 def toggle_pasarela_sucursal(id_gimnasio, proveedor):
     if not _sucursal_de_mi_organizacion(id_gimnasio):
         return jsonify({"msg": "Sucursal no encontrada"}), 404

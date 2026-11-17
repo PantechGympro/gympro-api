@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from statistics import median
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
+from app.utils.security import require_role, require_funcion_plan
+from app.routes.ia.spark_config import ROLES_ANALITICA_NEGOCIO
 
 spark_negocio_bp = Blueprint("spark_negocio", __name__)
 
@@ -327,6 +329,8 @@ def _run_cached(prefix, fn, gym_id):
 
 @spark_negocio_bp.route("/api/analytics/heatmap-asistencia", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
+@require_funcion_plan("analiticas_ia")
 def heatmap_asistencia():
     try:
         gym_id = get_jwt().get("id_gimnasio")
@@ -338,6 +342,8 @@ def heatmap_asistencia():
 
 @spark_negocio_bp.route("/api/analytics/rfm", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
+@require_funcion_plan("analiticas_ia")
 def rfm_analytics():
     try:
         gym_id = get_jwt().get("id_gimnasio")
@@ -349,6 +355,8 @@ def rfm_analytics():
 
 @spark_negocio_bp.route("/api/analytics/fuerza", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
+@require_funcion_plan("analiticas_ia")
 def fuerza_analytics():
     try:
         gym_id = get_jwt().get("id_gimnasio")

@@ -178,7 +178,7 @@ def restore_pg_dump(file_path: str, clean: bool = False) -> dict:
     pg_host     = os.getenv("POSTGRES_HOST",     "postgres")
     pg_port     = os.getenv("POSTGRES_PORT",     "5432")
     pg_user     = os.getenv("POSTGRES_USER",     "gymuser")
-    pg_password = os.getenv("POSTGRES_PASSWORD", "gympassword")
+    pg_password = os.getenv("POSTGRES_PASSWORD", "")
     pg_db       = os.getenv("POSTGRES_DB",       "gymprodb")
 
     env = os.environ.copy()

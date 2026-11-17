@@ -13,6 +13,10 @@ from app.utils.timezone import local_now_naive
 from app.utils.horarios_gym import horarios_desde_configuracion, DIAS_SEMANA
 from app.models.pg.gimnasio import Gimnasio
 from app.routes.compartido.notificaciones import crear_notificacion
+from app.utils.pagos_pendientes import (
+    METODOS_MANUALES_MIEMBRO_VENTA, PAGO_PENDIENTE, PAGO_PAGADO,
+    FILTRO_VENTA_COBRADA, ajustar_stock, confirmar_venta, puede_confirmar_pago,
+)
 from app.constants.roles import (
     ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA, ROL_ENTRENADOR,
     ROL_SUPERADMIN, normalizar_rol,
@@ -85,7 +89,7 @@ def _resumen_items(items):
 
 def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, items,
                                  total, metodo, fecha_recogida, hora_recogida,
-                                 id_entrenador_pg=None, estado_pago=None):
+                                 id_entrenador_pg=None, estado_pago=None, referencia=None):
     """
     HU-39 AC2/AC3: avisa al propietario, a los recepcionistas y al
     entrenador asignado del miembro (si tiene uno) de una compra pendiente
@@ -102,15 +106,20 @@ def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, ite
         f"\u2014 ${float(total):.2f} ({metodo}). Pasara a recogerlo el {fecha_fmt} "
         f"a las {hora_recogida}."
     )
-    # nov/2026: si eligio pagar en efectivo al recoger, el dinero no se ha
-    # cobrado todavia -- se lo advertimos a quien reciba la notificacion.
-    if estado_pago == "pendiente":
-        mensaje += (
-            f" Pago PENDIENTE: cobra ${float(total):.2f} en efectivo antes de "
-            f"entregarle el producto."
-        )
+    # nov/2026: el pago que declara el propio miembro (efectivo o
+    # transferencia) no esta verificado -- se lo advertimos a quien reciba el aviso.
+    if estado_pago == PAGO_PENDIENTE:
+        if metodo == "Efectivo":
+            mensaje += f" Pago PENDIENTE: cobra ${float(total):.2f} en efectivo antes de entregarle el producto."
+        elif metodo == "Transferencia":
+            mensaje += (
+                f" Pago PENDIENTE: verifica la transferencia de ${float(total):.2f}"
+                f"{f' (ref. {referencia})' if referencia else ''} en el banco y confirmala antes de entregar."
+            )
+        else:
+            mensaje += f" Pago PENDIENTE: verifica que {metodo} cubra esta compra y confirmalo antes de entregar."
 
-    titulo = "Producto por entregar y cobrar" if estado_pago == "pendiente" else "Producto por entregar"
+    titulo = "Producto por entregar y cobrar" if estado_pago == PAGO_PENDIENTE else "Producto por entregar"
 
     destinatarios_pg = set()
     try:
@@ -192,6 +201,18 @@ def registrar_venta():
         referencia = (data.get("referencia") or "").strip()
         if metodo == "Transferencia" and not referencia:
             return jsonify({"error": "Falta la referencia de la transferencia"}), 400
+
+        # Un miembro solo puede DECLARAR pagos manuales; quedan pendientes hasta que
+        # el personal los confirme. "Tarjeta" desde la cuenta del miembro no cobra
+        # nada (las pasarelas entran por /api/pagos/checkout y su webhook), asi que
+        # aceptarla dejaria marcar como pagada una compra que nadie pago.
+        if (get_jwt().get("role") or "").lower() in ("user", "miembro") \
+                and metodo not in METODOS_MANUALES_MIEMBRO_VENTA:
+            return jsonify({
+                "error": ("TotalPass solo lo registra el personal en mostrador."
+                          if metodo == "TotalPass"
+                          else "Para pagar con tarjeta, PayPal o Mercado Pago usa el pago en línea."),
+            }), 400
 
         # ── Resolver comprador ────────────────────────────────────────────────
         # El historial del miembro (GET /api/ventas) filtra por el ObjectId del
@@ -278,48 +299,19 @@ def registrar_venta():
             "estado_entrega": "pendiente" if (fecha_recogida and hora_recogida) else None,
             "fecha_recogida": fecha_recogida or None,
             "hora_recogida":  hora_recogida or None,
-            # nov/2026: pago pendiente cuando el propio miembro elige pagar en
-            # efectivo al recoger -- no hay cobro real hasta que pasa por
-            # recepcion. Si cobra el staff en mostrador, o si ya paso por una
-            # pasarela (ver _aplicar_venta en pagos_online.py), el pago ya
-            # esta hecho al crearse la venta.
-            "estado_pago":    "pendiente" if (es_compra_miembro and metodo == "Efectivo") else "pagado",
+            # nov/2026: todo pago que declara el propio miembro (efectivo,
+            # transferencia) nace PENDIENTE hasta que recepcion /
+            # administrador / propietario lo confirma (ver confirmaciones_pago.py).
+            # Si cobra el staff en mostrador, o si ya paso por una pasarela (ver
+            # _aplicar_venta en pagos_online.py), el pago ya esta hecho al crear
+            # la venta.
+            "estado_pago":    PAGO_PENDIENTE if es_compra_miembro else PAGO_PAGADO,
         }
         result = db.ventas.insert_one(doc)
 
         # ── Decrementar stock de cada producto vendido ────────────────────────
-        # Usa pipeline de actualización para que stock nunca baje de 0.
-        # Si el artículo es un COMBO, no se descuenta él mismo (no lleva stock
-        # propio): se descuenta el stock de cada componente que lo integra,
-        # multiplicado por la cantidad de combos vendidos.
-        for item in items:
-            try:
-                oid = ObjectId(str(item["id"]))
-                qty = max(1, int(item.get("qty", 1)))
-
-                prod = db.productos.find_one(
-                    {"_id": oid, "id_gimnasio": id_gimnasio},
-                    {"es_combo": 1, "items_combo": 1},
-                )
-
-                if prod and prod.get("es_combo"):
-                    for comp in (prod.get("items_combo") or []):
-                        try:
-                            comp_oid = ObjectId(str(comp["id_producto"]))
-                            comp_qty = max(1, int(comp.get("cantidad", 1))) * qty
-                            db.productos.update_one(
-                                {"_id": comp_oid, "id_gimnasio": id_gimnasio},
-                                [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", comp_qty]}]}}}]
-                            )
-                        except Exception:
-                            continue
-                else:
-                    db.productos.update_one(
-                        {"_id": oid, "id_gimnasio": id_gimnasio},
-                        [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", qty]}]}}}]
-                    )
-            except Exception:
-                pass  # no-bloqueante: fallo de stock no cancela la venta
+        # Si se rechaza el pago pendiente, el mismo helper lo devuelve al inventario.
+        ajustar_stock(db, id_gimnasio, items, -1)
 
         venta_id  = str(result.inserted_id)
         venta_num = venta_id[-8:].upper()
@@ -335,6 +327,7 @@ def registrar_venta():
                     fecha_recogida=doc["fecha_recogida"], hora_recogida=doc["hora_recogida"],
                     id_entrenador_pg=_id_entrenador_pg,
                     estado_pago=doc.get("estado_pago"),
+                    referencia=referencia,
                 )
             except Exception as e:
                 print(f"[ventas] Error notificando compra pendiente: {e}")
@@ -343,17 +336,20 @@ def registrar_venta():
         # SCRUM-224+: antes solo se le avisaba al miembro (ver _send_ticket_email,
         # mas abajo en este archivo, ahora reemplazada por utils/recibos.py, que
         # comparte la plantilla con las renovaciones de membresia).
-        try:
-            enviar_recibo_venta(
-                id_gimnasio, venta_num=venta_num,
-                fecha_str=doc["fecha"].strftime("%d/%m/%Y %H:%M"),
-                items=items, total=doc["total"], metodo_pago=metodo,
-                nombre_miembro=doc.get("nombre_miembro", ""),
-                email_miembro=(miembro_doc.get("email") if miembro_doc else None),
-                referencia_pasarela=doc.get("referencia") or None,
-            )
-        except Exception as e:
-            print(f"[ventas] Error enviando recibo: {e}")
+        # Con el pago pendiente no hay nada que certificar: el recibo sale al confirmarlo
+        # (confirmar_venta en utils/pagos_pendientes.py).
+        if doc["estado_pago"] == PAGO_PAGADO:
+            try:
+                enviar_recibo_venta(
+                    id_gimnasio, venta_num=venta_num,
+                    fecha_str=doc["fecha"].strftime("%d/%m/%Y %H:%M"),
+                    items=items, total=doc["total"], metodo_pago=metodo,
+                    nombre_miembro=doc.get("nombre_miembro", ""),
+                    email_miembro=(miembro_doc.get("email") if miembro_doc else None),
+                    referencia_pasarela=doc.get("referencia") or None,
+                )
+            except Exception as e:
+                print(f"[ventas] Error enviando recibo: {e}")
 
         # ── Bitacora de seguridad: trazabilidad de la transaccion ──────────────
         try:
@@ -453,8 +449,10 @@ def listar_ventas():
 
         # Importe de todo el filtro, no solo de la página: es lo que la pantalla
         # muestra como total del periodo.
+        # Solo lo cobrado: una compra pendiente de confirmar o rechazada se lista
+        # (con su estado_pago) pero no suma al total del periodo.
         agg = list(db.ventas.aggregate([
-            {"$match": filtro},
+            {"$match": {**filtro, **FILTRO_VENTA_COBRADA}},
             {"$group": {"_id": None, "suma": {"$sum": "$total"}}},
         ]))
         monto_total = float(agg[0]["suma"]) if agg and agg[0].get("suma") is not None else 0.0
@@ -545,6 +543,7 @@ def listar_pendientes_entrega():
                 "total":          v.get("total", 0),
                 "metodo_pago":    v.get("metodo_pago"),
                 "estado_pago":    v.get("estado_pago"),
+                "referencia":     v.get("referencia") or None,
                 "fecha_recogida": fecha_v,
                 "hora_recogida":  hora_v,
                 "vencida":        vencida,
@@ -564,6 +563,12 @@ def marcar_entregada(venta_id):
     """
     AC5/AC6: marca una compra pendiente como entregada, deja registrado
     quién la entregó y cuándo, y confirma la entrega al miembro.
+
+    nov/2026: si el pago que declaró el miembro sigue sin verificar (efectivo,
+    transferencia), NO se entrega hasta que Recepcionista /
+    Administrador / Propietario lo confirme. Se puede hacer en el momento enviando
+    {"confirmar_pago": true} (cobrar y entregar en una sola acción) o antes, desde
+    la bandeja "Pagos por confirmar". Un entrenador puede entregar solo lo ya pagado.
     """
     err = _require_staff()
     if err:
@@ -591,10 +596,31 @@ def marcar_entregada(venta_id):
             id_actor = None
         nombre_actor = claims.get("nombre") or "Personal del gimnasio"
 
-        # nov/2026: si el pago en efectivo seguia pendiente, entregar el
-        # producto es tambien el momento en que recepcion cobra -- se cierran
-        # entrega y pago en la misma accion, sin pantalla aparte.
-        pago_estaba_pendiente = venta.get("estado_pago") == "pendiente"
+        estado_pago = venta.get("estado_pago")
+        if estado_pago == "rechazado":
+            return jsonify({"error": "El pago de esta compra fue rechazado; no se puede entregar.",
+                            "codigo": "pago_rechazado"}), 409
+
+        pago_estaba_pendiente = estado_pago == PAGO_PENDIENTE
+        if pago_estaba_pendiente:
+            if not puede_confirmar_pago(claims):
+                return jsonify({
+                    "error": "El pago de esta compra aún no está confirmado. Solo recepción, "
+                             "administración o el propietario pueden confirmarlo.",
+                    "codigo": "pago_pendiente",
+                }), 403
+            if not (request.get_json(silent=True) or {}).get("confirmar_pago"):
+                return jsonify({
+                    "error": "El pago está pendiente. Confirma que lo recibiste para entregar.",
+                    "codigo": "pago_pendiente",
+                    "metodo_pago": venta.get("metodo_pago"),
+                    "referencia": venta.get("referencia") or None,
+                    "total": venta.get("total", 0),
+                }), 409
+            # Cobrar y entregar en una sola acción: el aviso "pago confirmado" sobra,
+            # el miembro recibe el de "producto entregado".
+            if not confirmar_venta(db, venta, id_actor, nombre_actor, notificar=False):
+                return jsonify({"error": "Esta compra ya fue resuelta por otra persona. Actualiza la lista."}), 409
 
         ahora = datetime.now(timezone.utc)
         cambios = {
@@ -603,13 +629,6 @@ def marcar_entregada(venta_id):
             "entregado_por_nombre": nombre_actor,
             "entregado_en":         ahora,
         }
-        if pago_estaba_pendiente:
-            cambios.update({
-                "estado_pago":        "pagado",
-                "cobrado_por_pg":     id_actor,
-                "cobrado_por_nombre": nombre_actor,
-                "pagado_en":          ahora,
-            })
         db.ventas.update_one({"_id": oid}, {"$set": cambios})
 
         # AC6: confirmación de entrega al miembro.
@@ -646,6 +665,7 @@ def marcar_entregada(venta_id):
             "estado_entrega":         "entregado",
             "estado_pago":            "pagado" if pago_estaba_pendiente else venta.get("estado_pago"),
             "cobro_efectivo_cerrado": pago_estaba_pendiente,
+            "pago_confirmado":        pago_estaba_pendiente,
             "entregado_por":          nombre_actor,
             "entregado_en":           ahora.isoformat(),
         }), 200

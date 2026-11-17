@@ -287,6 +287,13 @@ def toggle_staff(user_id: int):
     if not usuario or usuario.id_rol not in role_ids:
         return jsonify({"msg": "Usuario no encontrado"}), 404
 
+    # Auditoría nov/2026: activar a alguien también ocupa un cupo del plan.
+    if not usuario.activo:
+        try:
+            verificar_capacidad_staff(gym_id)
+        except LimiteDePlanExcedido as e:
+            return jsonify({"msg": str(e), "limite_plan": True}), 409
+
     usuario.activo = not usuario.activo
     db.session.commit()
     estado = "activado" if usuario.activo else "desactivado"

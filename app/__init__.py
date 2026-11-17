@@ -4,6 +4,7 @@ import os
 from .config import Config
 from .extensions import db, migrate, jwt, mail, limiter
 from .utils.tenant import init_tenant_middleware
+from .utils.errores import init_errores
 
 # Blueprints por rol
 from app.routes.owner_gym.miembros            import miembros_bp
@@ -44,6 +45,9 @@ from app.routes.entrenador.diet_routes        import diet_bp
 from app.routes.entrenador.reportes_entrenador import reportes_entrenador_bp
 from app.routes.owner_gym.suscripcion_recurrente import suscripcion_recurrente_bp
 from app.routes.recepcionista.recepcionista_routes import recepcionista_bp
+from app.routes.compartido.membresias_staff import membresias_staff_bp
+from app.routes.compartido.confirmaciones_pago import confirmaciones_pago_bp
+from app.routes.compartido.plan_estado import plan_estado_bp
 from app.routes.ia.spark_mapreduce            import spark_mapreduce_bp
 from app.routes.ia.spark_kmeans               import spark_kmeans_bp
 from app.routes.ia.spark_regresion            import spark_regresion_bp
@@ -76,6 +80,12 @@ def create_app():
     app.config.from_object(Config)
     app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 
+    # Configuración crítica obligatoria: fallar rápido y con un mensaje claro
+    # es mejor que arrancar con secretos vacíos o credenciales por defecto.
+    faltantes = [v for v in ("JWT_SECRET_KEY", "POSTGRES_URI") if not os.getenv(v)]
+    if faltantes:
+        raise RuntimeError("Faltan variables de entorno obligatorias: " + ", ".join(faltantes))
+
     from app.models.pg.rol                 import Rol                 # noqa: F401
     from app.models.pg.gimnasio            import Gimnasio            # noqa: F401
     from app.models.pg.usuario             import Usuario             # noqa: F401
@@ -94,8 +104,12 @@ def create_app():
     migrate.init_app(app, db, directory="migrations")
     jwt.init_app(app)
     mail.init_app(app)
+    from app.utils.rate_limit import configurar_proxy, registrar_manejador_429
+    configurar_proxy(app)
     limiter.init_app(app)
+    registrar_manejador_429(app)
     init_tenant_middleware(app)
+    init_errores(app)   # mensajes claros + saneado de 5xx + cabeceras (auditoría nov/2026)
 
     from .auth.routes              import auth_bp
     from .routes.compartido.health import health_bp
@@ -118,6 +132,9 @@ def create_app():
     app.register_blueprint(user_membership_bp)
     app.register_blueprint(user_dashboard_bp)
     app.register_blueprint(logros_bp)
+    app.register_blueprint(membresias_staff_bp)
+    app.register_blueprint(confirmaciones_pago_bp)
+    app.register_blueprint(plan_estado_bp)
     app.register_blueprint(spark_mapreduce_bp)
     app.register_blueprint(spark_kmeans_bp)
     app.register_blueprint(spark_regresion_bp)
@@ -203,6 +220,11 @@ def create_app():
     def serve_upload_publico(filename):
         upload_dir = "/app/storage/uploads/gimnasios_publico"
         return send_from_directory(upload_dir, filename)
+
+    # Políticas de rate limit por endpoint (tabla en utils/rate_limit.py). Va al
+    # final: necesita que ya estén registrados todos los blueprints.
+    from app.utils.rate_limit import aplicar_rate_limits
+    aplicar_rate_limits(app, limiter)
 
     init_scheduler(app)
     return app

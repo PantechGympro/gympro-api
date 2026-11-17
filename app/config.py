@@ -52,10 +52,9 @@ class Config:
     # Roles, Gimnasios, Usuarios y entidades financieras viven aquí.
     # En docker-compose este valor se sobreescribe automáticamente desde la
     # variable POSTGRES_URI inyectada por el servicio postgres.
-    SQLALCHEMY_DATABASE_URI = os.getenv(
-        "POSTGRES_URI",
-        "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
-    )
+    # Sin valor por defecto: una credencial hardcodeada en el código termina en
+    # git y en producción. Si falta, la app falla al arrancar (ver create_app).
+    SQLALCHEMY_DATABASE_URI = os.getenv("POSTGRES_URI")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # NullPool: crea una conexión nueva por request y la cierra al terminar.
     # Necesario con Gunicorn en modo fork (--worker-class sync): los workers
@@ -108,7 +107,9 @@ class Config:
     # 15 MB — permite hasta 3 imágenes base64 de ~4 MB c/u antes de encoding.
     MAX_CONTENT_LENGTH = 15 * 1024 * 1024
 
-    RATELIMIT_STORAGE_URI  = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    RATELIMIT_STORAGE_URI  = os.getenv("RATELIMIT_STORAGE_URI", os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    # Ventana móvil: evita la ráfaga doble en el borde de una ventana fija.
+    RATELIMIT_STRATEGY     = "moving-window"
     RATELIMIT_HEADERS_ENABLED = True   # Agrega X-RateLimit-* headers a las respuestas
 
     # Falla en CERRADO en producción (Actividad 09, PR-02 — M. Hernández

@@ -142,7 +142,7 @@ def init_tenant_middleware(app):
             "Petición rechazada sin inquilino resuelto: %s %s",
             request.method, request.path,
         )
-        return jsonify({"msg": "Token sin gimnasio asignado."}), 403
+        return jsonify({"msg": "Tu cuenta todavía no está ligada a un gimnasio. Pide a tu administrador que te asigne uno."}), 403
 
 
 def get_tenant_filter():

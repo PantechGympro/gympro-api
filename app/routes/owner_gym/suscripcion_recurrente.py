@@ -336,7 +336,7 @@ def cancelar_recurrente():
         return jsonify({"msg": str(exc)}), 400
 
     if not ok:
-        return jsonify({"msg": "La pasarela no pudo cancelar el acuerdo. Inténtalo de nuevo."}), 502
+        return jsonify({"msg": "El proveedor de pagos no pudo cancelar el cobro automático. Inténtalo de nuevo en unos minutos.", "publico": True}), 502
 
     sub.auto_renovar          = False
     sub.estado_recurrente     = "cancelado"

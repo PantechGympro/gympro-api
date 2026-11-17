@@ -30,18 +30,18 @@ de este script:
     Organizacion (releyendo sucursales.py se confirmó que esto ya está
     soportado por completo, no es una pendiente de HU-42 como asumía una
     versión anterior de este comentario): solo la SEDE PRINCIPAL (la
-    primera sucursal, "Centro") crea su propia Organizacion vía
+    primera sucursal, "Santa Ana Tlalpaltitlán") crea su propia Organizacion vía
     crear_organizacion_para_gimnasio() y recibe Suscripcion/FacturaSuscripcion
     y el único Usuario con rol Propietario. Las sucursales siguientes
-    (Norte, Sur) se cuelgan de esa MISMA Organizacion -- id_organizacion =
+    (Xonacatlán) se cuelgan de esa MISMA Organizacion -- id_organizacion =
     la de la sede principal, es_sucursal_principal=False -- igual que hace
     POST /sucursales en sucursales.py: una sucursal nueva NUNCA tiene su
     propia Suscripcion/FacturaSuscripcion ni su propio Propietario, hereda
     el plan (y aquí, por simplicidad, no copiamos configuración de
     pasarelas -- ese "heredar_cobro" es opcional en el endpoint real y no
     aplica a datos de prueba). Por eso PLAN_A_USAR se cambió a
-    "enterprise" (limites.max_sucursales=5): el plan "pro" solo permite 2
-    sucursales por organización, menos de las 3 que crea este script.
+    "enterprise" (limites.max_sucursales=8). Vitazone tiene 2 sucursales,
+    que también cabrían en "pro", pero la demo muestra el plan más completo.
   - Migración 019: el rol "owner_gym" se renombró a "Propietario" en la
     tabla roles (ver app/constants/roles.py) -- "owner_gym" sigue vivo solo
     como alias informal para JWTs viejos, no como fila real.
@@ -96,9 +96,10 @@ PLAN_A_USAR = "enterprise"  # uno de los ya sembrados: starter / basico / pro / 
 # verificar_capacidad_sucursal() en utils/capacidad.py: "pro" solo permite 2.
 DOMINIO_DEMO = "demo-gym.test"
 
-# Un solo Propietario administra las 3 sucursales de SUCURSALES_CFG (todas
+# Un solo Propietario administra las 2 sucursales de SUCURSALES_CFG (todas
 # bajo la MISMA Organizacion) -- ver crear_sucursal() más abajo.
-PROPIETARIO_NOMBRE = "Admin Demo Fitness"
+ORGANIZACION_NOMBRE = "Vitazone"
+PROPIETARIO_NOMBRE = "Propietario Vitazone"
 PROPIETARIO_EMAIL = "propietario@demo-gym.test"
 
 PASSWORD_ADMIN = "Admin1234!"
@@ -134,23 +135,20 @@ CLASES_GENERICAS = [
 ]
 DIETA_TIPOS = ["alta_proteina_carbos", "deficit_calorico", "personalizada"]
 
-# Config por sucursal. La primera ("Centro") es la SEDE PRINCIPAL -- la que
+# Config por sucursal. La primera ("Santa Ana Tlalpaltitlán") es la SEDE PRINCIPAL -- la que
 # crea la Organizacion, la Suscripcion y el único Propietario (ver
-# crear_sucursal()). Norte y Sur son sucursales adicionales de esa MISMA
+# crear_sucursal()). Xonacatlán es la sucursal adicional de esa MISMA
 # Organizacion, sin su propio admin ni su propia suscripción.
 SUCURSALES_CFG = [
-    {"nombre": "Demo Fitness - Centro", "email_contacto": "centro@demo-gym.test",
+    {"nombre": "Vitazone - Santa Ana Tlalpaltitlán", "email_contacto": "santaana@demo-gym.test",
      "telefono": "+52-722-100-0001",
      "gen_ratio": 0.55, "n_trainers": 2, "n_staff": 2, "n_miembros": 160, "dieta_tipo": DIETA_TIPOS[0]},
-    {"nombre": "Demo Fitness - Norte", "email_contacto": "norte@demo-gym.test",
+    {"nombre": "Vitazone - Xonacatlán", "email_contacto": "xonacatlan@demo-gym.test",
      "telefono": "+52-722-100-0002",
      "gen_ratio": 0.50, "n_trainers": 2, "n_staff": 2, "n_miembros": 160, "dieta_tipo": DIETA_TIPOS[1]},
-    {"nombre": "Demo Fitness - Sur", "email_contacto": "sur@demo-gym.test",
-     "telefono": "+52-722-100-0003",
-     "gen_ratio": 0.45, "n_trainers": 2, "n_staff": 2, "n_miembros": 160, "dieta_tipo": DIETA_TIPOS[2]},
 ]
 # Total: 1 Propietario (de la organización completa) + (2 trainers + 2 staff)
-# * 3 sucursales = 12 staff de sucursal, + 480 miembros = 493 (<=500)
+# * 2 sucursales = 8 staff de sucursal, + 320 miembros = 329
 
 MEMBRESIAS_DEMO = [
     {"nombre": "Básica", "precio": 399.0, "duracion_meses": 1, "tipo": "estandar",
@@ -245,48 +243,49 @@ PLANES_BASE = [
         "descripcion": "Plan gratuito para probar GymPro con un grupo pequeño de miembros.",
         "titulo_comercial": "Para arrancar sin costo", "orden": 0, "destacado": False,
         "caracteristicas": [
-            "Hasta 30 miembros activos", "Registro de asistencias y pagos",
-            "1 usuario administrador", "Soporte por correo electronico",
+            "Hasta 30 miembros activos", "App movil para tus miembros con check-in por QR",
+            "Registro de asistencias y pagos", "1 usuario administrador", "Soporte por correo electronico",
         ],
         "limites": {"pos": False, "pasarelas_pago": False, "analiticas_ia": False,
-                    "rutinas_ia": False, "reportes_pdf": False, "app_movil": False,
+                    "rutinas_ia": False, "reportes_pdf": False, "app_movil": True,
                     "max_staff": 1, "max_sucursales": 1},
     },
     {
-        "nombre": "basico", "precio_mensual_mxn": 64900, "precio_anual_mxn": 649000, "max_miembros": 80,
+        "nombre": "basico", "precio_mensual_mxn": 54900, "precio_anual_mxn": 549000, "max_miembros": 100,
         "descripcion": "Gestion completa del dia a dia para gimnasios en operacion.",
         "titulo_comercial": "Ideal para gimnasios pequeños", "orden": 1, "destacado": False,
         "caracteristicas": [
-            "Hasta 80 miembros activos", "Punto de venta y control de productos",
-            "Cobros en linea con PayPal y Mercado Pago", "Hasta 3 usuarios de staff",
+            "Hasta 100 miembros activos", "Punto de venta y control de productos",
+            "Cobros en linea con PayPal y Mercado Pago", "Hasta 4 usuarios de staff",
             "Reportes en PDF", "App movil para tus miembros",
             "Amplia tu limite comprando lotes de miembros adicionales",
         ],
         "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": False,
                     "rutinas_ia": False, "reportes_pdf": True, "app_movil": True,
-                    "max_staff": 3, "max_sucursales": 1},
+                    "max_staff": 4, "max_sucursales": 1},
     },
     {
-        "nombre": "pro", "precio_mensual_mxn": 139900, "precio_anual_mxn": 1399000, "max_miembros": 300,
+        "nombre": "pro", "precio_mensual_mxn": 119900, "precio_anual_mxn": 1199000, "max_miembros": 400,
         "descripcion": "Suma inteligencia de negocio y automatizacion con IA.",
         "titulo_comercial": "El mas elegido por gimnasios en crecimiento", "orden": 2, "destacado": True,
         "caracteristicas": [
-            "Hasta 300 miembros activos", "Todo lo del plan Basico",
+            "Hasta 400 miembros activos", "Todo lo del plan Basico",
             "Analiticas con IA: riesgo de abandono y clientes por valor",
             "Generacion de rutinas y dietas asistida por IA",
-            "Respaldos automaticos de tu informacion", "Hasta 10 usuarios de staff",
+            "Respaldos automaticos de tu informacion", "Hasta 12 usuarios de staff",
+            "Hasta 2 sucursales con un solo contrato",
             "Amplia tu limite comprando lotes de miembros adicionales",
         ],
         "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
                     "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
-                    "backups_automaticos": True, "max_staff": 10, "max_sucursales": 2},
+                    "backups_automaticos": True, "max_staff": 12, "max_sucursales": 2},
     },
     {
-        "nombre": "enterprise", "precio_mensual_mxn": 299900, "precio_anual_mxn": 2999000, "max_miembros": 400,
+        "nombre": "enterprise", "precio_mensual_mxn": 249900, "precio_anual_mxn": 2499000, "max_miembros": 600,
         "descripcion": "Alta capacidad por sucursal, con soporte dedicado y acuerdos de nivel de servicio.",
         "titulo_comercial": "Para cadenas y multiples sucursales", "orden": 3, "destacado": False,
         "caracteristicas": [
-            "Hasta 400 miembros y 20 staff por sucursal, hasta 5 sucursales", "Todo lo del plan Pro",
+            "Hasta 600 miembros y 30 staff por sucursal, hasta 8 sucursales", "Todo lo del plan Pro",
             "Laboratorio de Machine Learning completo", "Soporte prioritario con SLA",
             "Acompañamiento en la implementacion",
             "Amplia tu limite comprando lotes de miembros adicionales",
@@ -294,7 +293,7 @@ PLANES_BASE = [
         "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
                     "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
                     "backups_automaticos": True, "ml_lab": True, "soporte_sla": True,
-                    "max_staff": 20, "max_sucursales": 5},
+                    "max_staff": 30, "max_sucursales": 8},
     },
 ]
 
@@ -379,6 +378,12 @@ def crear_sucursal(cfg, organizacion_id=None):
     if gym is not None:
         print(f"  Ya existe '{cfg['nombre']}' (id={gym.id}) de una corrida anterior -- lo reutilizo, "
               f"no creo otra sucursal ni otro admin duplicado.")
+        if es_principal and gym.organizacion is not None:
+            # Corridas viejas dejaban la organización en "basico": con eso el
+            # demo Enterprise salía con funciones bloqueadas.
+            gym.organizacion.plan = plan.nombre
+            gym.organizacion.nombre = ORGANIZACION_NOMBRE
+            db.session.commit()
         if not es_principal and gym.id_organizacion != organizacion_id:
             # Reliquia de una corrida con el diseño anterior (una Organizacion
             # por sucursal) -- se avisa en vez de corregirlo solo, porque
@@ -405,7 +410,8 @@ def crear_sucursal(cfg, organizacion_id=None):
             # nueva quede con el mismo plan que se va a usar en las
             # sucursales que cuelguen de ella, no con el default "basico"
             # del modelo (que limitaría miembros/staff/sucursales de más).
-            crear_organizacion_para_gimnasio(gym, plan=plan.nombre)
+            org = crear_organizacion_para_gimnasio(gym, plan=plan.nombre)
+            org.nombre = ORGANIZACION_NOMBRE
         else:
             # Sucursal adicional de la MISMA organización -- nunca se llama
             # a crear_organizacion_para_gimnasio() aquí, o crearía una

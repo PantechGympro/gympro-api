@@ -18,6 +18,7 @@ Endpoints exclusivos del rol Recepcionista:
   DELETE /api/recepcionista/tasks/<id>— eliminar tarea
 """
 
+import re  # re.escape: texto de búsqueda nunca se interpreta como patrón (auditoría nov/2026)
 from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone, timedelta
@@ -234,6 +235,12 @@ def register_checkin():
     if not miembro:
         return jsonify({"error": "Miembro no encontrado en este gimnasio"}), 404
 
+    # Misma regla que el check-in manual y la app del miembro (utils/membresia.py).
+    from app.utils.membresia import evaluar_membresia, respuesta_bloqueo
+    estado_mem = evaluar_membresia(db, miembro["_id"])
+    if not estado_mem["vigente"]:
+        return respuesta_bloqueo(estado_mem, para="personal", nombre=miembro.get("nombre"))
+
     from app.utils.timezone import local_now_naive
     start, end = _today_range()
     now = local_now_naive()
@@ -353,7 +360,7 @@ def get_members():
         # el email queda fuera de alcance a proposito (identificador tecnico).
         condiciones = [
             {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
-            {"email":  {"$regex": search, "$options": "i"}},
+            {"email":  {"$regex": re.escape(search), "$options": "i"}},
         ]
         if search.isdigit():
             condiciones.append({"id_usuario_pg": int(search)})
@@ -516,11 +523,11 @@ def get_payments():
         # Buscar por concepto O por nombre de miembro (lookup inverso)
         miembro_ids = [
             m["_id"] for m in db.miembros.find(
-                {"nombre": {"$regex": q, "$options": "i"}, "id_gimnasio_pg": gym_id},
+                {"nombre": {"$regex": patron_insensible(q), "$options": "i"}, "id_gimnasio_pg": gym_id},
                 {"_id": 1},
             )
         ]
-        q_conditions = [{"concepto": {"$regex": q, "$options": "i"}}]
+        q_conditions = [{"concepto": {"$regex": re.escape(q), "$options": "i"}}]
         if miembro_ids:
             q_conditions.append({"id_miembro": {"$in": miembro_ids}})
         query["$or"] = q_conditions
@@ -569,6 +576,49 @@ def get_payments():
         "page":        page,
         "limit":       limit,
         "total_pages": max(1, -(-total_count // limit)),  # ceil division
+    }), 200
+
+
+@recepcionista_bp.route("/payments/kpis", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_payments_kpis():
+    """
+    Totales de la pantalla de Pagos, calculados en el servidor sobre TODO el
+    historial del gimnasio (no sobre la página visible).
+
+    Antes la pantalla llamaba a este endpoint y recibía 404 (no existía), el
+    error se tragaba en silencio y los tres cuadros mostraban siempre $0.
+
+    Respuesta: total_monto (suma de todo), cobrado (suma de pagos completados),
+    pendientes (cantidad), fallidos (cantidad).
+    """
+    err = _require_receptionist()
+    if err:
+        return err
+
+    # Mismos valores históricos que normaliza get_payments (el modelo guardó
+    # "Pagado"/"Pendiente"/"Fallido" en distintas épocas).
+    completados = ["completado", "Pagado", "pagado"]
+    pendientes  = ["pendiente", "Pendiente"]
+    fallidos    = ["fallido", "Fallido"]
+
+    filas = get_db().pagos.aggregate([
+        {"$match": {"id_gimnasio": g.tenant_id}},
+        {"$group": {
+            "_id": None,
+            "total_monto": {"$sum": {"$ifNull": ["$monto", 0]}},
+            "cobrado": {"$sum": {"$cond": [{"$in": ["$estado", completados]}, {"$ifNull": ["$monto", 0]}, 0]}},
+            "pendientes": {"$sum": {"$cond": [{"$in": ["$estado", pendientes]}, 1, 0]}},
+            "fallidos": {"$sum": {"$cond": [{"$in": ["$estado", fallidos]}, 1, 0]}},
+        }},
+    ])
+    r = next(filas, None) or {}
+    return jsonify({
+        "total_monto": r.get("total_monto", 0),
+        "cobrado":     r.get("cobrado", 0),
+        "pendientes":  r.get("pendientes", 0),
+        "fallidos":    r.get("fallidos", 0),
     }), 200
 
 
@@ -652,7 +702,7 @@ def create_cita():
         )
     if not miembro_doc:
         miembro_doc = db.miembros.find_one(
-            {"nombre": {"$regex": f"^{client_name}$", "$options": "i"}, "id_gimnasio_pg": gym_id},
+            {"nombre": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}, "id_gimnasio_pg": gym_id},
             {"nombre": 1, "email": 1, "id_usuario_pg": 1},
         )
 

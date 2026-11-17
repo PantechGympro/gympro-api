@@ -3,11 +3,16 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from bson.objectid import ObjectId
 from app.mongo import get_db
+from app.constants.roles import ROL_ADMINISTRADOR, ROL_PROPIETARIO, ROL_RECEPCIONISTA, ROL_SUPERADMIN
+from app.utils.security import require_role
 
 miembro_membresias_bp = Blueprint('miembro_membresias', __name__)
 
 @miembro_membresias_bp.route('/miembro-membresias/expiran', methods=['GET'])
 @jwt_required()
+# Auditoría nov/2026 (A01): antes cualquier sesión -- incluido un Miembro o un
+# Entrenador -- podía listar nombres y vencimientos de todos los miembros del gimnasio.
+@require_role(ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_RECEPCIONISTA, ROL_SUPERADMIN)
 def membresias_por_expirar():
     """
     Corrección de seguridad (hallazgo propio al inventariar endpoints para

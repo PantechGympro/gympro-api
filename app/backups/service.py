@@ -33,7 +33,7 @@ BACKUP_DIR = os.path.join(BASE_DIR, "storage", "backups")
 PG_HOST     = os.getenv("POSTGRES_HOST",     "postgres")
 PG_PORT     = os.getenv("POSTGRES_PORT",     "5432")
 PG_USER     = os.getenv("POSTGRES_USER",     "gymuser")
-PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "gympassword")
+PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 PG_DB       = os.getenv("POSTGRES_DB",       "gymprodb")
 
 LAST_FULL_BACKUP_FILE = os.path.join(BACKUP_DIR, "last_full_backup.txt")

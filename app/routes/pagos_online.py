@@ -125,6 +125,17 @@ def crear_checkout():
     descripcion = (data.get("descripcion") or "Pago GymPro").strip()
     referencia_local = str(data.get("referencia_local") or "") or None
 
+    # Plan: cobrar a miembros en línea (membresía/producto) es una función del
+    # plan del gimnasio. La suscripción SaaS y los lotes los paga el propietario
+    # a la plataforma, así que NUNCA se bloquean por plan.
+    if contexto not in _CONTEXTOS_PLATAFORMA:
+        from app.utils.capacidad import permite_funcion
+        if not permite_funcion(g.tenant_id, "cobros_en_linea"):
+            return jsonify({
+                "msg": "El cobro en línea no está incluido en el plan de este gimnasio. Puedes cobrar en recepción o pedir al propietario que mejore su plan.",
+                "funcion_requerida": "cobros_en_linea", "upgrade_requerido": True,
+            }), 402
+
     # Resolver de dónde salen las credenciales según el contexto
     try:
         if contexto in _CONTEXTOS_PLATAFORMA:
@@ -661,6 +672,15 @@ def _aplicar_membresia(tx: TransaccionPago, meta: dict) -> None:
         "referencia_pasarela": tx.referencia_pago or tx.referencia_externa,
         "id_transaccion":      tx.id,
     })
+
+    # Si ese miembro tenía una solicitud de renovación por confirmar (efectivo /
+    # transferencia), la renovación en línea ya la cubre: se cancela la solicitud.
+    try:
+        from app.utils.pagos_pendientes import cancelar_renovaciones_abiertas
+        cancelar_renovaciones_abiertas(
+            mdb, tx.id_gimnasio, miembro["_id"], "Pagaste en línea", id_actor=tx.id_usuario)
+    except Exception:
+        logger.exception("Pago %s: no se pudo cerrar la solicitud pendiente", tx.id)
 
     # -- Recibo por correo al miembro Y al propietario, mas bitacora de
     #    seguridad -- antes de esto, una renovacion pagada en linea (webhook

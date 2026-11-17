@@ -54,9 +54,12 @@ usa (vía @require_funcion_plan en utils/security.py) en vez de leer
 """
 from datetime import datetime, timezone
 
+from flask import g, has_request_context
+
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.organizacion import Organizacion
 from app.models.pg.plan_suscripcion import PlanSuscripcion
+from app.models.pg.suscripcion import Suscripcion
 from app.models.pg.complemento_capacidad import ComplementoCapacidad
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
@@ -76,28 +79,84 @@ class LimiteDePlanExcedido(Exception):
         self.actual = actual
 
 
+_ESTADOS_SUSCRIPCION_VIGENTE = ("trialing", "active")
+
+
+def _nombre_plan(valor):
+    return valor.value if hasattr(valor, "value") else valor
+
+
+def _plan_de_suscripcion(id_organizacion):
+    """
+    Plan de la suscripción vigente (trialing/active) de la sede principal de
+    la organización, o None si no hay.
+
+    Bug real (demo con Enterprise "bloqueado"): Organizacion.plan es una
+    COPIA del plan contratado y varios caminos de alta (seed_pg, el webhook
+    de Stripe) la dejaban en el default "basico" mientras la Suscripcion sí
+    apuntaba a Enterprise -- la UI de facturación mostraba Enterprise pero
+    los candados leían "basico". La suscripción vigente es lo que se cobra,
+    así que manda; Organizacion.plan queda como respaldo cuando no hay una.
+    """
+    sede = (Gimnasio.query
+            .filter_by(id_organizacion=id_organizacion, es_sucursal_principal=True)
+            .order_by(Gimnasio.id).first()
+            or Gimnasio.query.filter_by(id_organizacion=id_organizacion)
+            .order_by(Gimnasio.id).first())
+    if sede is None:
+        return None
+    sub = (Suscripcion.query
+           .filter(Suscripcion.id_gimnasio == sede.id,
+                   Suscripcion.estado.in_(_ESTADOS_SUSCRIPCION_VIGENTE))
+           .order_by(Suscripcion.created_at.desc()).first())
+    return sub.plan if sub is not None else None
+
+
+def _plan_de_organizacion(id_organizacion):
+    """
+    Plan vigente de la ORGANIZACIÓN: el de su suscripción activa y, si no
+    hay, el que dice Organizacion.plan. Se memoriza por petición porque
+    /api/auth/me consulta ~10 funciones seguidas.
+    """
+    cache = None
+    if has_request_context():
+        cache = g.setdefault("_cache_plan_org", {})
+        if id_organizacion in cache:
+            return cache[id_organizacion]
+    org = Organizacion.query.get(id_organizacion)
+    plan = None
+    if org is not None:
+        plan = (_plan_de_suscripcion(id_organizacion)
+                or PlanSuscripcion.query.filter_by(nombre=_nombre_plan(org.plan)).first())
+    if cache is not None:
+        cache[id_organizacion] = plan
+    return plan
+
+
 def _plan_de(id_gimnasio):
     """
     Plan vigente de la sucursal `id_gimnasio` -- SCRUM-223: se resuelve
-    por la ORGANIZACIÓN a la que pertenece (organizacion.plan), no por
-    Gimnasio.plan (que se queda en el esquema pero ya no es la fuente de
-    verdad -- ver docstring del módulo y de models/pg/organizacion.py).
+    por la ORGANIZACIÓN a la que pertenece, no por Gimnasio.plan (que se
+    queda en el esquema pero ya no es la fuente de verdad -- ver docstring
+    del módulo y de models/pg/organizacion.py).
     """
     gym = Gimnasio.query.get(id_gimnasio)
     if gym is None or gym.organizacion is None:
         return None
-    nombre_plan = gym.organizacion.plan
-    nombre_plan = nombre_plan.value if hasattr(nombre_plan, "value") else nombre_plan
-    return PlanSuscripcion.query.filter_by(nombre=nombre_plan).first()
+    return _plan_de_organizacion(gym.organizacion.id)
 
 
-def _plan_de_organizacion(id_organizacion):
-    """Igual que _plan_de() pero a partir del id de Organizacion directamente."""
-    org = Organizacion.query.get(id_organizacion)
-    if org is None:
-        return None
-    nombre_plan = org.plan.value if hasattr(org.plan, "value") else org.plan
-    return PlanSuscripcion.query.filter_by(nombre=nombre_plan).first()
+def sincronizar_plan_organizacion(id_gimnasio, nombre_plan):
+    """
+    Refleja en Organizacion.plan el plan que se acaba de contratar para
+    `id_gimnasio`. Sin commit: lo hace quien llama. Úsalo en TODO sitio que
+    cree o cambie una Suscripcion (billing, webhooks de pasarela, seeds).
+    """
+    gym = Gimnasio.query.get(id_gimnasio)
+    if gym is not None and gym.organizacion is not None and nombre_plan:
+        gym.organizacion.plan = nombre_plan
+        if has_request_context():
+            g.pop("_cache_plan_org", None)   # que el resto de la petición vea el plan nuevo
 
 
 def contar_miembros_activos(id_gimnasio):
@@ -165,7 +224,7 @@ def verificar_capacidad_miembro(id_gimnasio, *, incremento=1):
     actual = contar_miembros_activos(id_gimnasio)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Esta sucursal ya tiene {actual} miembro(s) activo(s) de un máximo de {tope} en su plan.",
+            f"Llegaste al límite de {tope} miembros activos de tu plan (hoy tienes {actual}). Compra un lote adicional o mejora tu plan en Mi suscripción para seguir agregando.",
             tope=tope, actual=actual,
         )
 
@@ -184,7 +243,7 @@ def verificar_capacidad_staff(id_gimnasio, *, incremento=1):
     actual = contar_staff_activo(id_gimnasio)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Esta sucursal ya tiene {actual} usuario(s) de staff de un máximo de {tope} en su plan.",
+            f"Tu sucursal ya tiene {actual} usuarios de staff y tu plan permite {tope}. Desactiva a alguien o mejora tu plan para agregar más.",
             tope=tope, actual=actual,
         )
 
@@ -230,7 +289,7 @@ def verificar_capacidad_sucursal(id_organizacion, *, incremento=1):
     actual = contar_sucursales(id_organizacion)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Tu organización ya tiene {actual} sucursal(es) de un máximo de {tope} en su plan.",
+            f"Tu organización ya tiene {actual} sucursales y tu plan permite {tope}. Mejora tu plan para abrir otra.",
             tope=tope, actual=actual,
         )
 

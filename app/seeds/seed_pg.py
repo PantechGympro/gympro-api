@@ -482,6 +482,7 @@ def seed_pg_base():
             "titulo_comercial": "Para arrancar sin costo", "orden": 0, "destacado": False,
             "caracteristicas": [
                 "Hasta 30 miembros activos",
+                "App movil para tus miembros con check-in por QR",
                 "Registro de asistencias y pagos",
                 "1 usuario administrador",
                 "Soporte por correo electronico",
@@ -492,42 +493,43 @@ def seed_pg_base():
             # re-INSERT de planes_suscripcion, así que lo que no esté aquí
             # desaparece en cualquier entorno local sembrado con este script.
             "limites": {"pos": False, "pasarelas_pago": False, "analiticas_ia": False,
-                        "rutinas_ia": False, "reportes_pdf": False, "app_movil": False,
+                        "rutinas_ia": False, "reportes_pdf": False, "app_movil": True,
                         "max_staff": 1, "max_sucursales": 1},
         },
         {
-            "nombre": "basico", "precio_mensual_mxn": 64900, "precio_anual_mxn": 649000, "max_miembros": 80,
+            "nombre": "basico", "precio_mensual_mxn": 54900, "precio_anual_mxn": 549000, "max_miembros": 100,
             "descripcion": "Gestion completa del dia a dia para gimnasios en operacion.",
             "titulo_comercial": "Ideal para gimnasios pequeños", "orden": 1, "destacado": False,
             "caracteristicas": [
-                "Hasta 80 miembros activos",
+                "Hasta 100 miembros activos",
                 "Punto de venta y control de productos",
                 "Cobros en linea con PayPal y Mercado Pago",
-                "Hasta 3 usuarios de staff",
+                "Hasta 4 usuarios de staff",
                 "Reportes en PDF",
                 "App movil para tus miembros",
                 "Amplia tu limite comprando lotes de miembros adicionales",
             ],
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": False,
                         "rutinas_ia": False, "reportes_pdf": True, "app_movil": True,
-                        "max_staff": 3, "max_sucursales": 1},
+                        "max_staff": 4, "max_sucursales": 1},
         },
         {
-            "nombre": "pro", "precio_mensual_mxn": 139900, "precio_anual_mxn": 1399000, "max_miembros": 300,
+            "nombre": "pro", "precio_mensual_mxn": 119900, "precio_anual_mxn": 1199000, "max_miembros": 400,
             "descripcion": "Suma inteligencia de negocio y automatizacion con IA.",
             "titulo_comercial": "El mas elegido por gimnasios en crecimiento", "orden": 2, "destacado": True,
             "caracteristicas": [
-                "Hasta 300 miembros activos",
+                "Hasta 400 miembros activos",
                 "Todo lo del plan Basico",
                 "Analiticas con IA: riesgo de abandono y clientes por valor",
                 "Generacion de rutinas y dietas asistida por IA",
                 "Respaldos automaticos de tu informacion",
-                "Hasta 10 usuarios de staff",
+                "Hasta 12 usuarios de staff",
+                "Hasta 2 sucursales con un solo contrato",
                 "Amplia tu limite comprando lotes de miembros adicionales",
             ],
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
                         "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
-                        "backups_automaticos": True, "max_staff": 10, "max_sucursales": 2},
+                        "backups_automaticos": True, "max_staff": 12, "max_sucursales": 2},
         },
         {
             # SCRUM-222 (AC6): "Miembros y staff ilimitados" se corrige --
@@ -545,11 +547,11 @@ def seed_pg_base():
             # PROVISIONALES, igual que lo eran los 500/20 anteriores: una
             # extrapolacion razonada, no el resultado de una prueba de
             # carga real sobre el VPS de produccion.
-            "nombre": "enterprise", "precio_mensual_mxn": 299900, "precio_anual_mxn": 2999000, "max_miembros": 400,
+            "nombre": "enterprise", "precio_mensual_mxn": 249900, "precio_anual_mxn": 2499000, "max_miembros": 600,
             "descripcion": "Alta capacidad por sucursal, con soporte dedicado y acuerdos de nivel de servicio.",
             "titulo_comercial": "Para cadenas y multiples sucursales", "orden": 3, "destacado": False,
             "caracteristicas": [
-                "Hasta 400 miembros y 20 staff por sucursal, hasta 5 sucursales",
+                "Hasta 600 miembros y 30 staff por sucursal, hasta 8 sucursales",
                 "Todo lo del plan Pro",
                 "Laboratorio de Machine Learning completo",
                 "Soporte prioritario con SLA",
@@ -559,7 +561,7 @@ def seed_pg_base():
             "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
                         "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
                         "backups_automaticos": True, "ml_lab": True, "soporte_sla": True,
-                        "max_staff": 20, "max_sucursales": 5},
+                        "max_staff": 30, "max_sucursales": 8},
         },
     ]
     planes_map = {}
@@ -608,7 +610,9 @@ def seed_gimnasio(cfg, roles, planes_map, idx_start):
     # No se wire-ea crear_asignacion() en los usuarios de este seed (ver
     # bitácora técnica): nada lee asignacion_usuario para permisos todavía
     # y los seeds son solo datos de desarrollo/demo.
-    crear_organizacion_para_gimnasio(gym)
+    # Bug del demo Enterprise: sin plan= la organización quedaba en "basico"
+    # (default del modelo) aunque la suscripción fuera Enterprise.
+    crear_organizacion_para_gimnasio(gym, plan=cfg["plan"])
 
     db.session.add(gym)
     db.session.flush()  # obtener gym.id (id_organizacion ya resuelto)

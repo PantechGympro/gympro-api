@@ -31,11 +31,15 @@ from app.extensions import db
 # ANUAL sigue la misma convencion que los planes (mensual x 10, "2 meses
 # gratis", ver migracion 023) en vez de definirse aparte.
 LOTES_CAPACIDAD = [
-    {"cantidad_miembros": 10,  "precio_mensual_mxn": 14900},
-    {"cantidad_miembros": 50,  "precio_mensual_mxn": 59900},
-    {"cantidad_miembros": 100, "precio_mensual_mxn": 99900},
-    {"cantidad_miembros": 200, "precio_mensual_mxn": 179900},
-    {"cantidad_miembros": 500, "precio_mensual_mxn": 399900},
+    # v3 (nov/2026): antes $14.9 -> $8.0 por miembro, 4 a 7 veces el costo
+    # marginal de subir de plan, asi que nadie los compraba. Ahora $7.9 -> $3.6:
+    # sirven para un desborde puntual (+10 a +100) y, pasado eso, subir de
+    # plan sigue siendo mas barato (basico->pro: ~$2.2 por miembro extra).
+    {"cantidad_miembros": 10,  "precio_mensual_mxn": 7900},
+    {"cantidad_miembros": 50,  "precio_mensual_mxn": 29900},
+    {"cantidad_miembros": 100, "precio_mensual_mxn": 49900},
+    {"cantidad_miembros": 200, "precio_mensual_mxn": 84900},
+    {"cantidad_miembros": 500, "precio_mensual_mxn": 179900},
 ]
 _LOTES_POR_CANTIDAD = {l["cantidad_miembros"]: l for l in LOTES_CAPACIDAD}
 

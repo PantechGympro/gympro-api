@@ -11,6 +11,7 @@ from flask_jwt_extended import jwt_required
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 
+from app.utils.pagos_pendientes import FILTRO_VENTA_COBRADA
 from app.mongo import get_db
 from app.extensions import db
 from app.models.pg.usuario      import Usuario
@@ -104,8 +105,10 @@ def get_owner_dashboard():
 
     def _suma(coleccion, campo_fecha: str, campo_monto: str, desde, hasta) -> float:
         """Total de una colección en un rango, tolerando fechas string o datetime."""
+        # FILTRO_VENTA_COBRADA: un pago manual del miembro aun sin confirmar (o
+        # rechazado) no es ingreso. `pagos` no tiene ese campo, asi que no le afecta.
         pipeline = [
-            {"$match": {"id_gimnasio": gym_id}},
+            {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
             {"$addFields": {"fecha_dt": {"$toDate": f"${campo_fecha}"}}},
             {"$match": {"fecha_dt": {"$gte": desde, "$lt": hasta}}},
             {"$group": {"_id": None, "total": {"$sum": f"${campo_monto}"}}},
@@ -147,7 +150,7 @@ def get_owner_dashboard():
     # ── Transacciones del POS en el mes ───────────────────────────────────────
     # El importe ya se calculó arriba (ingresos_pos); aquí solo falta el conteo.
     pipeline_conteo = [
-        {"$match": {"id_gimnasio": gym_id}},
+        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
         {"$addFields": {"fecha_dt": {"$toDate": "$fecha"}}},
         {"$match": {"fecha_dt": {"$gte": start_mes, "$lt": end_mes}}},
         {"$group": {"_id": None, "count": {"$sum": 1}}},
@@ -220,7 +223,7 @@ def get_ingresos_historicos():
 
     # Ventas POS
     pipeline_ventas = [
-        {"$match": {"id_gimnasio": gym_id}},
+        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
         {"$addFields": {"fecha_dt": {"$toDate": "$fecha"}}},
         {"$match": {"fecha_dt": {"$gte": oldest}}},
         {"$group": {
@@ -292,7 +295,7 @@ def get_actividad_reciente():
 
     # ── Últimas ventas POS ────────────────────────────────────────────────────
     ventas_pos = list(
-        mdb.ventas.find({"id_gimnasio": gym_id})
+        mdb.ventas.find({"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA})
         .sort("fecha", -1).limit(limit)
     )
 

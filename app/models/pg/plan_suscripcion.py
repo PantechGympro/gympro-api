@@ -8,7 +8,16 @@ Los precios se expresan en centavos MXN para evitar aritmética de punto flotant
 Relación: PlanSuscripcion 1─N Suscripcion
 """
 from datetime import datetime, timezone
+from app.constants.catalogo_funciones import funciones_por_rol
 from app.extensions import db
+
+
+# Pares equivalentes de banderas (ver PlanSuscripcion.permite).
+_ALIAS_FUNCIONES = {
+    "cobros_en_linea": ("pasarelas_pago",), "pasarelas_pago": ("cobros_en_linea",),
+    "respaldos": ("backups_automaticos",), "backups_automaticos": ("respaldos",),
+    "soporte_prioritario": ("soporte_sla",), "soporte_sla": ("soporte_prioritario",),
+}
 
 
 class PlanSuscripcion(db.Model):
@@ -77,6 +86,8 @@ class PlanSuscripcion(db.Model):
             "orden":                self.orden,
             "destacado":            self.destacado,
             "precio_mxn":           round((self.precio_mensual_mxn or 0) / 100, 2),
+            # Todo lo que incluye / no incluye el plan, rol por rol (ver constants/catalogo_funciones.py)
+            "funciones_por_rol":    funciones_por_rol(self),
         }
 
     def permite(self, funcion: str) -> bool:
@@ -84,5 +95,14 @@ class PlanSuscripcion(db.Model):
         True si el plan habilita la función indicada. Se usará para bloquear
         módulos según la suscripción del gimnasio (por ejemplo 'analiticas_ia').
         Si la bandera no está definida, se considera NO incluida.
+
+        Alias: la migración 012 nombró las banderas `cobros_en_linea`,
+        `respaldos` y `soporte_prioritario`; los seeds posteriores usan
+        `pasarelas_pago`, `backups_automaticos` y `soporte_sla`. Según cómo
+        se creó la base, un plan trae un nombre u otro, y antes la consulta
+        por el nombre "equivocado" devolvía False aunque el plan sí incluyera
+        la función. Aquí se acepta cualquiera de los dos.
         """
-        return bool((self.limites or {}).get(funcion, False))
+        limites = self.limites or {}
+        nombres = {funcion, *_ALIAS_FUNCIONES.get(funcion, ())}
+        return any(bool(limites.get(n, False)) for n in nombres)

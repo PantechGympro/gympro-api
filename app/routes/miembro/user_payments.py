@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 from app.mongo import get_db
 from app.utils.tenant import require_tenant
 
+# estado_pago de una venta -> etiqueta que ve el miembro (ausente = histórico cobrado).
+_ESTADO_VISIBLE = {"pendiente": "En revisión", "rechazado": "Rechazado", "pagado": "Completado"}
+
+
 user_payments_bp = Blueprint('user_payments', __name__)
 
 
@@ -72,17 +76,37 @@ def get_user_payments():
                 "concept": concepto,
                 "amount":  float(venta.get("total", 0)),
                 "method":  _format_payment_method(venta.get("metodo_pago")),
-                "status":  "Completado",
+                "status":  _ESTADO_VISIBLE.get(venta.get("estado_pago"), "Completado"),
                 "type":    "producto",
                 "items":   cantidad,
                 "rawDate": _iso(fecha_v),
+            })
+
+        # Renovaciones que el miembro pidió y aún no tienen membresía: en revisión
+        # (o rechazadas). Las confirmadas ya aparecen arriba como pago de membresía.
+        for sol in mdb.renovaciones_pendientes.find({
+            "id_gimnasio": gym_id, "id_miembro": miembro["_id"],
+            "estado": {"$in": ["pendiente", "rechazada"]},
+        }).sort("creado_en", -1).limit(10):
+            fecha_s = _a_fecha(sol.get("creado_en"))
+            pagos_formateados.append({
+                "id":      f"REN-{str(sol['_id'])[-5:].upper()}",
+                "date":    _texto_fecha(fecha_s),
+                "concept": f"Renovación {sol.get('membresia_nombre', '')}".strip(),
+                "amount":  float(sol.get("monto", 0)),
+                "method":  _format_payment_method(sol.get("metodo_pago")),
+                "status":  "En revisión" if sol.get("estado") == "pendiente" else "Rechazado",
+                "type":    "membresia",
+                "rawDate": _iso(fecha_s),
             })
 
         # Un solo orden cronológico para las dos fuentes
         pagos_formateados.sort(key=lambda p: p.get("rawDate") or "", reverse=True)
 
         total_membresias = sum(float(p.get("monto", 0)) for p in pagos)
-        total_compras    = sum(float(v.get("total", 0)) for v in ventas)
+        # Lo pendiente de confirmar o rechazado no es dinero que el miembro "pagó".
+        total_compras    = sum(float(v.get("total", 0)) for v in ventas
+                               if v.get("estado_pago") not in ("pendiente", "rechazado"))
         total_pagado     = total_membresias + total_compras
 
         ultimo_pago = pagos[0] if pagos else None

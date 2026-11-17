@@ -268,6 +268,10 @@ def _handle_checkout_completed(session: dict) -> None:
         stripe_subscription_id= stripe_sub_id,
     )
     db.session.add(sub)
+    # Organizacion.plan es lo que lee el gating de funciones: sin esto el
+    # gimnasio pagaba un plan y seguía viendo los candados del anterior.
+    from app.utils.capacidad import sincronizar_plan_organizacion
+    sincronizar_plan_organizacion(gym_id, plan.nombre)
     db.session.commit()
     logger.info("Suscripcion creada para gym %s via Stripe checkout", gym_id)
 
