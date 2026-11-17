@@ -8,6 +8,7 @@ Los precios se expresan en centavos MXN para evitar aritmética de punto flotant
 Relación: PlanSuscripcion 1─N Suscripcion
 """
 from datetime import datetime, timezone
+from app.constants.catalogo_funciones import funciones_por_rol
 from app.extensions import db
 
 
@@ -85,6 +86,8 @@ class PlanSuscripcion(db.Model):
             "orden":                self.orden,
             "destacado":            self.destacado,
             "precio_mxn":           round((self.precio_mensual_mxn or 0) / 100, 2),
+            # Todo lo que incluye / no incluye el plan, rol por rol (ver constants/catalogo_funciones.py)
+            "funciones_por_rol":    funciones_por_rol(self),
         }
 
     def permite(self, funcion: str) -> bool:

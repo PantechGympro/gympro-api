@@ -804,6 +804,7 @@ def regresion_train():
 
 @spark_regresion_bp.route("/api/analytics/regresion/predecir/<id_entrada>", methods=["GET"])
 @jwt_required()
+@require_funcion_plan("analiticas_ia")  # la predicción de peso del miembro es una analítica con IA
 def predecir_peso_miembro(id_entrada: str):
     """
     Predice el peso futuro de un miembro.

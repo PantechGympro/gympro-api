@@ -36,6 +36,7 @@ from flask import Blueprint, g, jsonify, request, current_app
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.mongo import get_db
+from app.utils.security import require_funcion_plan
 from app.utils.tenant import require_tenant
 
 diet_bp = Blueprint("trainer_diet", __name__, url_prefix="/api/trainer")
@@ -613,6 +614,7 @@ def _derivar_recetas_de_plan(plan: dict) -> list:
 @diet_bp.route("/diets/import-ai", methods=["POST"])
 @jwt_required()
 @require_tenant
+@require_funcion_plan("rutinas_ia")  # la oferta Pro anuncia "rutinas y dietas asistidas por IA"
 def import_diet_ai():
     """
     ETL en dos fases:
