@@ -47,12 +47,31 @@ PER_PAGE_DEFECTO, PER_PAGE_MAX = 10, 50
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-from app.utils.membresia import a_utc as _a_utc, evaluar_membresia, evaluar_membresias_lote  # noqa: E402  (fuente única, ver utils/membresia.py)
+from app.utils.membresia import (  # noqa: E402  (fuente única, ver utils/membresia.py)
+    _fin_efectivo, a_utc as _a_utc, evaluar_membresia, evaluar_membresias_lote,
+)
 
 
 def _formato_local(dt_utc):
     """'16/11/2026 21:30' en la hora local del gimnasio."""
     return dt_utc.astimezone(APP_TZ).strftime("%d/%m/%Y %H:%M") if dt_utc else None
+
+
+def _formato_vence(fin_utc):
+    """
+    Fecha de vencimiento para mostrar. Si se guardó solo el día (medianoche),
+    se muestra solo la fecha: pasarla a hora local la mostraría un día antes
+    ("19/11 18:00" para una membresía que vence el 20/11).
+    """
+    if fin_utc is None:
+        return None
+    local = fin_utc.astimezone(APP_TZ)
+    solo_dia = (local.hour == local.minute == local.second == 0
+                or fin_utc.hour == fin_utc.minute == fin_utc.second == 0)
+    if solo_dia:
+        base = fin_utc if fin_utc.hour == fin_utc.minute == fin_utc.second == 0 else local
+        return base.strftime("%d/%m/%Y")
+    return _formato_local(fin_utc)
 
 
 def _estado(fecha_fin_utc, ahora_utc):
@@ -108,58 +127,56 @@ def membresias_por_vencer():
     incluir_vencidas = request.args.get("incluir_vencidas", "false").lower() == "true"
 
     ahora = datetime.now(timezone.utc)
-    desde = ahora - timedelta(days=dias) if incluir_vencidas else ahora
-    hasta = ahora + timedelta(days=dias)
-
-    # fecha_fin puede estar guardada naive: se comparan ambos formatos (aware/naive UTC).
-    def _rango(d):
-        return d, d.replace(tzinfo=None)
-    d1, d1n = _rango(desde)
-    d2, d2n = _rango(hasta)
-
-    membresias = list(db.miembro_membresia.find({
-        "estado": "Activa",
-        "$or": [
-            {"fecha_fin": {"$gte": d1, "$lte": d2}},
-            {"fecha_fin": {"$gte": d1n, "$lte": d2n}},
-        ],
-    }))
-    if not membresias:
-        return jsonify({"miembros": [], "total": 0, "dias": dias}), 200
 
     # Solo miembros activos de ESTE gimnasio (aislamiento de tenant).
     miembros = {
-        m["_id"]: m for m in db.miembros.find({
-            "_id": {"$in": [x["id_miembro"] for x in membresias]},
-            "id_gimnasio_pg": g.tenant_id,
-            "estado": "Activo",
-        }, {"nombre": 1, "email": 1, "telefono": 1, "id_usuario_pg": 1, "foto_perfil": 1})
+        m["_id"]: m for m in db.miembros.find(
+            {"id_gimnasio_pg": g.tenant_id, "estado": "Activo"},
+            {"nombre": 1, "email": 1, "telefono": 1, "id_usuario_pg": 1, "foto_perfil": 1},
+        )
     }
+    if not miembros:
+        return jsonify({"miembros": [], "total": 0, "dias": dias}), 200
+
+    # La vigencia se evalúa con la regla única (utils/membresia.py) y NO con un
+    # rango en la consulta: `fecha_fin` está guardada en formatos mezclados
+    # (datetime aware/naive y texto "YYYY-MM-DD" de los cobros en recepción y los
+    # seeds). Un $gte/$lte con datetime nunca coincide con un texto, y por eso la
+    # lista salía vacía aunque el padrón y el dashboard sí contaban esas
+    # membresías. Además, con una renovación reciente solo cuenta la vigente más
+    # larga, así que nadie aparece dos veces ni como "por vencer" si ya renovó.
+    evaluaciones = evaluar_membresias_lote(db, list(miembros), ahora)
 
     filas = []
-    for mem in membresias:
-        m = miembros.get(mem["id_miembro"])
-        if not m:
+    for id_miembro, m in miembros.items():
+        ev = evaluaciones.get(id_miembro) or {}
+        fin = ev.get("fecha_fin")
+        if fin is None:                      # sin membresía: no hay nada que vencer
             continue
-        fin = _a_utc(mem.get("fecha_fin"))
-        estado = _estado(fin, ahora)
-        segundos = (fin - ahora).total_seconds()
-        filas.append({
+        fin_ef = _fin_efectivo(fin)          # fecha "solo día" vale hasta el final de ese día
+        segundos = (fin_ef - ahora).total_seconds()
+        if ev.get("vigente"):
+            if segundos > dias * 86400:
+                continue
+        elif not incluir_vencidas or segundos < -dias * 86400:
+            continue
+        filas.append((fin_ef, {
             "id":             str(m["_id"]),
             "id_usuario_pg":  m.get("id_usuario_pg"),
             "nombre":         m.get("nombre", ""),
             "email":          m.get("email", ""),
             "telefono":       m.get("telefono", ""),
             "foto_perfil":    m.get("foto_perfil"),
-            "tipo_membresia": _nombre_tipo(mem),
+            "tipo_membresia": ev.get("nombre") or "Membresía",
             "fecha_fin":      fin.isoformat(),
-            "fecha_fin_local": _formato_local(fin),
+            "fecha_fin_local": _formato_vence(fin),
             "dias_restantes": int(segundos // 86400),   # negativo si ya venció
             "horas_restantes": int(segundos // 3600),
-            "estado":         estado,
-        })
+            "estado":         "por_vencer" if ev.get("vigente") else "vencida",
+        }))
 
-    filas.sort(key=lambda f: f["fecha_fin"])
+    filas.sort(key=lambda par: par[0])           # vence primero, arriba
+    filas = [f for _, f in filas]
     return jsonify({"miembros": filas, "total": len(filas), "dias": dias}), 200
 
 

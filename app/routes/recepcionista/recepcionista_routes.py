@@ -30,6 +30,7 @@ from app.utils.tenant import require_tenant
 from app.utils.checkin_qr import emitir_token
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, ROL_RECEPCIONISTA, normalizar_rol
 from app.utils.busqueda import patron_insensible
+from app.utils.membresia import _fin_efectivo
 
 recepcionista_bp = Blueprint("recepcionista", __name__)
 
@@ -311,10 +312,13 @@ def _mem_status(fecha_fin, now):
         fecha_fin = datetime.fromisoformat(fecha_fin)
     if fecha_fin.tzinfo is None:
         fecha_fin = fecha_fin.replace(tzinfo=timezone.utc)
-    days_left = (fecha_fin - now).days
-    if days_left < 0:
+    # Misma regla que "Membresías por vencer" y el check-in (utils/membresia.py):
+    # una fecha guardada solo como día vale hasta el final de ese día, así que
+    # el día de vencimiento sigue "por vencer" y no "vencida".
+    segundos = (_fin_efectivo(fecha_fin.astimezone(timezone.utc)) - now).total_seconds()
+    if segundos < 0:
         return "vencida"
-    if days_left <= 7:
+    if segundos <= 7 * 86400:
         return "por_vencer"
     return "activa"
 
