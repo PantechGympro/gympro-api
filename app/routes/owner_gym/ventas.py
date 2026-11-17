@@ -106,8 +106,8 @@ def _notificar_compra_pendiente(db, id_gimnasio, venta_id, nombre_comprador, ite
         f"\u2014 ${float(total):.2f} ({metodo}). Pasara a recogerlo el {fecha_fmt} "
         f"a las {hora_recogida}."
     )
-    # nov/2026: el pago que declara el propio miembro (efectivo, transferencia o
-    # TotalPass) no esta verificado -- se lo advertimos a quien reciba el aviso.
+    # nov/2026: el pago que declara el propio miembro (efectivo o
+    # transferencia) no esta verificado -- se lo advertimos a quien reciba el aviso.
     if estado_pago == PAGO_PENDIENTE:
         if metodo == "Efectivo":
             mensaje += f" Pago PENDIENTE: cobra ${float(total):.2f} en efectivo antes de entregarle el producto."
@@ -209,7 +209,9 @@ def registrar_venta():
         if (get_jwt().get("role") or "").lower() in ("user", "miembro") \
                 and metodo not in METODOS_MANUALES_MIEMBRO_VENTA:
             return jsonify({
-                "error": "Para pagar con tarjeta, PayPal o Mercado Pago usa el pago en línea.",
+                "error": ("TotalPass solo lo registra el personal en mostrador."
+                          if metodo == "TotalPass"
+                          else "Para pagar con tarjeta, PayPal o Mercado Pago usa el pago en línea."),
             }), 400
 
         # ── Resolver comprador ────────────────────────────────────────────────
@@ -298,7 +300,7 @@ def registrar_venta():
             "fecha_recogida": fecha_recogida or None,
             "hora_recogida":  hora_recogida or None,
             # nov/2026: todo pago que declara el propio miembro (efectivo,
-            # transferencia, TotalPass) nace PENDIENTE hasta que recepcion /
+            # transferencia) nace PENDIENTE hasta que recepcion /
             # administrador / propietario lo confirma (ver confirmaciones_pago.py).
             # Si cobra el staff en mostrador, o si ya paso por una pasarela (ver
             # _aplicar_venta en pagos_online.py), el pago ya esta hecho al crear
@@ -563,7 +565,7 @@ def marcar_entregada(venta_id):
     quién la entregó y cuándo, y confirma la entrega al miembro.
 
     nov/2026: si el pago que declaró el miembro sigue sin verificar (efectivo,
-    transferencia, TotalPass), NO se entrega hasta que Recepcionista /
+    transferencia), NO se entrega hasta que Recepcionista /
     Administrador / Propietario lo confirme. Se puede hacer en el momento enviando
     {"confirmar_pago": true} (cobrar y entregar en una sola acción) o antes, desde
     la bandeja "Pagos por confirmar". Un entrenador puede entregar solo lo ya pagado.

@@ -31,7 +31,9 @@ PAGO_PAGADO = "pagado"
 PAGO_RECHAZADO = "rechazado"
 
 # Métodos que el miembro puede declarar él mismo y que requieren verificación.
-METODOS_MANUALES_MIEMBRO_VENTA = ("Efectivo", "Transferencia", "TotalPass")
+# TotalPass NO está aquí a propósito: no hay API contra la cual verificarlo, es una
+# etiqueta que solo registra el personal en mostrador (ver POSCheckoutModal.jsx).
+METODOS_MANUALES_MIEMBRO_VENTA = ("Efectivo", "Transferencia")
 METODOS_MANUALES_MIEMBRO_MEMBRESIA = ("Efectivo", "Transferencia")
 
 # Roles que pueden confirmar/rechazar. El entrenador queda fuera a propósito:
@@ -342,3 +344,35 @@ def rechazar_renovacion(mdb, solicitud, id_actor, nombre_actor, motivo, *, ahora
         "renovacion", str(solicitud["_id"]),
     )
     return True
+
+
+def cancelar_renovaciones_abiertas(mdb, id_gimnasio, id_miembro, motivo, *, id_actor=None, ahora=None):
+    """
+    Nunca debe quedar una operación sin cerrar: cuando la renovación del miembro se
+    completa por OTRO camino (el personal cobra en "Cobrar membresía", o el miembro
+    paga en línea), su solicitud pendiente se cancela. La renovación que sí se
+    completó es la que vale; la solicitud ya no tiene nada que activar y confirmarla
+    después cobraría y activaría dos veces.
+    Devuelve cuántas solicitudes cerró. No-bloqueante para quien la llama.
+    """
+    ahora = ahora or utcnow()
+    abiertas = list(mdb.renovaciones_pendientes.find(
+        {"id_gimnasio": id_gimnasio, "id_miembro": id_miembro, "estado": PAGO_PENDIENTE}))
+    cerradas = 0
+    for sol in abiertas:
+        res = mdb.renovaciones_pendientes.update_one(
+            {"_id": sol["_id"], "estado": PAGO_PENDIENTE},
+            {"$set": {"estado": "cancelada", "motivo_rechazo": motivo,
+                      "resuelto_por_pg": id_actor, "resuelto_por_nombre": None, "resuelto_en": ahora}},
+        )
+        if not res.modified_count:
+            continue
+        cerradas += 1
+        notificar_miembro(
+            mdb, id_gimnasio, sol.get("id_miembro_pg"), "renovacion_cancelada",
+            "Tu renovación ya quedó registrada",
+            f"Tu solicitud de «{sol.get('membresia_nombre')}» se cerró porque tu renovación ya se completó "
+            f"({motivo.lower()}). No tienes que hacer nada más.",
+            "renovacion", str(sol["_id"]),
+        )
+    return cerradas

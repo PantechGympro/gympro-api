@@ -673,6 +673,15 @@ def _aplicar_membresia(tx: TransaccionPago, meta: dict) -> None:
         "id_transaccion":      tx.id,
     })
 
+    # Si ese miembro tenía una solicitud de renovación por confirmar (efectivo /
+    # transferencia), la renovación en línea ya la cubre: se cancela la solicitud.
+    try:
+        from app.utils.pagos_pendientes import cancelar_renovaciones_abiertas
+        cancelar_renovaciones_abiertas(
+            mdb, tx.id_gimnasio, miembro["_id"], "Pagaste en línea", id_actor=tx.id_usuario)
+    except Exception:
+        logger.exception("Pago %s: no se pudo cerrar la solicitud pendiente", tx.id)
+
     # -- Recibo por correo al miembro Y al propietario, mas bitacora de
     #    seguridad -- antes de esto, una renovacion pagada en linea (webhook
     #    de PayPal/Mercado Pago) no mandaba ningun correo en absoluto.
