@@ -46,7 +46,6 @@ from app.routes.entrenador.reportes_entrenador import reportes_entrenador_bp
 from app.routes.owner_gym.suscripcion_recurrente import suscripcion_recurrente_bp
 from app.routes.recepcionista.recepcionista_routes import recepcionista_bp
 from app.routes.compartido.membresias_staff import membresias_staff_bp
-from app.routes.compartido.membresias_staff import membresias_staff_bp
 from app.routes.ia.spark_mapreduce            import spark_mapreduce_bp
 from app.routes.ia.spark_kmeans               import spark_kmeans_bp
 from app.routes.ia.spark_regresion            import spark_regresion_bp
@@ -128,7 +127,6 @@ def create_app():
     app.register_blueprint(user_membership_bp)
     app.register_blueprint(user_dashboard_bp)
     app.register_blueprint(logros_bp)
-    app.register_blueprint(membresias_staff_bp)
     app.register_blueprint(membresias_staff_bp)
     app.register_blueprint(spark_mapreduce_bp)
     app.register_blueprint(spark_kmeans_bp)
