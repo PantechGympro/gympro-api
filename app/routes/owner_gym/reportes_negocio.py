@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, Response, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
+from app.utils.pagos_pendientes import FILTRO_VENTA_COBRADA
 from app.mongo import get_db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.tipo_membresia import TipoMembresia
@@ -102,8 +103,9 @@ def _periodo_anterior(desde: datetime, hasta: datetime):
 
 def _suma(coleccion, gym_id, campo_fecha, campo_monto, desde, hasta):
     """Total e importe de una colección en un rango."""
+    # FILTRO_VENTA_COBRADA: lo pendiente/rechazado no es ingreso (pagos no trae el campo).
     pipeline = [
-        {"$match": {"id_gimnasio": gym_id}},
+        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
         {"$addFields": {"_f": {"$toDate": f"${campo_fecha}"}}},
         {"$match": {"_f": {"$gte": desde, "$lt": hasta}}},
         {"$group": {"_id": None,
@@ -128,7 +130,7 @@ def _recolectar(gym_id: int, desde: datetime, hasta: datetime) -> dict:
     for coleccion, campo_f, campo_m in ((mdb.pagos, "fecha_pago", "monto"),
                                         (mdb.ventas, "fecha", "total")):
         for d in coleccion.aggregate([
-            {"$match": {"id_gimnasio": gym_id}},
+            {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
             {"$addFields": {"_f": {"$toDate": f"${campo_f}"}}},
             {"$match": {"_f": {"$gte": desde, "$lt": hasta}}},
             {"$group": {"_id": {"$ifNull": ["$metodo_pago", "Sin especificar"]},
@@ -157,7 +159,7 @@ def _recolectar(gym_id: int, desde: datetime, hasta: datetime) -> dict:
     # ── Productos más vendidos ───────────────────────────────────────────────
     productos: list = []
     for d in mdb.ventas.aggregate([
-        {"$match": {"id_gimnasio": gym_id}},
+        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
         {"$addFields": {"_f": {"$toDate": "$fecha"}}},
         {"$match": {"_f": {"$gte": desde, "$lt": hasta}}},
         {"$unwind": "$items"},

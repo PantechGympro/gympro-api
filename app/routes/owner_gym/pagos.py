@@ -6,6 +6,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 import math
 
+from app.utils.pagos_pendientes import FILTRO_VENTA_COBRADA
 from app.mongo import get_db
 from app.models.pago import Pago
 from app.models.miembro_membresia import MiembroMembresia
@@ -579,7 +580,7 @@ def listar_todos_movimientos():
 
         elif tipo == "venta":
             # Solo ventas POS (con filtro opcional de categoría)
-            venta_match: dict = {"id_gimnasio": gym_id}
+            venta_match: dict = {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}
             if categoria:
                 venta_match["items.categoria"] = categoria
 
@@ -610,7 +611,7 @@ def listar_todos_movimientos():
                 {"$unionWith": {
                     "coll": "ventas",
                     "pipeline": [
-                        {"$match": {"id_gimnasio": gym_id}},
+                        {"$match": {"id_gimnasio": gym_id, **FILTRO_VENTA_COBRADA}},
                         {"$addFields": {
                             "_tipo":     {"$literal": "venta"},
                             "_fecha_dt": {"$toDate": "$fecha"},

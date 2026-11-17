@@ -1,11 +1,14 @@
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from bson.objectid import ObjectId
 from app.mongo import get_db
 from app.models.pg.tipo_membresia import TipoMembresia
 from app.utils.tenant import require_tenant
-from app.utils.recibos import enviar_recibo_membresia, registrar_evento_transaccion
+from app.utils.recibos import registrar_evento_transaccion
+from app.utils.pagos_pendientes import (
+    METODOS_MANUALES_MIEMBRO_MEMBRESIA, PAGO_PENDIENTE, notificar_personal,
+)
 
 user_membership_bp = Blueprint('user_membership', __name__)
 
@@ -100,7 +103,20 @@ def get_estado_membresia():
     if not miembro:
         return jsonify({"error": "No encontramos tu ficha de miembro en este gimnasio."}), 404
     est = evaluar_membresia(mdb, miembro["_id"])
+    # Si ya pidió renovar con efectivo/transferencia y recepción aún no confirma,
+    # la app debe mostrar "en revisión" y no ofrecer pagar otra vez.
+    sol = mdb.renovaciones_pendientes.find_one(
+        {"id_gimnasio": g.tenant_id, "id_miembro": miembro["_id"], "estado": "pendiente"})
+    renovacion_pendiente = None
+    if sol:
+        renovacion_pendiente = {
+            "id": str(sol["_id"]), "membresia_nombre": sol.get("membresia_nombre"),
+            "monto": sol.get("monto"), "metodo_pago": sol.get("metodo_pago"),
+            "referencia": sol.get("referencia"),
+            "creado_en": sol["creado_en"].isoformat() if hasattr(sol.get("creado_en"), "isoformat") else None,
+        }
     return jsonify({
+        "renovacion_pendiente": renovacion_pendiente,
         "vigente":          est["vigente"],
         "estado":           est["estado"],
         "codigo":           est["codigo"],
@@ -171,7 +187,14 @@ def get_available_plans():
 @jwt_required()
 @require_tenant
 def renew_membership():
-    """Procesa la renovación de membresía usando TipoMembresia de PG."""
+    """
+    Solicita la renovación de membresía con un pago manual (Efectivo / Transferencia).
+
+    NO activa nada: crea una solicitud pendiente (colección `renovaciones_pendientes`)
+    que Recepcionista / Administrador / Propietario confirman en
+    POST /api/confirmaciones-pago/renovaciones/<id>/confirmar. Con PayPal o Mercado
+    Pago se usa /api/pagos/checkout, que activa por webhook.
+    """
     try:
         mdb        = get_db()
         user_pg_id = int(get_jwt_identity())
@@ -186,18 +209,25 @@ def renew_membership():
             return jsonify({"error": "Miembro no encontrado"}), 404
 
         id_membresia_val = data.get('id_membresia')
-        metodo_pago      = data.get('metodo_pago', 'Tarjeta')
+        metodo_pago      = data.get('metodo_pago')
 
         if not id_membresia_val:
             return jsonify({"error": "ID de membresía requerido"}), 400
 
-        metodos_validos = ['Efectivo', 'Tarjeta', 'Transferencia']
-        if metodo_pago not in metodos_validos:
-            return jsonify({"error": f"Método de pago inválido. Usar: {', '.join(metodos_validos)}"}), 400
+        # Un miembro solo puede DECLARAR pagos manuales (efectivo / transferencia),
+        # que quedan pendientes hasta que el personal los verifique. Los pagos con
+        # tarjeta o billetera pasan por la pasarela (POST /api/pagos/checkout), cuyo
+        # webhook es lo que activa la membresia. Antes esta ruta aceptaba "Tarjeta"
+        # sin cobrar nada y activaba la membresia al instante.
+        if metodo_pago not in METODOS_MANUALES_MIEMBRO_MEMBRESIA:
+            return jsonify({
+                "error": "Para pagar con tarjeta, PayPal o Mercado Pago usa el pago en línea. "
+                         f"Aquí solo se registra: {', '.join(METODOS_MANUALES_MIEMBRO_MEMBRESIA)}.",
+            }), 400
 
         # Transferencia: la referencia (folio o clave de rastreo) es obligatoria
         # -- es lo único que permite ubicar el movimiento en el estado de cuenta
-        # del banco si hace falta conciliarlo después.
+        # del banco para que el personal la verifique.
         referencia = (data.get('referencia') or '').strip()
         if metodo_pago == 'Transferencia' and not referencia:
             return jsonify({"error": "Falta la referencia de la transferencia"}), 400
@@ -215,81 +245,72 @@ def renew_membership():
         if not tm:
             return jsonify({"error": "Membresía no encontrada"}), 404
 
-        membresia_activa = mdb.miembro_membresia.find_one({
-            "id_miembro": miembro["_id"],
-            "estado":     "Activa"
+        # Una sola solicitud abierta por miembro: evita que, a base de reenviar,
+        # acumule renovaciones que el personal luego tendría que depurar.
+        abierta = mdb.renovaciones_pendientes.find_one({
+            "id_gimnasio": gym_id, "id_miembro": miembro["_id"], "estado": PAGO_PENDIENTE,
         })
+        if abierta:
+            return jsonify({
+                "error": "Ya tienes una renovación en revisión. Recepción la confirmará en cuanto verifique tu pago.",
+                "codigo": "renovacion_en_revision",
+                "id": str(abierta["_id"]),
+            }), 409
 
-        fecha_inicio = datetime.now()
-        if membresia_activa:
-            f_fin_activa = membresia_activa.get("fecha_fin")
-            if isinstance(f_fin_activa, str):
-                f_fin_activa = datetime.strptime(f_fin_activa[:10], "%Y-%m-%d")
-            if isinstance(f_fin_activa, datetime) and f_fin_activa > fecha_inicio:
-                fecha_inicio = f_fin_activa + timedelta(days=1)
+        ahora = datetime.now(timezone.utc)
+        solicitud = {
+            "id_gimnasio":    gym_id,
+            "id_miembro":     miembro["_id"],
+            "id_miembro_pg":  user_pg_id,
+            "nombre_miembro": miembro.get("nombre", "") or "",
+            "email_miembro":  miembro.get("email"),
+            "id_membresia":   tm.id,
+            "membresia_nombre": tm.nombre,
+            # Se guarda lo que el miembro VIO al pedir: si el gimnasio cambia el
+            # precio mientras se revisa, se confirma el trato original.
+            "duracion_meses": tm.duracion_meses or 1,
+            "monto":          float(tm.precio),
+            "metodo_pago":    metodo_pago,
+            "referencia":     referencia or None,
+            "estado":         PAGO_PENDIENTE,
+            "creado_en":      ahora,
+        }
+        res = mdb.renovaciones_pendientes.insert_one(solicitud)
+        solicitud_id = str(res.inserted_id)
 
-            mdb.miembro_membresia.update_one(
-                {"_id": membresia_activa["_id"]},
-                {"$set": {"estado": "Vencida"}}
-            )
-
-        duracion  = tm.duracion_meses or 1
-        fecha_fin = fecha_inicio + timedelta(days=duracion * 30)
-
-        mdb.miembro_membresia.insert_one({
-            "id_miembro":   miembro["_id"],
-            "id_membresia": tm.id,          # entero PG
-            "fecha_inicio": fecha_inicio,
-            "fecha_fin":    fecha_fin,
-            "estado":       "Activa"
-        })
-
-        pago_doc = mdb.pagos.insert_one({
-            "id_miembro":   miembro["_id"],
-            "id_gimnasio":  gym_id,
-            "monto":        float(tm.precio),
-            "metodo_pago":  metodo_pago,
-            "concepto":     f"Renovación {tm.nombre}",
-            "fecha_pago":   datetime.now(),
-            "referencia":   (referencia or None),
-        })
-
-        # -- Recibo por correo al miembro Y al propietario, mas bitacora de
-        #    seguridad -- misma logica que registrar_pago() en owner_gym/pagos.py,
-        #    pues esta ruta es una renovacion de membresia hecha por el propio
-        #    miembro (autoservicio) y no debe quedar fuera de la traza.
-        try:
-            enviar_recibo_membresia(
-                gym_id,
-                numero=str(pago_doc.inserted_id)[-8:].upper(),
-                fecha_str=datetime.now().strftime("%d/%m/%Y %H:%M"),
-                membresia_nombre=tm.nombre, monto=float(tm.precio), metodo_pago=metodo_pago,
-                fecha_inicio_str=fecha_inicio.strftime("%d/%m/%Y"), fecha_fin_str=fecha_fin.strftime("%d/%m/%Y"),
-                nombre_miembro=miembro.get("nombre", "") or "",
-                email_miembro=miembro.get("email"),
-            )
-        except Exception as e:
-            print(f"[user_membership] Error enviando recibo: {e}")
+        if metodo_pago == "Efectivo":
+            detalle_pago = f"Pagará ${float(tm.precio):.2f} en efectivo en recepción."
+        else:
+            detalle_pago = f"Transferencia por ${float(tm.precio):.2f}, referencia {referencia}."
+        notificar_personal(
+            mdb, gym_id, "renovacion_por_confirmar", "Renovación por confirmar",
+            f"{solicitud['nombre_miembro'] or 'Un miembro'} pidió renovar «{tm.nombre}». {detalle_pago} "
+            f"Verifica el pago y confírmalo para activar la membresía.",
+            "renovacion_pendiente", solicitud_id,
+        )
 
         registrar_evento_transaccion(
-            "membresia.renovada_autoservicio",
+            "membresia.renovacion_solicitada",
             id_usuario_actor=user_pg_id, id_gimnasio=gym_id,
             detalle={
-                "id_membresia": tm.id, "membresia_nombre": tm.nombre,
+                "solicitud_id": solicitud_id, "id_membresia": tm.id, "membresia_nombre": tm.nombre,
                 "monto": float(tm.precio), "metodo_pago": metodo_pago,
-                "id_miembro": str(miembro["_id"]) if miembro.get("_id") else None,
+                "id_miembro": str(miembro["_id"]),
             },
         )
 
+        # 202: aceptada pero NO aplicada. Los clientes deben mostrar "en revisión",
+        # nunca "renovada".
         return jsonify({
-            "message": "Membresía renovada exitosamente",
+            "message": "Solicitud enviada. Tu membresía se activará cuando recepción confirme tu pago.",
+            "estado": PAGO_PENDIENTE,
+            "id": solicitud_id,
             "membresia": {
-                "nombre":      tm.nombre,
-                "fechaInicio": fecha_inicio.strftime('%Y-%m-%d'),
-                "fechaFin":    fecha_fin.strftime('%Y-%m-%d'),
-                "monto":       float(tm.precio)
-            }
-        }), 201
+                "nombre": tm.nombre,
+                "monto":  float(tm.precio),
+                "metodo_pago": metodo_pago,
+            },
+        }), 202
 
     except Exception as e:
         import traceback; traceback.print_exc()

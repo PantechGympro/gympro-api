@@ -43,6 +43,10 @@ _INDICES = [
     ("entrenamientos_realizados", [("id_miembro", 1), ("fecha", -1)]),
     ("progreso_fisico",           [("id_miembro", 1), ("fecha_registro", 1)]),
     ("notificaciones",            [("id_usuario_pg", 1)]),
+    # Bandeja "Pagos por confirmar": se consulta por gimnasio + estado pendiente.
+    ("ventas",                    [("id_gimnasio", 1), ("estado_pago", 1)]),
+    ("renovaciones_pendientes",   [("id_gimnasio", 1), ("estado", 1)]),
+    ("renovaciones_pendientes",   [("id_miembro", 1), ("estado", 1)]),
 ]
 
 
