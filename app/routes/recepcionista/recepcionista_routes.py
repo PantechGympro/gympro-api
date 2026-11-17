@@ -18,6 +18,7 @@ Endpoints exclusivos del rol Recepcionista:
   DELETE /api/recepcionista/tasks/<id>— eliminar tarea
 """
 
+import re  # re.escape: texto de búsqueda nunca se interpreta como patrón (auditoría nov/2026)
 from flask import Blueprint, jsonify, request, g
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone, timedelta
@@ -353,7 +354,7 @@ def get_members():
         # el email queda fuera de alcance a proposito (identificador tecnico).
         condiciones = [
             {"nombre": {"$regex": patron_insensible(search), "$options": "i"}},
-            {"email":  {"$regex": search, "$options": "i"}},
+            {"email":  {"$regex": re.escape(search), "$options": "i"}},
         ]
         if search.isdigit():
             condiciones.append({"id_usuario_pg": int(search)})
@@ -516,11 +517,11 @@ def get_payments():
         # Buscar por concepto O por nombre de miembro (lookup inverso)
         miembro_ids = [
             m["_id"] for m in db.miembros.find(
-                {"nombre": {"$regex": q, "$options": "i"}, "id_gimnasio_pg": gym_id},
+                {"nombre": {"$regex": patron_insensible(q), "$options": "i"}, "id_gimnasio_pg": gym_id},
                 {"_id": 1},
             )
         ]
-        q_conditions = [{"concepto": {"$regex": q, "$options": "i"}}]
+        q_conditions = [{"concepto": {"$regex": re.escape(q), "$options": "i"}}]
         if miembro_ids:
             q_conditions.append({"id_miembro": {"$in": miembro_ids}})
         query["$or"] = q_conditions
@@ -652,7 +653,7 @@ def create_cita():
         )
     if not miembro_doc:
         miembro_doc = db.miembros.find_one(
-            {"nombre": {"$regex": f"^{client_name}$", "$options": "i"}, "id_gimnasio_pg": gym_id},
+            {"nombre": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}, "id_gimnasio_pg": gym_id},
             {"nombre": 1, "email": 1, "id_usuario_pg": 1},
         )
 

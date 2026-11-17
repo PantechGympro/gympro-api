@@ -19,6 +19,8 @@ import re as _re
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
 from app.utils.security import require_funcion_plan  # SCRUM-224
+from app.utils.security import require_role
+from app.routes.ia.spark_config import ROLES_ANALITICA_ENTRENO, ROLES_ANALITICA_PERSONAL
 
 spark_regresion_bp = Blueprint("spark_regresion", __name__)
 
@@ -35,6 +37,51 @@ def _trainer_scope():
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _puede_ver_miembro(id_miembro_hex: str, gym_id) -> bool:
+    """
+    Autoriza la lectura del historial de peso de UN miembro (auditoría
+    nov/2026, OWASP A01 -- referencia directa a objeto sin control).
+
+    Antes /api/analytics/regresion/predecir/<id> solo exigía sesión: cualquier
+    cuenta autenticada, de cualquier gimnasio, podía pedir el historial de
+    peso y la proyección de otra persona cambiando el número de la URL. El
+    peso corporal es un dato de salud; no puede depender de que nadie adivine
+    un id consecutivo.
+
+      Miembro ............ solo su propio historial.
+      Personal del gym ... solo miembros de SU gimnasio (el del token).
+      Superadmin ......... sin restricción (soporte de plataforma).
+    """
+    from bson import ObjectId
+    from app.constants.roles import normalizar_rol, ROL_SUPERADMIN, ROL_MIEMBRO
+
+    claims = get_jwt()
+    rol = normalizar_rol(claims.get("role", ""))
+    if rol == ROL_SUPERADMIN:
+        return True
+    try:
+        miembro = get_mongo_db().miembros.find_one(
+            {"_id": ObjectId(id_miembro_hex)},
+            {"id_usuario_pg": 1, "id_usuario": 1, "id_gimnasio_pg": 1},
+        )
+    except Exception:
+        return False
+    if not miembro:
+        return False
+
+    if rol == ROL_MIEMBRO:
+        yo = str(get_jwt_identity())
+        # identidad PG (actual) o, en cuentas heredadas, el id de Mongo.
+        return yo in {
+            str(miembro.get("id_usuario_pg")), str(miembro.get("id_usuario")), str(miembro["_id"]),
+        }
+
+    try:
+        return gym_id is not None and int(miembro.get("id_gimnasio_pg")) == int(gym_id)
+    except (TypeError, ValueError):
+        return False
 
 
 def _cache_key(gym_id, trainer_id=None) -> str:
@@ -691,6 +738,7 @@ def _diagnostico_datos(gym_id, trainer_id):
 
 @spark_regresion_bp.route("/api/analytics/regresion", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_PERSONAL)
 @require_funcion_plan("analiticas_ia")  # SCRUM-224
 def regresion_analytics():
     """Devuelve métricas globales desde caché. Si expiró, re-entrena."""
@@ -727,6 +775,7 @@ def regresion_analytics():
 
 @spark_regresion_bp.route("/api/analytics/regresion/train", methods=["POST"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_ENTRENO)
 @require_funcion_plan("analiticas_ia")  # SCRUM-224
 def regresion_train():
     """Fuerza re-entrenamiento y actualiza caché."""
@@ -775,7 +824,7 @@ def predecir_peso_miembro(id_entrada: str):
         id_entrada  = id_entrada.strip("{}")
         dias_futuro = request.args.get("dias", 180, type=int)
         if not (30 <= dias_futuro <= 365):
-            return jsonify({"error": "dias debe estar entre 30 y 365"}), 400
+            return jsonify({"error": "Elige un plazo de entre 30 y 365 días para la proyección."}), 400
 
         gym_id     = resolve_gym_id()
         trainer_id = _trainer_scope()
@@ -788,6 +837,11 @@ def predecir_peso_miembro(id_entrada: str):
                 "registros": 0,
                 "minimo_requerido": MIN_REGISTROS_PERSONALES,
             }), 404
+
+        if not _puede_ver_miembro(id_miembro_real, gym_id):
+            return jsonify({
+                "error": "No tienes permiso para ver el progreso de esta persona.",
+            }), 403
 
         registros, historial = _historial_de_miembro(id_miembro_real)
         if not historial:

@@ -11,6 +11,8 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
+from app.utils.security import require_role
+from app.routes.ia.spark_config import ROLES_ANALITICA_ENTRENO, ROLES_ANALITICA_NEGOCIO, ROLES_ANALITICA_PERSONAL
 
 spark_kmeans_bp = Blueprint("spark_kmeans", __name__)
 
@@ -325,6 +327,7 @@ def _optimo(gym_id=None, trainer_id=None, kmax=8):
 
 @spark_kmeans_bp.route("/api/analytics/kmeans/optimo", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 def kmeans_optimo():
     """Método del codo (inercia por k) y coeficiente de silueta por k."""
     try:
@@ -356,6 +359,7 @@ def kmeans_optimo():
 
 @spark_kmeans_bp.route("/api/analytics/kmeans", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_PERSONAL)
 def kmeans_analytics():
     """Devuelve resultado desde caché. Si expiró, entrena y guarda."""
     try:
@@ -396,6 +400,7 @@ def kmeans_analytics():
 
 @spark_kmeans_bp.route("/api/analytics/kmeans/train", methods=["POST"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_ENTRENO)
 def kmeans_train():
     """Fuerza re-entrenamiento y actualiza caché."""
     try:

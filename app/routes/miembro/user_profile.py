@@ -3,6 +3,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
+import uuid
 
 from app.mongo import get_db
 from app.models.pg.usuario import Usuario
@@ -12,6 +13,22 @@ from app.utils.tenant import require_tenant
 user_profile_bp = Blueprint('user_profile', __name__)
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+
+def _nombre_impredecible(filename: str) -> str:
+    """
+    Nombre de archivo que no se puede adivinar (auditoría nov/2026).
+
+    Antes era "<fecha-hora al segundo>_<nombre original>": la app móvil
+    siempre manda "foto_perfil.jpg", así que el nombre final era, en la
+    práctica, solo la hora de subida. /api/uploads/<archivo> exige sesión
+    pero no comprueba de quién es la foto, de modo que cualquier cuenta
+    podía recorrer segundos hasta dar con fotos ajenas. Con 128 bits
+    aleatorios ya no hay nada que recorrer. Las fotos antiguas conservan su
+    nombre y siguen funcionando.
+    """
+    ext = filename.rsplit(".", 1)[1].lower() if "." in filename else "jpg"
+    return f"{uuid.uuid4().hex}.{ext}"
 
 
 def allowed_file(filename):
@@ -312,7 +329,7 @@ def update_user_profile():
         foto_final = miembro.get("foto_perfil")
         if file and allowed_file(file.filename):
             filename        = secure_filename(file.filename)
-            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+            unique_filename = _nombre_impredecible(filename)
             upload_folder   = "/app/storage/uploads"
             os.makedirs(upload_folder, exist_ok=True)
             file.save(os.path.join(upload_folder, unique_filename))
@@ -470,10 +487,10 @@ def upload_profile_photo():
 
         file = request.files.get('foto')
         if not file or not allowed_file(file.filename):
-            return jsonify({"error": "Archivo inválido"}), 400
+            return jsonify({"error": "Ese archivo no es una imagen compatible. Usa una foto JPG, PNG o WEBP."}), 400
 
         filename        = secure_filename(file.filename)
-        unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+        unique_filename = _nombre_impredecible(filename)
         # Debe guardarse en el MISMO directorio que sirve /api/uploads/<archivo>
         # (/app/storage/uploads). Antes se guardaba en static/uploads y la foto
         # nunca se mostraba (404) en perfil, sidebar ni fichas del entrenador.

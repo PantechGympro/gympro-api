@@ -52,10 +52,9 @@ class Config:
     # Roles, Gimnasios, Usuarios y entidades financieras viven aquí.
     # En docker-compose este valor se sobreescribe automáticamente desde la
     # variable POSTGRES_URI inyectada por el servicio postgres.
-    SQLALCHEMY_DATABASE_URI = os.getenv(
-        "POSTGRES_URI",
-        "postgresql+psycopg2://gymuser:gympassword@localhost:5432/gymprodb"
-    )
+    # Sin valor por defecto: una credencial hardcodeada en el código termina en
+    # git y en producción. Si falta, la app falla al arrancar (ver create_app).
+    SQLALCHEMY_DATABASE_URI = os.getenv("POSTGRES_URI")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # NullPool: crea una conexión nueva por request y la cierra al terminar.
     # Necesario con Gunicorn en modo fork (--worker-class sync): los workers

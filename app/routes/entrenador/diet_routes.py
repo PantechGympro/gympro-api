@@ -32,7 +32,7 @@ import requests
 from datetime import datetime, timezone
 
 from bson.objectid import ObjectId
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify, request, current_app
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.mongo import get_db
@@ -722,8 +722,11 @@ def import_diet_ai():
             "detalle": "Hay otras importaciones con IA en curso. Intenta de nuevo en unos minutos.",
         }), 503
     except Exception as exc:
-        import traceback
-        return jsonify({"error": str(exc), "trace": traceback.format_exc()[-500:]}), 500
+        # Auditoría nov/2026: esta respuesta devolvía los últimos 500
+        # caracteres del traceback al navegador. El detalle va al log; al
+        # cliente solo le llega un mensaje claro (utils/errores.py añade el folio).
+        current_app.logger.exception("Fallo al importar plan con IA")
+        return jsonify({"error": "No pudimos leer el plan con la IA. Revisa que el archivo sea legible e inténtalo de nuevo.", "publico": True}), 500
 
 
 # ─── Confirmar importación: persistir plan + recetas ─────────────────────────

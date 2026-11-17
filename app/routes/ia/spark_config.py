@@ -93,3 +93,24 @@ def resolve_gym_id():
                 return None
         return None
     return claims.get("id_gimnasio")
+
+
+# ── Quién puede ver qué analítica (auditoría nov/2026, OWASP A01) ────────────
+# Antes estos endpoints solo pedían sesión (@jwt_required): un Miembro podía
+# consultar por la API los ingresos del gimnasio, la segmentación de clientes
+# o el riesgo de cancelación de otros socios, y disparar los /train (que
+# recalculan todo el modelo) sin límite. La interfaz ya ocultaba esas
+# pantallas, pero ocultar un botón no es control de acceso.
+from app.constants.roles import (  # noqa: E402
+    ROL_SUPERADMIN, ROL_PROPIETARIO, ROL_ADMINISTRADOR,
+    ROL_ENTRENADOR, ROL_RECEPCIONISTA,
+)
+
+# Datos de negocio (ingresos, churn, RFM): solo dirección del gimnasio.
+ROLES_ANALITICA_NEGOCIO = (ROL_PROPIETARIO, ROL_ADMINISTRADOR, ROL_SUPERADMIN)
+# Recepción consulta el resumen de ingresos/afluencia, pero no lo recalcula.
+ROLES_ANALITICA_RECEPCION = ROLES_ANALITICA_NEGOCIO + (ROL_RECEPCIONISTA,)
+# Segmentación y progreso de miembros: también el entrenador (acotado a los suyos).
+ROLES_ANALITICA_ENTRENO = ROLES_ANALITICA_NEGOCIO + (ROL_ENTRENADOR,)
+# Lectura para todo el personal.
+ROLES_ANALITICA_PERSONAL = ROLES_ANALITICA_ENTRENO + (ROL_RECEPCIONISTA,)

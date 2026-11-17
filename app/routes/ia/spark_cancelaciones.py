@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db
 from app.utils.security import require_funcion_plan  # SCRUM-224
+from app.utils.security import require_role
+from app.routes.ia.spark_config import ROLES_ANALITICA_NEGOCIO
 
 spark_cancelaciones_bp = Blueprint("spark_cancelaciones", __name__)
 
@@ -284,6 +286,7 @@ def _paginar_en_riesgo(payload: dict) -> dict:
 
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 @require_funcion_plan("analiticas_ia")  # SCRUM-224
 def cancelaciones_analytics():
     try:
@@ -307,6 +310,7 @@ def cancelaciones_analytics():
 
 @spark_cancelaciones_bp.route("/api/analytics/cancelaciones/train", methods=["POST"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 @require_funcion_plan("analiticas_ia")  # SCRUM-224
 def cancelaciones_train():
     try:

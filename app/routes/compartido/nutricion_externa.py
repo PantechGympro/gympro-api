@@ -81,12 +81,12 @@ def buscar_por_codigo_barras(code):
         }), 503
 
     if resp.status_code != 200:
-        return jsonify({"error": "Open Food Facts no respondió correctamente"}), 502
+        return jsonify({"error": "El catálogo de alimentos no respondió. Intenta de nuevo o captura los datos a mano.", "publico": True}), 502
 
     try:
         data = resp.json()
     except ValueError:
-        return jsonify({"error": "Open Food Facts devolvió una respuesta inválida"}), 502
+        return jsonify({"error": "No pudimos leer la información de ese producto. Captura los datos a mano.", "publico": True}), 502
 
     producto = data.get("product") if data.get("status") == 1 else None
     if not producto:

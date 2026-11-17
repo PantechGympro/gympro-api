@@ -31,6 +31,8 @@ from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime
 
 from app.routes.ia.spark_config import cache_get, cache_set, get_mongo_db, resolve_gym_id
+from app.utils.security import require_role
+from app.routes.ia.spark_config import ROLES_ANALITICA_NEGOCIO
 
 spark_modelos_bp = Blueprint("spark_modelos", __name__)
 
@@ -396,6 +398,7 @@ def _ejecutar_modelos(gym_id):
 
 @spark_modelos_bp.route("/api/analytics/modelos", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 def modelos_analytics():
     try:
         gym_id = resolve_gym_id()
@@ -416,6 +419,7 @@ def modelos_analytics():
 
 @spark_modelos_bp.route("/api/analytics/modelos/train", methods=["POST"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 def modelos_train():
     try:
         gym_id = resolve_gym_id()
@@ -526,6 +530,7 @@ def _entrenamiento(gym_id):
 
 @spark_modelos_bp.route("/api/analytics/entrenamiento", methods=["GET"])
 @jwt_required()
+@require_role(*ROLES_ANALITICA_NEGOCIO)
 def entrenamiento_analytics():
     """Flujo de Entrenamiento, Prueba y Error en 5 pasos (aprendizaje supervisado)."""
     try:

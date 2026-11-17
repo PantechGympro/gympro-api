@@ -4,6 +4,7 @@ import os
 from .config import Config
 from .extensions import db, migrate, jwt, mail, limiter
 from .utils.tenant import init_tenant_middleware
+from .utils.errores import init_errores
 
 # Blueprints por rol
 from app.routes.owner_gym.miembros            import miembros_bp
@@ -76,6 +77,12 @@ def create_app():
     app.config.from_object(Config)
     app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 
+    # Configuración crítica obligatoria: fallar rápido y con un mensaje claro
+    # es mejor que arrancar con secretos vacíos o credenciales por defecto.
+    faltantes = [v for v in ("JWT_SECRET_KEY", "POSTGRES_URI") if not os.getenv(v)]
+    if faltantes:
+        raise RuntimeError("Faltan variables de entorno obligatorias: " + ", ".join(faltantes))
+
     from app.models.pg.rol                 import Rol                 # noqa: F401
     from app.models.pg.gimnasio            import Gimnasio            # noqa: F401
     from app.models.pg.usuario             import Usuario             # noqa: F401
@@ -96,6 +103,7 @@ def create_app():
     mail.init_app(app)
     limiter.init_app(app)
     init_tenant_middleware(app)
+    init_errores(app)   # mensajes claros + saneado de 5xx + cabeceras (auditoría nov/2026)
 
     from .auth.routes              import auth_bp
     from .routes.compartido.health import health_bp

@@ -51,10 +51,11 @@ def require_role(*roles: str):
             permitidos = {normalizar_rol(r) for r in roles}
 
             if normalizar_rol(user_role) not in permitidos:
+                # Auditoría nov/2026: antes la respuesta incluía "required_roles"
+                # y "your_role" -- le decía a quien sondea la API exactamente
+                # qué rol necesita conseguir. Ningún cliente leía esos campos.
                 return jsonify({
-                    "msg": "Acceso denegado: no tienes permisos para realizar esta acción",
-                    "required_roles": list(roles),
-                    "your_role": user_role
+                    "msg": "Tu cuenta no tiene permiso para hacer esto. Si crees que es un error, pide acceso a tu administrador.",
                 }), 403
 
             return fn(*args, **kwargs)
