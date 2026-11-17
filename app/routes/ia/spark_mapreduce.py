@@ -224,7 +224,9 @@ def mapreduce_analytics():
 
 @spark_mapreduce_bp.route("/api/analytics/mapreduce/train", methods=["POST"])
 @jwt_required()
-@require_role(*ROLES_ANALITICA_NEGOCIO)
+# Regresión de la auditoría: la pantalla de Finanzas de Recepción muestra el
+# botón "Actualizar datos"; si el rol puede ver el resumen, puede refrescarlo.
+@require_role(*ROLES_ANALITICA_RECEPCION)
 def mapreduce_train():
     """Fuerza re-ejecución del MapReduce y actualiza caché."""
     try:
@@ -234,7 +236,7 @@ def mapreduce_train():
         payload["desde_cache"] = False
         cache_set(key, payload)
         return jsonify({**payload,
-                        "mensaje": f"MapReduce re-ejecutado para gimnasio {gym_id}."}), 200
+                        "mensaje": "Resumen actualizado con la información más reciente."}), 200
 
     except Exception as e:
         import traceback; traceback.print_exc()

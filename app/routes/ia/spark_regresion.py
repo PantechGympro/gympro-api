@@ -775,7 +775,8 @@ def regresion_analytics():
 
 @spark_regresion_bp.route("/api/analytics/regresion/train", methods=["POST"])
 @jwt_required()
-@require_role(*ROLES_ANALITICA_ENTRENO)
+# Mismo criterio que la lectura: quien ve la pantalla puede actualizarla.
+@require_role(*ROLES_ANALITICA_PERSONAL)
 @require_funcion_plan("analiticas_ia")  # SCRUM-224
 def regresion_train():
     """Fuerza re-entrenamiento y actualiza caché."""
@@ -792,7 +793,7 @@ def regresion_train():
 
         ambito = f"entrenador {trainer_id}" if trainer_id else f"gimnasio {gym_id}"
         return jsonify({**payload,
-                        "mensaje": f"Modelo reentrenado para {ambito}."}), 200
+                        "mensaje": "Tendencias actualizadas con la información más reciente."}), 200
 
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400

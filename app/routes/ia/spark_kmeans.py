@@ -400,7 +400,8 @@ def kmeans_analytics():
 
 @spark_kmeans_bp.route("/api/analytics/kmeans/train", methods=["POST"])
 @jwt_required()
-@require_role(*ROLES_ANALITICA_ENTRENO)
+# Mismo criterio que la lectura: quien ve la pantalla puede actualizarla.
+@require_role(*ROLES_ANALITICA_PERSONAL)
 def kmeans_train():
     """Fuerza re-entrenamiento y actualiza caché."""
     try:
@@ -424,7 +425,7 @@ def kmeans_train():
 
         ambito = f"entrenador {trainer_id}" if trainer_id else f"gimnasio {gym_id}"
         return jsonify({**payload,
-                        "mensaje": f"K-Means k={k} reentrenado para {ambito}."}), 200
+                        "mensaje": "Grupos actualizados con la información más reciente."}), 200
 
     except ValueError as ve:
         payload_error = {"error": str(ve)}

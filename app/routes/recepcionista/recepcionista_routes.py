@@ -573,6 +573,49 @@ def get_payments():
     }), 200
 
 
+@recepcionista_bp.route("/payments/kpis", methods=["GET"])
+@jwt_required()
+@require_tenant
+def get_payments_kpis():
+    """
+    Totales de la pantalla de Pagos, calculados en el servidor sobre TODO el
+    historial del gimnasio (no sobre la página visible).
+
+    Antes la pantalla llamaba a este endpoint y recibía 404 (no existía), el
+    error se tragaba en silencio y los tres cuadros mostraban siempre $0.
+
+    Respuesta: total_monto (suma de todo), cobrado (suma de pagos completados),
+    pendientes (cantidad), fallidos (cantidad).
+    """
+    err = _require_receptionist()
+    if err:
+        return err
+
+    # Mismos valores históricos que normaliza get_payments (el modelo guardó
+    # "Pagado"/"Pendiente"/"Fallido" en distintas épocas).
+    completados = ["completado", "Pagado", "pagado"]
+    pendientes  = ["pendiente", "Pendiente"]
+    fallidos    = ["fallido", "Fallido"]
+
+    filas = get_db().pagos.aggregate([
+        {"$match": {"id_gimnasio": g.tenant_id}},
+        {"$group": {
+            "_id": None,
+            "total_monto": {"$sum": {"$ifNull": ["$monto", 0]}},
+            "cobrado": {"$sum": {"$cond": [{"$in": ["$estado", completados]}, {"$ifNull": ["$monto", 0]}, 0]}},
+            "pendientes": {"$sum": {"$cond": [{"$in": ["$estado", pendientes]}, 1, 0]}},
+            "fallidos": {"$sum": {"$cond": [{"$in": ["$estado", fallidos]}, 1, 0]}},
+        }},
+    ])
+    r = next(filas, None) or {}
+    return jsonify({
+        "total_monto": r.get("total_monto", 0),
+        "cobrado":     r.get("cobrado", 0),
+        "pendientes":  r.get("pendientes", 0),
+        "fallidos":    r.get("fallidos", 0),
+    }), 200
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Citas — CRUD
 # ─────────────────────────────────────────────────────────────────────────────
