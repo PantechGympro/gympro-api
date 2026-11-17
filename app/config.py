@@ -107,7 +107,9 @@ class Config:
     # 15 MB — permite hasta 3 imágenes base64 de ~4 MB c/u antes de encoding.
     MAX_CONTENT_LENGTH = 15 * 1024 * 1024
 
-    RATELIMIT_STORAGE_URI  = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    RATELIMIT_STORAGE_URI  = os.getenv("RATELIMIT_STORAGE_URI", os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    # Ventana móvil: evita la ráfaga doble en el borde de una ventana fija.
+    RATELIMIT_STRATEGY     = "moving-window"
     RATELIMIT_HEADERS_ENABLED = True   # Agrega X-RateLimit-* headers a las respuestas
 
     # Falla en CERRADO en producción (Actividad 09, PR-02 — M. Hernández

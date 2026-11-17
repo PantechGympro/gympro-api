@@ -5,7 +5,6 @@ from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
 from flask_mail import Mail
 from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 import redis
 
 db      = SQLAlchemy()
@@ -15,10 +14,22 @@ mail    = Mail()
 
 # Límites globales aplicados a todos los endpoints salvo los que definen uno propio.
 # Los contadores viven en Redis (RATELIMIT_STORAGE_URI en config.py).
+# Clave: usuario autenticado o, si no hay sesión, la IP real (ver utils/rate_limit.py).
+# El tope por defecto ya no es "60 por hora": una sesión normal de la app (varias
+# pantallas con 3-6 peticiones cada una) lo agotaba. Los límites estrictos viven
+# en la tabla de políticas de utils/rate_limit.py.
+from app.utils.rate_limit import clave_limite  # noqa: E402
+
 limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["300 per day", "60 per hour"],
+    key_func=clave_limite,
+    default_limits=["300 per minute", "3000 per hour"],
 )
+
+@limiter.request_filter
+def _preflight_sin_cuota():
+    """Las peticiones OPTIONS (preflight CORS) no consumen cuota."""
+    from flask import request
+    return request.method == "OPTIONS"
 
 # Cliente Redis para la lista de revocación de JWT (Actividad 09, PR-01 y
 # PR-02 de sesión — J. C. Pérez Nava). Mismo Redis y misma base que usa

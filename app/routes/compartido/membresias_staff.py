@@ -46,18 +46,7 @@ DIAS_DEFECTO, DIAS_MAX = 7, 60
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _a_utc(valor):
-    """Normaliza fecha (datetime naive/aware o ISO str) a datetime aware UTC."""
-    if valor is None:
-        return None
-    if isinstance(valor, str):
-        try:
-            valor = datetime.fromisoformat(valor)
-        except ValueError:
-            return None
-    if valor.tzinfo is None:
-        valor = valor.replace(tzinfo=timezone.utc)
-    return valor.astimezone(timezone.utc)
+from app.utils.membresia import a_utc as _a_utc, evaluar_membresia  # noqa: E402  (fuente única, ver utils/membresia.py)
 
 
 def _formato_local(dt_utc):
@@ -90,19 +79,12 @@ def _nombre_tipo(mem):
 def _membresia_vigente(db, id_miembro):
     """
     Devuelve (documento_membresia | None, motivo | None).
-    motivo ∈ {None, "sin_membresia", "membresia_vencida"}.
+    motivo ∈ {None, "sin_membresia", "membresia_vencida"}. Delegado en
+    utils/membresia.py para que staff, recepción y la app del miembro
+    apliquen exactamente la misma regla.
     """
-    ahora = datetime.now(timezone.utc)
-    activas = list(db.miembro_membresia.find({"id_miembro": id_miembro, "estado": "Activa"}))
-    if not activas:
-        return None, "sin_membresia"
-    # Si hubiera varias "Activa", cuenta la que vence más tarde.
-    activas.sort(key=lambda m: _a_utc(m.get("fecha_fin")) or datetime.min.replace(tzinfo=timezone.utc))
-    mejor = activas[-1]
-    fin = _a_utc(mejor.get("fecha_fin"))
-    if fin is None or fin < ahora:
-        return mejor, "membresia_vencida"
-    return mejor, None
+    estado = evaluar_membresia(db, id_miembro)
+    return estado["doc"], estado["codigo"]
 
 
 # ── Membresías por vencer ────────────────────────────────────────────────────

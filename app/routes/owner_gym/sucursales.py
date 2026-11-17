@@ -162,7 +162,7 @@ def crear_sucursal():
 
     Body JSON:
         {
-            "nombre": "Hyper Panchito Gym - Sucursal Norte",
+            "nombre": "Vitazone - Xonacatlán",
             "email_contacto": "...", "telefono": "...", "tipo_gimnasio": "...",
             "plan": "basico",       // opcional, hereda el de la sede principal si se omite
             "heredar_cobro": true   // opcional, default true -- copia la configuración de

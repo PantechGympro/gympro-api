@@ -14,6 +14,11 @@ from app.utils.checkin_qr import validar_token, QrTokenExpirado, QrTokenInvalido
 
 user_dashboard_bp = Blueprint('user_dashboard', __name__)
 
+# Registrar entrada por QR exige membresía vigente; el resto del dashboard (inicio,
+# racha, asistencias de la semana) sigue disponible para quien necesita renovar.
+from app.utils.membresia import proteger_con_membresia
+proteger_con_membresia(user_dashboard_bp, reglas=[(r"/checkin/qr$", {"POST"})])
+
 
 @user_dashboard_bp.route('/api/user/dashboard', methods=['GET'])
 @jwt_required()

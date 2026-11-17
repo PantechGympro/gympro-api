@@ -22,6 +22,16 @@ from app.routes.compartido.notificaciones import crear_notificacion
 
 training_bp = Blueprint("member_training", __name__)
 
+# Chat con entrenador, solicitud de PT y rutinas asignadas son servicios del
+# gimnasio: se bloquean con la membresía vencida (utils/membresia.py). Se dejan
+# libres la lista de entrenadores, avisos y calificaciones.
+from app.utils.membresia import proteger_con_membresia
+proteger_con_membresia(training_bp, reglas=[
+    (r"/chat/\d+$", None),
+    (r"/pt-request$", {"POST"}),
+    (r"/assigned-routines$", None),
+])
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 

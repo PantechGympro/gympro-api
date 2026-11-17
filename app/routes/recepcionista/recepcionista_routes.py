@@ -235,6 +235,12 @@ def register_checkin():
     if not miembro:
         return jsonify({"error": "Miembro no encontrado en este gimnasio"}), 404
 
+    # Misma regla que el check-in manual y la app del miembro (utils/membresia.py).
+    from app.utils.membresia import evaluar_membresia, respuesta_bloqueo
+    estado_mem = evaluar_membresia(db, miembro["_id"])
+    if not estado_mem["vigente"]:
+        return respuesta_bloqueo(estado_mem, para="personal", nombre=miembro.get("nombre"))
+
     from app.utils.timezone import local_now_naive
     start, end = _today_range()
     now = local_now_naive()

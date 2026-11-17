@@ -71,7 +71,7 @@ def get_user_membership():
                                 else str(membresia_activa.get("fecha_inicio")),
                 "fechaFin":     fecha_fin.strftime('%Y-%m-%d'),
                 "diasRestantes":dias_restantes,
-                "estado":       "activa" if dias_restantes > 0 else "por_vencer",
+                "estado":       "vencida" if dias_restantes < 0 else ("por_vencer" if dias_restantes <= 7 else "activa"),
                 "precio":       precio_mem
             }
         }), 200
@@ -79,6 +79,39 @@ def get_user_membership():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@user_membership_bp.route('/api/user/membership/estado', methods=['GET'])
+@jwt_required()
+@require_tenant
+def get_estado_membresia():
+    """
+    Estado resumido para que la app muestre avisos y bloquee módulos SIN depender
+    de que falle otra llamada. Siempre disponible, aunque la membresía esté vencida
+    (es justo la pantalla desde la que se renueva).
+
+    { vigente, estado: activa|por_vencer|vencida|sin_membresia, codigo, nombre,
+      fecha_fin_local, dias_restantes, vencio_hace_dias, mensaje, bloquea: [...] }
+    """
+    from app.utils.membresia import evaluar_membresia, mensaje_membresia
+    mdb = get_db()
+    miembro = mdb.miembros.find_one(
+        {"id_usuario_pg": int(get_jwt_identity()), "id_gimnasio_pg": g.tenant_id}, {"_id": 1})
+    if not miembro:
+        return jsonify({"error": "No encontramos tu ficha de miembro en este gimnasio."}), 404
+    est = evaluar_membresia(mdb, miembro["_id"])
+    return jsonify({
+        "vigente":          est["vigente"],
+        "estado":           est["estado"],
+        "codigo":           est["codigo"],
+        "nombre":           est["nombre"],
+        "fecha_fin_local":  est["fecha_fin_local"],
+        "dias_restantes":   est["dias_restantes"],
+        "vencio_hace_dias": est["vencio_hace_dias"],
+        "mensaje":          None if est["vigente"] else mensaje_membresia(est),
+        # Módulos de la app que se restringen mientras no esté vigente.
+        "bloquea":          [] if est["vigente"] else ["checkin", "rutinas", "entrenamiento", "nutricion", "chat"],
+    }), 200
 
 
 @user_membership_bp.route('/api/user/membership/plans', methods=['GET'])

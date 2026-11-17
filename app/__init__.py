@@ -103,7 +103,10 @@ def create_app():
     migrate.init_app(app, db, directory="migrations")
     jwt.init_app(app)
     mail.init_app(app)
+    from app.utils.rate_limit import configurar_proxy, registrar_manejador_429
+    configurar_proxy(app)
     limiter.init_app(app)
+    registrar_manejador_429(app)
     init_tenant_middleware(app)
     init_errores(app)   # mensajes claros + saneado de 5xx + cabeceras (auditoría nov/2026)
 
@@ -215,6 +218,11 @@ def create_app():
     def serve_upload_publico(filename):
         upload_dir = "/app/storage/uploads/gimnasios_publico"
         return send_from_directory(upload_dir, filename)
+
+    # Políticas de rate limit por endpoint (tabla en utils/rate_limit.py). Va al
+    # final: necesita que ya estén registrados todos los blueprints.
+    from app.utils.rate_limit import aplicar_rate_limits
+    aplicar_rate_limits(app, limiter)
 
     init_scheduler(app)
     return app

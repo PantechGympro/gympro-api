@@ -18,6 +18,9 @@ from app.utils.tenant import require_tenant
 
 user_nutrition_bp = Blueprint("user_nutrition", __name__)
 
+from app.utils.membresia import proteger_con_membresia
+proteger_con_membresia(user_nutrition_bp)
+
 
 # ─── helpers ────────────────────────────────────────────────────────
 def _oid(s):

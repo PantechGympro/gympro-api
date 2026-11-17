@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import random
 import uuid
 from app.extensions import db, limiter, mail, redis_cliente
+from app.utils.rate_limit import clave_cuenta, solo_fallos
 from app.models.pg.usuario import Usuario as UsuarioPG
 from app.models.pg.rol     import Rol     as RolPG
 from app.utils.alcance     import crear_asignacion, sucursales_de_administrador, usuario_tiene_alcance
@@ -234,7 +235,9 @@ def _build_token_mongo(user, nombre_rol: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @auth_bp.route("/login", methods=["POST"])
-@limiter.limit("5 per minute; 30 per hour")
+@limiter.limit("30 per minute; 300 per hour")                       # por IP (WiFi compartida del gimnasio)
+@limiter.limit("5 per minute; 20 per hour", key_func=clave_cuenta,   # fuerza bruta contra UNA cuenta,
+               deduct_when=solo_fallos)                              # sin castigar a quien sí entra
 def login():
     data = request.get_json(silent=True)
     if not data or not data.get("email") or not data.get("password"):
@@ -720,6 +723,7 @@ def _send_reset_email(email: str, code: str) -> None:
 
 @auth_bp.route("/forgot-password", methods=["POST"])
 @limiter.limit("3 per minute; 10 per hour")
+@limiter.limit("3 per hour", key_func=clave_cuenta)                  # evita inundar de correos a una persona
 def forgot_password():
     """
     Paso 1: el usuario pide un código. Genera un código de 6 dígitos, lo guarda
@@ -755,6 +759,7 @@ def forgot_password():
 
 @auth_bp.route("/reset-password", methods=["POST"])
 @limiter.limit("5 per minute; 20 per hour")
+@limiter.limit("5 per hour", key_func=clave_cuenta, deduct_when=solo_fallos)   # adivinar el código de 6 dígitos
 def reset_password():
     """
     Paso 2: valida el código y actualiza la contraseña (PG o Mongo legacy).

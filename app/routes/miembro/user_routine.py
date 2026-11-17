@@ -7,6 +7,10 @@ from app.utils.tenant import require_tenant
 
 user_routines_bp = Blueprint('user_routines', __name__)
 
+# Con la membresía vencida no se usan las rutinas del gimnasio (403 empático, ver utils/membresia.py).
+from app.utils.membresia import proteger_con_membresia
+proteger_con_membresia(user_routines_bp)
+
 def _build_routine_dict(db, rutina_doc):
     """Helper para armar el diccionario de la rutina con sus días y ejercicios"""
     dias = list(db.rutina_dias.find({"id_rutina": rutina_doc["_id"]}).sort("orden", 1))
