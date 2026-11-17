@@ -366,6 +366,15 @@ def reactivar_miembro(id):
         if miembro.id_gimnasio_pg != gym_id:
             return jsonify({"error": "No autorizado"}), 403
 
+        # Auditoría nov/2026: reactivar un miembro lo vuelve a contar como activo,
+        # así que debe respetar el tope del plan igual que un alta nueva (antes
+        # se podía rebasar el límite desactivando y reactivando).
+        if (miembro.estado or "") != "Activo":
+            try:
+                verificar_capacidad_miembro(gym_id)
+            except LimiteDePlanExcedido as e:
+                return jsonify({"error": str(e), "limite_plan": True}), 409
+
         miembro.estado = "Activo"
         miembro.save()
 

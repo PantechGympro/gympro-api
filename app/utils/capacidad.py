@@ -165,7 +165,7 @@ def verificar_capacidad_miembro(id_gimnasio, *, incremento=1):
     actual = contar_miembros_activos(id_gimnasio)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Esta sucursal ya tiene {actual} miembro(s) activo(s) de un máximo de {tope} en su plan.",
+            f"Llegaste al límite de {tope} miembros activos de tu plan (hoy tienes {actual}). Compra un lote adicional o mejora tu plan en Mi suscripción para seguir agregando.",
             tope=tope, actual=actual,
         )
 
@@ -184,7 +184,7 @@ def verificar_capacidad_staff(id_gimnasio, *, incremento=1):
     actual = contar_staff_activo(id_gimnasio)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Esta sucursal ya tiene {actual} usuario(s) de staff de un máximo de {tope} en su plan.",
+            f"Tu sucursal ya tiene {actual} usuarios de staff y tu plan permite {tope}. Desactiva a alguien o mejora tu plan para agregar más.",
             tope=tope, actual=actual,
         )
 
@@ -230,7 +230,7 @@ def verificar_capacidad_sucursal(id_organizacion, *, incremento=1):
     actual = contar_sucursales(id_organizacion)
     if actual + incremento > tope:
         raise LimiteDePlanExcedido(
-            f"Tu organización ya tiene {actual} sucursal(es) de un máximo de {tope} en su plan.",
+            f"Tu organización ya tiene {actual} sucursales y tu plan permite {tope}. Mejora tu plan para abrir otra.",
             tope=tope, actual=actual,
         )
 

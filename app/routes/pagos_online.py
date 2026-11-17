@@ -125,6 +125,17 @@ def crear_checkout():
     descripcion = (data.get("descripcion") or "Pago GymPro").strip()
     referencia_local = str(data.get("referencia_local") or "") or None
 
+    # Plan: cobrar a miembros en línea (membresía/producto) es una función del
+    # plan del gimnasio. La suscripción SaaS y los lotes los paga el propietario
+    # a la plataforma, así que NUNCA se bloquean por plan.
+    if contexto not in _CONTEXTOS_PLATAFORMA:
+        from app.utils.capacidad import permite_funcion
+        if not permite_funcion(g.tenant_id, "cobros_en_linea"):
+            return jsonify({
+                "msg": "El cobro en línea no está incluido en el plan de este gimnasio. Puedes cobrar en recepción o pedir al propietario que mejore su plan.",
+                "funcion_requerida": "cobros_en_linea", "upgrade_requerido": True,
+            }), 402
+
     # Resolver de dónde salen las credenciales según el contexto
     try:
         if contexto in _CONTEXTOS_PLATAFORMA:

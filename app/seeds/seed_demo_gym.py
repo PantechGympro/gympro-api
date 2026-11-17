@@ -282,11 +282,11 @@ PLANES_BASE = [
                     "backups_automaticos": True, "max_staff": 10, "max_sucursales": 2},
     },
     {
-        "nombre": "enterprise", "precio_mensual_mxn": 299900, "precio_anual_mxn": 2999000, "max_miembros": 400,
+        "nombre": "enterprise", "precio_mensual_mxn": 299900, "precio_anual_mxn": 2999000, "max_miembros": 600,
         "descripcion": "Alta capacidad por sucursal, con soporte dedicado y acuerdos de nivel de servicio.",
         "titulo_comercial": "Para cadenas y multiples sucursales", "orden": 3, "destacado": False,
         "caracteristicas": [
-            "Hasta 400 miembros y 20 staff por sucursal, hasta 5 sucursales", "Todo lo del plan Pro",
+            "Hasta 600 miembros y 30 staff por sucursal, hasta 8 sucursales", "Todo lo del plan Pro",
             "Laboratorio de Machine Learning completo", "Soporte prioritario con SLA",
             "Acompañamiento en la implementacion",
             "Amplia tu limite comprando lotes de miembros adicionales",
@@ -294,7 +294,7 @@ PLANES_BASE = [
         "limites": {"pos": True, "pasarelas_pago": True, "analiticas_ia": True,
                     "rutinas_ia": True, "reportes_pdf": True, "app_movil": True,
                     "backups_automaticos": True, "ml_lab": True, "soporte_sla": True,
-                    "max_staff": 20, "max_sucursales": 5},
+                    "max_staff": 30, "max_sucursales": 8},
     },
 ]
 

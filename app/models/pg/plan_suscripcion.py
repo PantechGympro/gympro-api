@@ -11,6 +11,14 @@ from datetime import datetime, timezone
 from app.extensions import db
 
 
+# Pares equivalentes de banderas (ver PlanSuscripcion.permite).
+_ALIAS_FUNCIONES = {
+    "cobros_en_linea": ("pasarelas_pago",), "pasarelas_pago": ("cobros_en_linea",),
+    "respaldos": ("backups_automaticos",), "backups_automaticos": ("respaldos",),
+    "soporte_prioritario": ("soporte_sla",), "soporte_sla": ("soporte_prioritario",),
+}
+
+
 class PlanSuscripcion(db.Model):
     __tablename__ = "planes_suscripcion"
 
@@ -84,5 +92,14 @@ class PlanSuscripcion(db.Model):
         True si el plan habilita la función indicada. Se usará para bloquear
         módulos según la suscripción del gimnasio (por ejemplo 'analiticas_ia').
         Si la bandera no está definida, se considera NO incluida.
+
+        Alias: la migración 012 nombró las banderas `cobros_en_linea`,
+        `respaldos` y `soporte_prioritario`; los seeds posteriores usan
+        `pasarelas_pago`, `backups_automaticos` y `soporte_sla`. Según cómo
+        se creó la base, un plan trae un nombre u otro, y antes la consulta
+        por el nombre "equivocado" devolvía False aunque el plan sí incluyera
+        la función. Aquí se acepta cualquiera de los dos.
         """
-        return bool((self.limites or {}).get(funcion, False))
+        limites = self.limites or {}
+        nombres = {funcion, *_ALIAS_FUNCIONES.get(funcion, ())}
+        return any(bool(limites.get(n, False)) for n in nombres)

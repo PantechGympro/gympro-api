@@ -454,7 +454,7 @@ def me():
     # leer esto sin una petición adicional.
     FUNCIONES_PLAN = (
         "analiticas_ia", "rutinas_ia", "reportes_pdf", "app_movil",
-        "pos", "cobros_en_linea", "respaldos", "soporte_prioritario",
+        "pos", "cobros_en_linea", "respaldos", "soporte_prioritario", "ml_lab",
     )
     if normalizar_rol(claims.get("role", "")) == ROL_SUPERADMIN:
         # El superadmin no tiene plan propio (id_gimnasio es None salvo que

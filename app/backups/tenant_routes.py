@@ -17,7 +17,7 @@ import uuid
 from flask import Blueprint, jsonify, request, send_file
 from flask_jwt_extended import jwt_required, get_jwt
 
-from app.utils.security import require_role
+from app.utils.security import require_role, require_funcion_plan
 from app.backups.tenant_service import (
     get_state, update_state, run_tenant_backup,
     restore_tenant_backup, load_history,
@@ -60,6 +60,9 @@ def summary():
 @tenant_backups_bp.route("/backups/trigger", methods=["POST"])
 @jwt_required()
 @require_role("owner_gym")
+# Respaldar/restaurar a demanda es función del plan; ver y descargar lo ya
+# generado queda abierto siempre (los datos son del gimnasio).
+@require_funcion_plan("respaldos")
 def trigger():
     from flask import current_app
     gym  = _gym_id()
@@ -117,6 +120,9 @@ def download(filename):
 @tenant_backups_bp.route("/backups/restore", methods=["POST"])
 @jwt_required()
 @require_role("owner_gym")
+# Respaldar/restaurar a demanda es función del plan; ver y descargar lo ya
+# generado queda abierto siempre (los datos son del gimnasio).
+@require_funcion_plan("respaldos")
 def restore():
     gym  = _gym_id()
     data = request.get_json() or {}
