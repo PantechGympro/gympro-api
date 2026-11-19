@@ -10,7 +10,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    name: Pruebas (quality gate)
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: ci
     runs-on: [self-hosted, gympro-vps]
     steps:
       - name: Checkout
@@ -19,12 +24,20 @@ jobs:
       - name: Asegurar rsync en el runner
         run: command -v rsync >/dev/null || (apt-get update && apt-get install -y rsync)
 
+      - name: Guardar version actual (para rollback)
+        run: |
+          S=~/GymPro-Staging/gympro-infra/deploy/scripts
+          if [ -f "$S/snapshot-release.sh" ]; then bash "$S/snapshot-release.sh" staging gympro-api
+          else echo "::warning::Scripts de despliegue no instalados en el VPS: despliega gympro-infra primero. Sin rollback en este despliegue."; fi
+
       - name: Sincronizar codigo con el clon persistente del VPS
         run: |
+          echo "$GITHUB_SHA" > BUILD_INFO
           mkdir -p ~/GymPro-Staging/gympro-api
           rsync -a --delete --exclude='.env' --exclude='.git' ./ ~/GymPro-Staging/gympro-api/
 
       - name: Reconstruir stack de staging
+        id: build
         run: |
           cd ~/GymPro-Staging/gympro-infra
           # -p gympro-staging: mismo nombre de proyecto que el stack que ya corre
@@ -37,3 +50,28 @@ jobs:
           cd ~/GymPro-Staging/gympro-infra
           sleep 5
           docker compose -p gympro-staging -f docker-compose.yml -f docker-compose.override.yml ps
+
+      - name: Verificacion de salud post-despliegue
+        id: salud
+        run: |
+          S=~/GymPro-Staging/gympro-infra/deploy/scripts
+          if [ -f "$S/post-deploy-check.sh" ]; then bash "$S/post-deploy-check.sh" staging
+          else echo "::warning::Sin scripts de verificacion en el VPS (despliega gympro-infra primero)."; fi
+
+      - name: Rollback automatico a la version anterior
+        id: rollback
+        if: failure() && (steps.build.outcome == 'failure' || steps.salud.outcome == 'failure')
+        run: bash ~/GymPro-Staging/gympro-infra/deploy/scripts/rollback.sh staging gympro-api
+
+      - name: Notificar resultado del despliegue
+        if: always()
+        env:
+          DEPLOY_ENV: staging
+          DEPLOY_REPO: gympro-api
+          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+        run: |
+          if [ "${{ steps.rollback.outcome }}" = "success" ]; then export DEPLOY_STATUS=revertido
+          elif [ "${{ job.status }}" = "success" ]; then export DEPLOY_STATUS=exito
+          else export DEPLOY_STATUS=fallo; fi
+          S=~/GymPro-Staging/gympro-infra/deploy/scripts
+          if [ -f "$S/notify.sh" ]; then bash "$S/notify.sh"; else echo "Despliegue: $DEPLOY_STATUS"; fi

@@ -1,0 +1,17 @@
+[run]
+source = app
+branch = True
+omit =
+    app/__pycache__/*
+    */migrations/*
+
+[report]
+show_missing = False
+skip_empty = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+
+[xml]
+output = coverage.xml

@@ -1,31 +1,203 @@
 name: CI
 
+# Quality gate de la API (SCRUM-182). Se ejecuta en cada push/PR a main y dev, y es
+# reutilizable (`workflow_call`): los despliegues a staging/producción lo invocan
+# y NO continúan si falla.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Umbral de cobertura (líneas + ramas). Línea base medida: 20 %. Solo debe SUBIR:
+  # cuando la cobertura real supere el umbral por >=3 puntos, súbelo.
+  COVERAGE_MIN: "18"
 
 jobs:
   lint-and-compile:
+    name: Compilar y lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
+          pip install -r requirements-dev.txt
       - name: Compilar todos los módulos (sintaxis válida)
         run: python -m compileall -q app migrations wsgi.py run.py
+      - name: "Lint con flake8 (errores graves: sintaxis, nombres indefinidos)"
+        run: flake8 app tests wsgi.py run.py --count --select=E9,F63,F7,F82 --show-source --statistics
 
-      - name: "Lint con flake8 (solo errores graves: sintaxis, nombres indefinidos)"
+  tests:
+    name: Pruebas unitarias + cobertura (hermético)
+    runs-on: ubuntu-latest
+    needs: lint-and-compile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Instalar dependencias
         run: |
-          pip install flake8
-          flake8 app wsgi.py run.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Pruebas con cobertura y quality gate
+        run: |
+          pytest --cov --cov-config=.coveragerc \
+                 --cov-report=term --cov-report=xml --cov-report=html \
+                 --cov-fail-under=${COVERAGE_MIN} \
+                 --junitxml=junit.xml
+      - name: Resumen de cobertura en el job
+        if: always()
+        run: |
+          {
+            echo "### Cobertura de la API (mínimo ${COVERAGE_MIN} %)"
+            echo
+            coverage report --format=markdown --skip-covered --sort=cover 2>/dev/null | head -60 || echo "_sin datos de cobertura_"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publicar reportes (cobertura + JUnit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-reportes-pruebas
+          path: |
+            coverage.xml
+            htmlcov/
+            junit.xml
+          retention-days: 30
+
+  tests-servicios-reales:
+    name: Pruebas contra PostgreSQL + MongoDB + Redis reales
+    runs-on: ubuntu-latest
+    needs: lint-and-compile
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gymuser
+          POSTGRES_PASSWORD: gympass
+          POSTGRES_DB: gympro_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gymuser -d gympro_test" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_REAL_SERVICES: "1"
+      POSTGRES_URI: postgresql+psycopg2://gymuser:gympass@localhost:5432/gympro_test
+      MONGO_URI: mongodb://localhost:27017
+      MONGO_DB: gympro_test
+      REDIS_URL: redis://localhost:6379/0
+      RATELIMIT_STORAGE_URI: redis://localhost:6379/1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Pruebas (mismas que el job hermético, servicios reales)
+        run: pytest -p no:cacheprovider --junitxml=junit-real.xml
+      - name: Publicar JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-junit-servicios-reales
+          path: junit-real.xml
+          retention-days: 30
+
+  migraciones:
+    name: Migraciones Alembic
+    runs-on: ubuntu-latest
+    needs: lint-and-compile
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gymuser
+          POSTGRES_PASSWORD: gympass
+          POSTGRES_DB: gympro_migraciones_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gymuser -d gympro_migraciones_test" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      POSTGRES_URI: postgresql+psycopg2://gymuser:gympass@localhost:5432/gympro_migraciones_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Debe existir una única cabeza (sin ramas de migración)
+        run: |
+          heads=$(alembic heads | grep -c "(head)")
+          echo "Cabezas de Alembic: $heads"
+          alembic heads
+          test "$heads" -eq 1
+      - name: "Informativo: alembic upgrade head sobre una BD vacía"
+        # Aún no verificado en una BD vacía (el historial parte de tablas creadas
+        # fuera de Alembic). Si falla, no bloquea; revisa el log y corrige el
+        # historial antes de quitar continue-on-error.
+        continue-on-error: true
+        run: alembic upgrade head
+
+  seguridad:
+    name: Escaneo de seguridad (informativo)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: |
+          python -m pip install --upgrade pip
+          pip install bandit pip-audit
+      - name: Bandit (severidad media o mayor)
+        run: bandit -r app -ll -q -f txt | tee bandit.txt || true
+      - name: pip-audit (dependencias con CVE conocidos)
+        run: pip-audit -r requirements.txt --progress-spinner off | tee pip-audit.txt || true
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "### Seguridad (informativo)"
+            echo '```'; tail -n 25 bandit.txt; echo '```'
+            echo '```'; tail -n 25 pip-audit.txt; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
