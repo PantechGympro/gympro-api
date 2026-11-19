@@ -1,0 +1,180 @@
+# Promover hotfix de staging — lleva a main (y de ahí a dev) un arreglo urgente que YA se probó
+# en staging, sin repetir dev → main → staging.
+#
+# Flujo:
+#   1. git checkout staging && git pull && git checkout -b hotfix/<descripcion>   (arreglo mínimo)
+#   2. PR  hotfix/<descripcion> → staging  → al fusionarlo se despliega a staging.
+#   3. PRUEBAS TÚ el cambio en staging.
+#   4. Actions → "Promover hotfix de staging" → Run workflow (rama: staging), con el SHA que probaste
+#      y la palabra PROBADO.  Este workflow abre/actualiza el PR  staging → main.
+#   5. Fusionas ese PR; "Sincronizar main -> dev" (ya existente) lo baja a dev solo.
+#
+# Reglas estrictas (si una falla, no se abre nada):
+#   - solo administradores del repo (o los usuarios de la variable PROMOTORES, si existe)
+#   - hay que escribir PROBADO
+#   - el SHA escrito debe ser EXACTAMENTE el último commit de staging (si alguien empujó algo
+#     después de que probaste, ya no coincide)
+#   - ese commit debe tener un despliegue a staging exitoso (si el repo despliega)
+#   - staging debe tener algo que main aún no tiene
+name: Promover hotfix de staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "SHA del commit de staging que PROBASTE (mínimo 7 caracteres)"
+        required: true
+        type: string
+      confirmo:
+        description: "Escribe PROBADO para confirmar que lo probaste tú en staging"
+        required: true
+        type: string
+
+concurrency:
+  group: promover-hotfix
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  promover:
+    name: Validar y abrir PR staging → main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debe ejecutarse sobre la rama staging
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/staging" ]; then
+            echo "::error title=Rama incorrecta::Elige la rama 'staging' en «Use workflow from»."
+            exit 1
+          fi
+
+      - name: Checkout (commit exacto de staging)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Quién puede promover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          PROMOTORES: ${{ vars.PROMOTORES }}
+        run: |
+          actor="$(printf '%s' "$ACTOR" | tr '[:upper:]' '[:lower:]')"
+          if [ -n "${PROMOTORES:-}" ]; then
+            lista="$(printf '%s' "$PROMOTORES" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+            case ",$lista," in
+              *",$actor,"*) echo "Autorizado: $ACTOR (variable PROMOTORES)" ;;
+              *) echo "::error title=No autorizado::$ACTOR no está en la variable PROMOTORES."; exit 1 ;;
+            esac
+          else
+            permiso="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)"
+            if [ "$permiso" != "admin" ]; then
+              echo "::error title=No autorizado::Solo un administrador del repo puede promover un hotfix (tu permiso: $permiso)."
+              exit 1
+            fi
+            echo "Autorizado: $ACTOR (administrador)"
+          fi
+
+      - name: Confirmación y SHA probado
+        env:
+          SHA_IN: ${{ inputs.sha }}
+          CONFIRMO: ${{ inputs.confirmo }}
+        run: |
+          if [ "$CONFIRMO" != "PROBADO" ]; then
+            echo "::error title=Falta confirmación::Escribe exactamente PROBADO una vez que hayas probado el cambio en staging."
+            exit 1
+          fi
+          sha="$(printf '%s' "$SHA_IN" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "::error title=SHA inválido::Escribe al menos 7 caracteres hexadecimales del commit que probaste."
+            exit 1
+          fi
+          head="$(git rev-parse HEAD)"
+          case "$head" in
+            "$sha"*) echo "El SHA probado coincide con el último commit de staging (${head:0:7})." ;;
+            *)
+              echo "::error title=El SHA no coincide::Probaste $sha pero staging está en ${head:0:7}. Alguien cambió staging después de tu prueba: vuelve a probar y usa el SHA actual."
+              exit 1 ;;
+          esac
+          echo "HEAD=$head" >> "$GITHUB_ENV"
+
+      - name: El commit debe tener un despliegue exitoso a staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f .github/workflows/deploy-staging.yml ]; then
+            echo "Este repo no despliega a staging (sin deploy-staging.yml): se omite."
+            exit 0
+          fi
+          ok="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml/runs?head_sha=$HEAD&status=success" --jq '.total_count')"
+          if [ "${ok:-0}" -lt 1 ]; then
+            echo "::error title=Sin despliegue exitoso::No hay un despliegue a staging en verde para ${HEAD:0:7}. Espera a que termine (o corrígelo) antes de promover."
+            exit 1
+          fi
+          echo "Despliegue a staging en verde para ${HEAD:0:7}."
+
+      - name: Debe haber algo que promover
+        run: |
+          git fetch origin main
+          n="$(git rev-list --count origin/main..HEAD)"
+          if [ "$n" -eq 0 ]; then
+            echo "::error title=Nada que promover::staging no tiene commits que main no tenga."
+            exit 1
+          fi
+          {
+            echo "### Cambios que se promoverán a main ($n commits)"
+            echo
+            git log --no-merges --format='- `%h` %s (%an)' origin/main..HEAD
+            echo
+            echo '```'
+            git diff --stat origin/main...HEAD
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Abrir o actualizar el PR staging → main
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN || github.token }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          USA_PAT: ${{ secrets.PROMOTE_TOKEN != '' }}
+        run: |
+          corto="${HEAD:0:7}"
+          cuerpo="$(mktemp)"
+          {
+            echo "## Qué cambia"
+            echo
+            echo "Promueve a \`main\` un hotfix que ya se desplegó y se probó en staging (commit \`$corto\`)."
+            echo "Tras fusionarlo, «Sincronizar main -> dev» lo baja a \`dev\`."
+            echo
+            echo "## Cómo se probó"
+            echo
+            echo "- [x] Probado en staging por @$ACTOR (confirmó con PROBADO sobre el commit \`$corto\`)"
+            echo "- [x] Despliegue a staging en verde para ese commit (si el repo despliega)"
+            echo "- Ejecución de validación: $RUN_URL"
+            echo
+            echo "## Commits"
+            echo
+            git log --no-merges --format='- `%h` %s' origin/main..HEAD
+          } > "$cuerpo"
+
+          existente="$(gh pr list --base main --head staging --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existente" ]; then
+            gh pr edit "$existente" --body-file "$cuerpo"
+            url="$(gh pr view "$existente" --json url --jq .url)"
+          else
+            if ! url="$(gh pr create --base main --head staging \
+                  --title "fix(hotfix): promover a main el hotfix probado en staging ($corto)" \
+                  --body-file "$cuerpo" 2>err.txt)"; then
+              cat err.txt
+              echo "::error title=No se pudo crear el PR::Activa Settings → Actions → General → «Allow GitHub Actions to create and approve pull requests», o define el secreto PROMOTE_TOKEN (PAT con permiso de pull requests). También puedes abrir tú el PR staging → main con este mismo texto."
+              exit 1
+            fi
+          fi
+          echo "PR listo: $url"
+          echo "### PR staging → main: $url" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$USA_PAT" != "true" ]; then
+            echo "> Nota: un PR creado con el token por defecto no dispara los workflows del PR; el commit ya pasó el CI al desplegarse a staging." >> "$GITHUB_STEP_SUMMARY"
+          fi
