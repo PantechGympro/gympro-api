@@ -55,6 +55,12 @@ def _token_esta_revocado(_cabecera_jwt, carga_jwt):
     jti = carga_jwt.get("jti")
     familia = carga_jwt.get("fam")
     if jti and redis_cliente.get(f"revocado:{jti}"):
+        # Reuso de un refresh ya canjeado o cerrado: hay dos copias en
+        # circulación. Esta consulta corre ANTES de la vista, así que la
+        # revocación de la familia tiene que hacerse aquí (el código
+        # equivalente dentro de /auth/refresh nunca se alcanza).
+        if familia and carga_jwt.get("type") == "refresh":
+            redis_cliente.setex(f"familia_revocada:{familia}", 90 * 86400, "1")
         return True
     if familia and redis_cliente.get(f"familia_revocada:{familia}"):
         return True
