@@ -33,10 +33,16 @@ os.environ["TESTING"] = "1"
 
 if not REAL:
     _TMP = tempfile.mkdtemp(prefix="gympro-tests-")
-    os.environ["POSTGRES_URI"] = f"sqlite:///{_TMP}/test.db"
+    # TEST_POSTGRES_URI permite un PostgreSQL real con Mongo/Redis simulados (diagnóstico local).
+    os.environ["POSTGRES_URI"] = os.getenv("TEST_POSTGRES_URI") or f"sqlite:///{_TMP}/test.db"
     os.environ["RATELIMIT_STORAGE_URI"] = "memory://"
     os.environ["MONGO_DB"] = "gympro_test"
 else:
+    # SQLAlchemy 2.1 cambió el driver por defecto de "postgresql://" a psycopg (v3), que
+    # no usamos: se fija psycopg2 igual que en docker-compose (postgresql+psycopg2://).
+    _uri = os.getenv("POSTGRES_URI", "")
+    if _uri.startswith("postgresql://"):
+        os.environ["POSTGRES_URI"] = _uri.replace("postgresql://", "postgresql+psycopg2://", 1)
     os.environ.setdefault("MONGO_DB", "gympro_test")
     os.environ.setdefault("RATELIMIT_STORAGE_URI", os.getenv("REDIS_URL", "redis://localhost:6379/1"))
 
@@ -63,11 +69,22 @@ def app():
     flask_app.config.update(TESTING=True)
     with flask_app.app_context():
         nombre_bd = db.engine.url.database or ""
-        if REAL:
+        if REAL or not db.engine.url.drivername.startswith("sqlite"):
             assert "test" in nombre_bd.lower(), (
                 f"Por seguridad las pruebas solo corren contra una base cuyo nombre contenga 'test' (hay '{nombre_bd}')."
             )
-        db.create_all()
+        if db.engine.url.drivername.startswith("sqlite"):
+            db.create_all()
+        else:
+            # PostgreSQL: el esquema real lo construyen las migraciones (los tipos enum,
+            # la extensión `unaccent`, etc. no los crea create_all). Así cada corrida
+            # también prueba `alembic upgrade head` sobre una base vacía.
+            from alembic import command
+            from alembic.config import Config
+            raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cfg = Config(os.path.join(raiz, "alembic.ini"))
+            cfg.set_main_option("script_location", os.path.join(raiz, "migrations"))
+            command.upgrade(cfg, "head")
     return flask_app
 
 
@@ -91,8 +108,15 @@ def limpiar_bases(app):
 
     with app.app_context():
         db.session.rollback()
-        for tabla in reversed(db.metadata.sorted_tables):
-            db.session.execute(tabla.delete())
+        if db.engine.dialect.name == "postgresql":
+            # Un solo TRUNCATE ... CASCADE: respeta las FK sin depender del orden (hay
+            # ciclos entre tablas) y reinicia los ids para pruebas deterministas.
+            from sqlalchemy import text
+            nombres = ", ".join(f'"{t.name}"' for t in db.metadata.sorted_tables)
+            db.session.execute(text(f"TRUNCATE TABLE {nombres} RESTART IDENTITY CASCADE"))
+        else:
+            for tabla in reversed(db.metadata.sorted_tables):
+                db.session.execute(tabla.delete())
         db.session.commit()
         mongo = get_db()
         if REAL:

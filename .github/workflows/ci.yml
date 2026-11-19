@@ -111,7 +111,7 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       TEST_REAL_SERVICES: "1"
-      POSTGRES_URI: postgresql://gymuser:gympass@localhost:5432/gympro_test
+      POSTGRES_URI: postgresql+psycopg2://gymuser:gympass@localhost:5432/gympro_test
       MONGO_URI: mongodb://localhost:27017
       MONGO_DB: gympro_test
       REDIS_URL: redis://localhost:6379/0
@@ -153,7 +153,7 @@ jobs:
           --health-cmd "pg_isready -U gymuser -d gympro_migraciones_test" --health-interval 5s
           --health-timeout 5s --health-retries 10
     env:
-      POSTGRES_URI: postgresql://gymuser:gympass@localhost:5432/gympro_migraciones_test
+      POSTGRES_URI: postgresql+psycopg2://gymuser:gympass@localhost:5432/gympro_migraciones_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
