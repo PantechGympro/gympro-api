@@ -15,10 +15,11 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from bson import ObjectId
 from datetime import datetime, timezone
-from dateutil.relativedelta import relativedelta
 
 from app.mongo import get_db
+from app.utils.membresia import resumen_vencimientos
 from app.utils.tenant import require_tenant
+from app.utils.timezone import local_now_naive
 
 LOW_STOCK_THRESHOLD = 5  # umbral global de "stock bajo"
 
@@ -99,8 +100,9 @@ def get_alertas():
     Devuelve alertas operativas del gimnasio:
       · Productos sin stock (nivel: error)
       · Productos con stock bajo ≤ LOW_STOCK_THRESHOLD (nivel: warning)
-      · Membresías por vencer próximos 7 días (nivel: warning)
-      · Membresías ya vencidas con estado activo (nivel: error)
+      · Membresías por vencer en los próximos 7 días (nivel: warning)
+      · Membresías vencidas en los últimos 7 días (nivel: error)
+      · Entregas pendientes del punto de venta (warning; error si ya pasó la hora)
     """
     db      = get_db()
     gym_id  = g.tenant_id
@@ -135,35 +137,52 @@ def get_alertas():
             "detalle": f"Quedan {p['stock']} unidad(es). Considera reabastecer.",
         })
 
-    # ── Membresías por vencer (próximos 7 días) ───────────────────────────────
-    now    = datetime.now(timezone.utc)
-    hoy    = now.date().isoformat()
-    en_7   = (now + relativedelta(days=7)).date().isoformat()
-    por_vencer = db.miembro_membresias.count_documents({
-        "id_gimnasio": gym_id,
-        "estado": "activa",
-        "fecha_fin": {"$gte": hoy, "$lte": en_7},
-    })
-    if por_vencer > 0:
+    # ── Membresías por vencer / vencidas recientes ────────────────────────────
+    # Regla única compartida con el listado "Por vencer" (utils/membresia.py).
+    # Antes se consultaba `miembro_membresias` (plural, estado "activa", con
+    # id_gimnasio): esa colección/campos no existen, así que nunca contaba nada.
+    venc = resumen_vencimientos(db, gym_id)
+    if venc["por_vencer"] > 0:
+        n = venc["por_vencer"]
         alertas.append({
             "nivel":   "warning",
             "tipo":    "membresias_por_vencer",
-            "titulo":  f"{por_vencer} membresía(s) vencen esta semana",
-            "detalle": "Próximos 7 días. Notifica a los miembros para renovar.",
+            "titulo":  f"{n} membresía{'s' if n != 1 else ''} por vencer",
+            "detalle": f"Vencen en los próximos {venc['dias']} días. Avisa a los miembros para que renueven.",
+            "ruta":    "/owner/por-vencer",
         })
-
-    # ── Membresías vencidas con estado aún "activa" ───────────────────────────
-    vencidas = db.miembro_membresias.count_documents({
-        "id_gimnasio": gym_id,
-        "estado": "activa",
-        "fecha_fin": {"$lt": hoy},
-    })
-    if vencidas > 0:
+    if venc["vencidas_recientes"] > 0:
+        n = venc["vencidas_recientes"]
         alertas.append({
             "nivel":   "error",
             "tipo":    "membresias_vencidas",
-            "titulo":  f"{vencidas} membresía(s) vencida(s) sin actualizar",
-            "detalle": "Revisar y marcar como vencidas o renovar.",
+            "titulo":  f"{n} membresía{'s' if n != 1 else ''} vencida{'s' if n != 1 else ''} recientemente",
+            "detalle": f"Vencieron en los últimos {venc['dias']} días. Contáctalos para recuperarlos.",
+            "ruta":    "/owner/por-vencer",
+        })
+
+    # ── Entregas pendientes (compras del punto de venta por entregar) ─────────
+    ahora_local = local_now_naive()
+    corte = (ahora_local.strftime("%Y-%m-%d"), ahora_local.strftime("%H:%M"))
+    pendientes = list(db.ventas.find(
+        {"id_gimnasio": gym_id, "estado_entrega": "pendiente"},
+        {"fecha_recogida": 1, "hora_recogida": 1},
+    ))
+    if pendientes:
+        # Igual que el panel de entregas: pasada la hora acordada se resalta,
+        # nunca se cancela (el producto ya está pagado).
+        atrasadas = sum(
+            1 for v in pendientes
+            if (v.get("fecha_recogida") or "", v.get("hora_recogida") or "") < corte
+        )
+        n = len(pendientes)
+        alertas.append({
+            "nivel":   "error" if atrasadas else "warning",
+            "tipo":    "entregas_pendientes",
+            "titulo":  f"{n} entrega{'s' if n != 1 else ''} pendiente{'s' if n != 1 else ''}",
+            "detalle": (f"{atrasadas} ya pasó la hora de recogida. " if atrasadas else "")
+                       + "Entrega los productos a los miembros que los esperan.",
+            "ruta":    "/owner/deliveries",
         })
 
     return jsonify({"alertas": alertas, "total": len(alertas)}), 200
