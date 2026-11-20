@@ -39,6 +39,21 @@ from bson.objectid import ObjectId
 auth_bp = Blueprint("auth", __name__)
 
 
+def _fijar_cookies_sesion(respuesta, access, refresh):
+    """
+    Pone las cookies HttpOnly de sesión del portal web con su vigencia real.
+
+    Con JWT_SESSION_COOKIE=False las cookies sobreviven al cierre del navegador
+    (antes eran de sesión y se perdían al cerrar la pestaña/ventana, así que el
+    usuario debía iniciar sesión otra vez). El `max_age` se ajusta a la vida de
+    cada token en vez del año por defecto de la librería: la cookie de acceso
+    dura lo que el access token (8 h) y la de refresco lo que el refresh (90 d).
+    """
+    cfg = current_app.config
+    set_access_cookies(respuesta, access,  max_age=int(cfg["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()))
+    set_refresh_cookies(respuesta, refresh, max_age=int(cfg["JWT_REFRESH_TOKEN_EXPIRES"].total_seconds()))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,8 +299,7 @@ def login():
         # la sesión -- ver web/src/api/cliente.js. El cuerpo JSON de arriba
         # se conserva para no romper al cliente móvil, que autentica por
         # cabecera Authorization y no por cookies.
-        set_access_cookies(respuesta, token)
-        set_refresh_cookies(respuesta, refresh)
+        _fijar_cookies_sesion(respuesta, token, refresh)
         return respuesta, 200
 
     # ── 2. Fallback MongoDB (usuarios legacy — Sprint 2 transitorio) ──────────
@@ -313,8 +327,7 @@ def login():
             "refresh_token": refresh,
             "user":          payload["user_response"],
         })
-        set_access_cookies(respuesta, token)
-        set_refresh_cookies(respuesta, refresh)
+        _fijar_cookies_sesion(respuesta, token, refresh)
         return respuesta, 200
 
     # ── Usuario no encontrado en ninguna fuente ───────────────────────────────
@@ -382,8 +395,7 @@ def refresh_token():
             "refresh_token": refresh_nuevo,
             "user":          payload["user_response"],
         })
-        set_access_cookies(respuesta, access_nuevo)
-        set_refresh_cookies(respuesta, refresh_nuevo)
+        _fijar_cookies_sesion(respuesta, access_nuevo, refresh_nuevo)
         return respuesta, 200
 
     # Usuarios legacy de Mongo: se conservan los claims del token de refresco.
@@ -397,8 +409,7 @@ def refresh_token():
         "access_token":  access_nuevo,
         "refresh_token": refresh_nuevo,
     })
-    set_access_cookies(respuesta, access_nuevo)
-    set_refresh_cookies(respuesta, refresh_nuevo)
+    _fijar_cookies_sesion(respuesta, access_nuevo, refresh_nuevo)
     return respuesta, 200
 
 
@@ -600,8 +611,7 @@ def cambiar_sucursal_activa():
         "refresh_token": refresh_nuevo,
         "user":          payload["user_response"],
     })
-    set_access_cookies(respuesta, access_nuevo)
-    set_refresh_cookies(respuesta, refresh_nuevo)
+    _fijar_cookies_sesion(respuesta, access_nuevo, refresh_nuevo)
     return respuesta, 200
 
 
