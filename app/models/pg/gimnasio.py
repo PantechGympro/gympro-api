@@ -79,13 +79,29 @@ class Gimnasio(db.Model):
     usuarios = db.relationship("Usuario", back_populates="gimnasio", lazy="dynamic")
 
     def __repr__(self):
-        return f"<Gimnasio {self.nombre} [{self.plan.value}]>"
+        return f"<Gimnasio {self.nombre} [{self.plan_vigente}]>"
+
+    @property
+    def plan_vigente(self) -> str:
+        """
+        Plan SaaS que rige a este gimnasio: el de su ORGANIZACIÓN (SCRUM-223).
+
+        La columna `gimnasios.plan` quedó como legado y ya no se mantenía al
+        contratar/cambiar de plan, así que todo lo que la serializaba (listado
+        y detalle del superadmin, perfil del propietario, app móvil) mostraba
+        "Básico" mientras la suscripción y los permisos eran "Enterprise".
+        Se cae a la columna solo si el gimnasio aún no tiene organización
+        cargada.
+        """
+        org = self.organizacion
+        plan = org.plan if org is not None else self.plan
+        return plan.value if hasattr(plan, "value") else plan
 
     def to_dict(self):
         return {
             "id":                    self.id,
             "nombre":                self.nombre,
-            "plan":                  self.plan.value if hasattr(self.plan, "value") else self.plan,
+            "plan":                  self.plan_vigente,
             "activo":                self.activo,
             "email_contacto":        self.email_contacto,
             "telefono":              self.telefono,

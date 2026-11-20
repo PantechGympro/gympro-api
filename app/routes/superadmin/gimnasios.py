@@ -150,16 +150,39 @@ def _metricas_mongo(gym_id: int) -> dict:
 
 
 def _suscripcion_activa(gym_id: int) -> dict | None:
-    sub = (
-        Suscripcion.query
-        .join(PlanSuscripcion)
-        .filter(Suscripcion.id_gimnasio == gym_id)
-        .order_by(Suscripcion.created_at.desc())
-        .first()
-    )
+    """
+    Suscripción SaaS que cubre a `gym_id`.
+
+    SCRUM-223: el plan se contrata por ORGANIZACIÓN y la Suscripcion vive en
+    la sede principal; una sucursal nunca tiene la suya (ver
+    routes/owner_gym/sucursales.py). Por eso, si el gimnasio no tiene
+    suscripción propia, se toma la de su organización -- antes las
+    sucursales salían sin fecha de inicio ni próximo cobro.
+    """
+    def _ultima(filtro):
+        return (
+            Suscripcion.query
+            .join(PlanSuscripcion)
+            .filter(filtro)
+            .order_by(Suscripcion.created_at.desc())
+            .first()
+        )
+
+    sub = _ultima(Suscripcion.id_gimnasio == gym_id)
+    if sub is None:
+        gym = db.session.get(Gimnasio, gym_id)
+        if gym is not None:
+            hermanos = db.session.query(Gimnasio.id).filter(
+                Gimnasio.id_organizacion == gym.id_organizacion
+            )
+            sub = _ultima(Suscripcion.id_gimnasio.in_(hermanos))
     if not sub:
         return None
     return {
+        "heredada":             sub.id_gimnasio != gym_id,
+        "id_gimnasio_titular":  sub.id_gimnasio,
+        "ciclo_facturacion":    sub.ciclo_facturacion,
+        "fecha_fin":            sub.fecha_fin.isoformat() if sub.fecha_fin else None,
         "id":                   sub.id,
         "estado":               sub.estado if isinstance(sub.estado, str) else sub.estado.value,
         "plan":                 sub.plan.nombre if sub.plan else None,

@@ -196,6 +196,10 @@ def crear_sucursal():
                                   or (sede_principal.tipo_gimnasio if sede_principal else None),
         id_organizacion        = org,
         es_sucursal_principal  = False,
+        # Columna heredada: se alinea con el plan de la organización para que
+        # no nazca como "basico" (default) en una organización Pro/Enterprise.
+        plan                   = (sede_principal.organizacion.plan
+                                  if sede_principal and sede_principal.organizacion else "basico"),
     )
     db.session.add(nueva)
     db.session.flush()  # necesita nueva.id
