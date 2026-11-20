@@ -3,8 +3,10 @@ owner_gym/reportes_automaticos.py — Automatizar el reporte ejecutivo por corre
 
 Petición explícita del usuario: poder elegir qué tipo de reporte generar,
 con qué filtros y cada cuándo (día/semana/mes/año), para que se envíe solo
-por correo al Propietario y así tener mejor control del corte de caja sin
-entrar a Reportes a descargarlo a mano cada vez.
+por correo y así tener mejor control del corte de caja sin entrar a
+Reportes a descargarlo a mano cada vez. Los destinatarios son configurables
+por receta (migración 035): Propietario, Administrador(es) de la sucursal,
+ambos y/o hasta 5 correos libres.
 
 Reutiliza del módulo hermano reportes_negocio.py:
   - _resolver_gimnasio_objetivo()  → misma lógica multi-sucursal que el
@@ -22,25 +24,28 @@ candado de plan que el reporte manual -- reportes_pdf):
   PUT    /reportes/automaticos/<id>           editar una
   DELETE /reportes/automaticos/<id>           eliminar una
   POST   /reportes/automaticos/<id>/ejecutar  mandarla ya (probar)
+  GET    /reportes/automaticos/destinatarios  a quién resuelven hoy Propietario
+                                               y Administrador (para el formulario)
 
 Job programado: tick_reportes_automaticos(app), registrado en
 notifications.py::init_scheduler(). Corre una vez al día y decide, por
 configuración activa, si hoy le toca generarse según su frecuencia.
 """
+import re
 from datetime import datetime, timezone
 
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, current_app
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 from app.extensions import db
 from app.models.pg.gimnasio import Gimnasio
 from app.models.pg.reporte_automatico import (
     ConfiguracionReporteAutomatico, FRECUENCIAS_VALIDAS, FRECUENCIA_LABEL,
-    MOMENTOS_VALIDOS,
+    MOMENTOS_VALIDOS, MAX_CORREOS_EXTRA,
 )
 from app.utils.tenant import require_tenant
 from app.utils.security import require_role, require_funcion_plan
-from app.utils.alcance import usuario_tiene_alcance, usuario_propietario_de
+from app.utils.alcance import usuario_tiene_alcance, usuario_propietario_de, administradores_de
 from app.utils.timezone import APP_TZ, local_today_bounds_naive, local_now_naive
 from app.constants.roles import normalizar_rol, ROL_ADMINISTRADOR
 from app.routes.owner_gym.reportes_negocio import (
@@ -48,6 +53,10 @@ from app.routes.owner_gym.reportes_negocio import (
 )
 
 reportes_automaticos_bp = Blueprint("reportes_automaticos", __name__)
+
+# Formato práctico de correo (RFC completo no vale la pena aquí): algo@dominio.tld,
+# sin espacios ni comas. La entrega real la confirma el botón "Probar".
+_EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]{2,}$")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -162,11 +171,36 @@ def _ya_ejecuto_hoy(cfg, hoy0):
     return ultima.date() == hoy0.date()
 
 
-def _validar_payload(data, *, crear):
+def _normalizar_correos_extra(valor):
+    """
+    Acepta lista o CSV/texto separado por comas, punto y coma o saltos de
+    línea. Devuelve (correos_unicos_en_minusculas, invalidos).
+    """
+    if isinstance(valor, list):
+        crudos = [str(c) for c in valor]
+    else:
+        crudos = re.split(r"[,;\n]", valor or "")
+
+    validos, invalidos, vistos = [], [], set()
+    for crudo in crudos:
+        correo = crudo.strip().lower()
+        if not correo:
+            continue
+        if len(correo) > 254 or not _EMAIL_RE.match(correo):
+            invalidos.append(crudo.strip())
+        elif correo not in vistos:
+            vistos.add(correo)
+            validos.append(correo)
+    return validos, invalidos
+
+
+def _validar_payload(data, *, crear, actual=None):
     """
     Valida y normaliza el payload de crear/actualizar una configuración.
     En creación los campos ausentes toman su valor por omisión; en edición
-    parcial solo se tocan los campos que llegaron en el body.
+    parcial solo se tocan los campos que llegaron en el body (`actual` es la
+    fila que se está editando: sirve para validar el estado FINAL de los
+    destinatarios, p. ej. un PUT que solo apaga enviar_propietario).
     Devuelve (campos_limpios, None) o (None, (response, status)).
     """
     campos = {}
@@ -218,7 +252,74 @@ def _validar_payload(data, *, crear):
             return None, (jsonify({"msg": "hora_envio debe ser un número entero entre 0 y 23"}), 400)
         campos["hora_envio"] = hora
 
+    # Destinatarios (migración 035). Por omisión, en creación, solo el
+    # Propietario -- así los clientes viejos que no mandan estos campos
+    # siguen funcionando igual que antes.
+    if crear or "enviar_propietario" in data:
+        campos["enviar_propietario"] = bool(data.get("enviar_propietario", True))
+    if crear or "enviar_administrador" in data:
+        campos["enviar_administrador"] = bool(data.get("enviar_administrador", False))
+    if "correos_extra" in data:
+        correos, invalidos = _normalizar_correos_extra(data.get("correos_extra"))
+        if invalidos:
+            return None, (jsonify({
+                "msg": f"Correo no válido: {', '.join(invalidos[:3])}",
+            }), 400)
+        if len(correos) > MAX_CORREOS_EXTRA:
+            return None, (jsonify({
+                "msg": f"Máximo {MAX_CORREOS_EXTRA} correos adicionales por automatización",
+            }), 400)
+        campos["correos_extra"] = ",".join(correos) or None
+
+    def _final(campo, defecto):
+        if campo in campos:
+            return campos[campo]
+        return getattr(actual, campo) if actual is not None else defecto
+
+    if not (_final("enviar_propietario", True)
+            or _final("enviar_administrador", False)
+            or _final("correos_extra", None)):
+        return None, (jsonify({
+            "msg": "Elige al menos un destinatario: Propietario, Administrador o un correo",
+        }), 400)
+
     return campos, None
+
+
+def _resolver_destinatarios(cfg):
+    """
+    Correos a los que va el reporte de `cfg`, según sus tres opciones de
+    destinatario. Devuelve (correos, avisos): `correos` sin duplicados (ni
+    por mayúsculas) y en orden Propietario -> Administradores -> extras;
+    `avisos`, textos de lo que se pidió pero no se pudo resolver (p. ej. no
+    hay Administrador activo asignado) para que quien configura lo sepa.
+    """
+    correos, avisos, vistos = [], [], set()
+
+    def agregar(correo):
+        clave = (correo or "").strip().lower()
+        if clave and clave not in vistos:
+            vistos.add(clave)
+            correos.append(correo.strip())
+
+    if cfg.enviar_propietario:
+        propietario = usuario_propietario_de(cfg.id_gimnasio)
+        if propietario and propietario.email:
+            agregar(propietario.email)
+        else:
+            avisos.append("el gimnasio no tiene un Propietario con correo registrado")
+
+    if cfg.enviar_administrador:
+        administradores = [a for a in administradores_de(cfg.id_gimnasio) if a.email]
+        for admin in administradores:
+            agregar(admin.email)
+        if not administradores:
+            avisos.append("la sucursal no tiene un Administrador activo asignado")
+
+    for extra in cfg.lista_correos_extra():
+        agregar(extra)
+
+    return correos, avisos
 
 
 def _enviar_reporte_automatico(cfg, hoy0=None):
@@ -226,7 +327,9 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
     Genera y manda por correo el reporte de UNA configuración. No hace
     commit -- lo decide el llamador (el job procesa varias filas en una
     sola transacción; el endpoint manual hace una sola).
-    Devuelve {"ok": bool, "destino": str|None, "error": str|None}.
+    Devuelve {"ok": bool, "destino": str|None, "error": str|None,
+    "avisos": [str]}. `destino` son los correos separados por coma; `avisos`
+    lo pedido que no se pudo resolver (el envío salió igual al resto).
     """
     from flask_mail import Message
     from app.extensions import mail
@@ -240,10 +343,12 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
         if not gym:
             raise RuntimeError("Gimnasio no encontrado")
 
-        propietario = usuario_propietario_de(cfg.id_gimnasio)
-        destino = propietario.email if propietario and propietario.email else None
-        if not destino:
-            raise RuntimeError("El gimnasio no tiene un Propietario con correo registrado")
+        correos, avisos = _resolver_destinatarios(cfg)
+        if not correos:
+            raise RuntimeError(
+                "No hay a quién enviar el reporte: " + "; ".join(avisos)
+                if avisos else "No hay destinatarios configurados"
+            )
 
         desde, hasta, etiqueta = _periodo_para_frecuencia(cfg.frecuencia, cfg.momento_envio, hoy0)
         secciones = cfg.lista_secciones() or SECCIONES_VALIDAS
@@ -263,7 +368,7 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
             "<p style=\"margin-top:28px;font-size:12px;color:#888;\">"
             "GymPro SaaS — Este mensaje es automático, por favor no respondas.</p></div>"
         )
-        msg = Message(subject=asunto, recipients=[destino], html=html,
+        msg = Message(subject=asunto, recipients=correos, html=html,
                        sender=remitente("MAIL_SENDER_FACTURACION"))
         msg.attach(nombre_archivo, "application/pdf", pdf_bytes)
         mail.send(msg)
@@ -271,11 +376,14 @@ def _enviar_reporte_automatico(cfg, hoy0=None):
         cfg.ultima_ejecucion = datetime.now(timezone.utc)
         cfg.ultimo_error = None
         db.session.add(cfg)
-        return {"ok": True, "destino": destino, "error": None}
+        if avisos:
+            current_app.logger.warning(
+                "[ReportesAuto] cfg=%s enviada sin: %s", cfg.id, "; ".join(avisos))
+        return {"ok": True, "destino": ", ".join(correos), "error": None, "avisos": avisos}
     except Exception as exc:
         cfg.ultimo_error = str(exc)[:300]
         db.session.add(cfg)
-        return {"ok": False, "destino": None, "error": str(exc)}
+        return {"ok": False, "destino": None, "error": str(exc), "avisos": []}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -291,7 +399,7 @@ def tick_reportes_automaticos(app=None):
     configurada (hora_envio) coincide con la hora local actual, y a la que
     hoy le toca dispararse (según su frecuencia y momento_envio -- ver
     _hoy_es_cierre), y que no se haya mandado ya hoy, genera el PDF del
-    periodo correspondiente y lo envía por correo al Propietario.
+    periodo correspondiente y lo envía por correo a sus destinatarios.
 
     No bloqueante por fila: un fallo en una configuración (SMTP, datos del
     gimnasio, lo que sea) no debe impedir que las demás se procesen -- se
@@ -361,6 +469,33 @@ def listar_reportes_automaticos():
     return jsonify([c.to_dict() for c in configs]), 200
 
 
+@reportes_automaticos_bp.route("/reportes/automaticos/destinatarios", methods=["GET"])
+@jwt_required()
+@require_role("owner_gym", "Administrador")
+@require_tenant
+@require_funcion_plan("reportes_pdf")
+def destinatarios_disponibles():
+    """
+    A quién resuelven HOY las casillas "Propietario" y "Administrador" para la
+    sucursal elegida -- el formulario lo muestra para que se vea de antemano
+    si, por ejemplo, la sucursal no tiene ningún Administrador activo.
+    """
+    gym_id, error = _resolver_gimnasio_objetivo()
+    if error:
+        return error
+
+    propietario = usuario_propietario_de(gym_id)
+    return jsonify({
+        "propietario": (
+            {"nombre": propietario.nombre, "email": propietario.email} if propietario else None
+        ),
+        "administradores": [
+            {"nombre": a.nombre, "email": a.email} for a in administradores_de(gym_id)
+        ],
+        "max_correos_extra": MAX_CORREOS_EXTRA,
+    }), 200
+
+
 @reportes_automaticos_bp.route("/reportes/automaticos", methods=["POST"])
 @jwt_required()
 @require_role("owner_gym", "Administrador")
@@ -397,7 +532,7 @@ def actualizar_reporte_automatico(config_id):
         return jsonify({"msg": "Configuración no encontrada"}), 404
 
     data = request.get_json(silent=True) or {}
-    campos, error = _validar_payload(data, crear=False)
+    campos, error = _validar_payload(data, crear=False, actual=cfg)
     if error:
         return error
 
@@ -430,8 +565,8 @@ def eliminar_reporte_automatico(config_id):
 def ejecutar_reporte_automatico_ahora(config_id):
     """
     Dispara de inmediato el envío de esta configuración (botón "Probar" en
-    el frontend) -- para confirmar que el correo del Propietario está bien
-    antes de depender del job nocturno.
+    el frontend) -- para confirmar que los correos de sus destinatarios están
+    bien antes de depender del job nocturno.
     """
     cfg = ConfiguracionReporteAutomatico.query.get(config_id)
     if not cfg or not _verificar_acceso_gimnasio(cfg.id_gimnasio):
@@ -441,4 +576,7 @@ def ejecutar_reporte_automatico_ahora(config_id):
     db.session.commit()
     if not resultado["ok"]:
         return jsonify({"msg": f"No se pudo enviar: {resultado['error']}"}), 502
-    return jsonify({"msg": f"Reporte enviado a {resultado['destino']}"}), 200
+    msg = f"Reporte enviado a {resultado['destino']}"
+    if resultado["avisos"]:
+        msg += f" (sin enviar a: {'; '.join(resultado['avisos'])})"
+    return jsonify({"msg": msg}), 200
