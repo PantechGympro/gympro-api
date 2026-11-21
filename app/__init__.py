@@ -11,6 +11,7 @@ from app.routes.owner_gym.miembros            import miembros_bp
 from app.routes.owner_gym.pagos               import pagos_bp
 from app.routes.owner_gym.dashboard_routes    import dashboard_bp
 from app.routes.owner_gym.billing             import billing_bp
+from app.routes.owner_gym.cuenta              import cuenta_bp
 from app.routes.owner_gym.billing_stripe      import billing_stripe_bp
 from app.routes.owner_gym.pasarelas           import pasarelas_bp
 from app.routes.pagos_online                  import pagos_online_bp
@@ -149,6 +150,8 @@ def create_app():
     app.register_blueprint(nutricion_externa_bp)
     app.register_blueprint(chat_moderacion_bp)
     app.register_blueprint(billing_bp)
+    # Cancelacion de plan y eliminacion de cuenta por el propietario.
+    app.register_blueprint(cuenta_bp)
     app.register_blueprint(billing_stripe_bp)
     app.register_blueprint(pasarelas_bp)
     app.register_blueprint(pagos_online_bp)
