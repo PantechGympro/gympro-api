@@ -267,3 +267,40 @@ def usuario_propietario_de(id_gimnasio: int) -> Usuario | None:
         .filter(Usuario.id_gimnasio == sede_principal.id, Rol.nombre == ROL_PROPIETARIO)
         .first()
     )
+
+
+def administradores_de(id_gimnasio: int) -> list[Usuario]:
+    """
+    Los Administradores ACTIVOS con alcance sobre `id_gimnasio`: asignados a
+    esa sucursal puntual, o a toda su organizacion (asignacion_usuario con
+    id_gimnasio NULL). Misma regla de alcance que usuario_tiene_alcance(),
+    pero en sentido inverso (de la sucursal a los usuarios) -- sirve para
+    avisarle por correo a quien administra una sucursal (reportes
+    automaticos). Un Administrador dado de baja (usuarios.activo = false) no
+    recibe nada.
+    """
+    from sqlalchemy import and_, or_
+    from app.constants.roles import ROL_ADMINISTRADOR
+
+    gimnasio = Gimnasio.query.get(id_gimnasio)
+    if gimnasio is None:
+        return []
+    return (
+        Usuario.query
+        .join(AsignacionUsuario, AsignacionUsuario.id_usuario == Usuario.id)
+        .join(Rol, AsignacionUsuario.id_rol == Rol.id)
+        .filter(
+            Rol.nombre == ROL_ADMINISTRADOR,
+            Usuario.activo.is_(True),
+            or_(
+                AsignacionUsuario.id_gimnasio == id_gimnasio,
+                and_(
+                    AsignacionUsuario.id_gimnasio.is_(None),
+                    AsignacionUsuario.id_organizacion == gimnasio.id_organizacion,
+                ),
+            ),
+        )
+        .distinct()
+        .order_by(Usuario.id)
+        .all()
+    )

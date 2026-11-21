@@ -1,0 +1,9 @@
+# Dependencias SOLO de desarrollo/CI (no van en la imagen de producción).
+-r requirements.txt
+pytest==9.2.0
+pytest-cov==7.1.0
+mongomock==4.3.0
+fakeredis==2.40.0
+flake8==7.4.1
+pip-audit>=2.7
+bandit>=1.8

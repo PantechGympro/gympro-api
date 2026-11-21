@@ -11,6 +11,7 @@ from flask_jwt_extended import jwt_required
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 
+from app.utils.membresia import resumen_vencimientos
 from app.utils.pagos_pendientes import FILTRO_VENTA_COBRADA
 from app.mongo import get_db
 from app.extensions import db
@@ -75,23 +76,10 @@ def get_owner_dashboard():
     })
 
     # ── Membresías próximas a vencer (próximos 7 días) ────────────────────────
-    # Tres detalles que antes hacían que este contador diera siempre 0:
-    #   1. La colección es 'miembro_membresia' (singular), no 'miembro_membresias'.
-    #   2. El estado se guarda capitalizado: 'Activa', no 'activa'.
-    #   3. La colección NO tiene id_gimnasio; se acota por los miembros del gym.
-    # Además fecha_fin convive en dos formatos (datetime y 'YYYY-MM-DD'), así que
-    # se consulta con ambos, igual que en el panel de recepción.
-    en_7 = now + relativedelta(days=7)
-    oids_gym = [m["_id"] for m in mdb.miembros.find({"id_gimnasio_pg": gym_id}, {"_id": 1})]
-    por_vencer = mdb.miembro_membresia.count_documents({
-        "id_miembro": {"$in": oids_gym},
-        "estado":     "Activa",
-        "$or": [
-            {"fecha_fin": {"$gte": now, "$lte": en_7}},
-            {"fecha_fin": {"$gte": now.strftime("%Y-%m-%d"),
-                           "$lte": en_7.strftime("%Y-%m-%d")}},
-        ],
-    })
+    # Regla única (utils/membresia.py), la misma del listado "Por vencer" y de
+    # las alertas del panel: así el contador nunca difiere de la lista. Antes
+    # tenía su propia consulta y debía replicar a mano los formatos de fecha_fin.
+    por_vencer = resumen_vencimientos(mdb, gym_id, ahora=now)["por_vencer"]
 
     # ── Ingresos ──────────────────────────────────────────────────────────────
     # 'Ingresos del mes' es TODO lo que entró: membresías (colección pagos) más

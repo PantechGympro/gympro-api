@@ -36,6 +36,17 @@ class PlanEnum(enum.Enum):
 _plan_enum_type = PGEnum("starter", "basico", "pro", "enterprise", name="plan_enum", create_type=False)
 
 
+def _aware(valor):
+    """
+    Fecha con zona, siempre. Postgres devuelve las columnas `timezone=True` ya
+    con zona, pero SQLite (pruebas) y los seeds antiguos las entregan sin ella,
+    y restar naive y aware revienta. Se asume UTC, que es como se guardan.
+    """
+    if valor is None:
+        return None
+    return valor if valor.tzinfo else valor.replace(tzinfo=timezone.utc)
+
+
 class Gimnasio(db.Model):
     __tablename__ = "gimnasios"
 
@@ -75,18 +86,60 @@ class Gimnasio(db.Model):
     # Hoy, con la relación 1:1, toda sucursal existente es su propia sede.
     es_sucursal_principal = db.Column(db.Boolean, default=True, nullable=False, server_default="true")
 
+    # ── Baja de cuenta pedida por el propietario (migración 037) ──────────────
+    # La eliminación no es inmediata: se programa con DIAS_GRACIA_BAJA de
+    # margen para que el arrepentimiento sea posible (ver utils/baja_gimnasio.py
+    # y routes/owner_gym/cuenta.py). Los tres en NULL = sin baja pendiente.
+    baja_solicitada_en   = db.Column(db.DateTime(timezone=True), nullable=True)
+    baja_programada_para = db.Column(db.DateTime(timezone=True), nullable=True)
+    baja_motivo          = db.Column(db.Text, nullable=True)
+    # Entero sin FK: una clave ajena de vuelta a usuarios cerraría un ciclo
+    # entre las dos tablas (ver migración 037). Quién pidió la baja queda
+    # además en bitacora_eventos, que es el registro con valor probatorio.
+    baja_solicitada_por  = db.Column(db.Integer, nullable=True)
+
     # Relación inversa: gimnasio.usuarios → lista de usuarios del gimnasio
     usuarios = db.relationship("Usuario", back_populates="gimnasio", lazy="dynamic")
 
     def __repr__(self):
-        return f"<Gimnasio {self.nombre} [{self.plan.value}]>"
+        return f"<Gimnasio {self.nombre} [{self.plan_vigente}]>"
+
+    @property
+    def plan_vigente(self) -> str:
+        """
+        Plan SaaS que rige a este gimnasio: el de su ORGANIZACIÓN (SCRUM-223).
+
+        La columna `gimnasios.plan` quedó como legado y ya no se mantenía al
+        contratar/cambiar de plan, así que todo lo que la serializaba (listado
+        y detalle del superadmin, perfil del propietario, app móvil) mostraba
+        "Básico" mientras la suscripción y los permisos eran "Enterprise".
+        Se cae a la columna solo si el gimnasio aún no tiene organización
+        cargada.
+        """
+        org = self.organizacion
+        plan = org.plan if org is not None else self.plan
+        return plan.value if hasattr(plan, "value") else plan
+
+    @property
+    def baja(self) -> dict | None:
+        """Estado de la baja pendiente, o None si no hay ninguna programada."""
+        programada = _aware(self.baja_programada_para)
+        if not programada:
+            return None
+        return {
+            "solicitada_en":   self.baja_solicitada_en.isoformat() if self.baja_solicitada_en else None,
+            "programada_para": programada.isoformat(),
+            "motivo":          self.baja_motivo,
+            "dias_restantes":  max(0, (programada - datetime.now(timezone.utc)).days),
+        }
 
     def to_dict(self):
         return {
             "id":                    self.id,
             "nombre":                self.nombre,
-            "plan":                  self.plan.value if hasattr(self.plan, "value") else self.plan,
+            "plan":                  self.plan_vigente,
             "activo":                self.activo,
+            "baja":                  self.baja,
             "email_contacto":        self.email_contacto,
             "telefono":              self.telefono,
             "tipo_gimnasio":         self.tipo_gimnasio,

@@ -53,6 +53,7 @@ _RUTAS_PUBLICAS = frozenset({
     "/api/auth/forgot-password",
     "/api/auth/reset-password",
     "/api/health",
+    "/api/health/ready",             # readiness: Postgres + Mongo + Redis
     "/api/onboarding/gym-types",     # catálogo público del selector
     "/api/onboarding/planes",        # catálogo público de planes
     "/api/onboarding/register-gym",  # alta inicial: aún no existe el gimnasio

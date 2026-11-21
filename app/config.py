@@ -36,6 +36,11 @@ class Config:
     JWT_COOKIE_SAMESITE     = "Lax"
     JWT_ACCESS_COOKIE_PATH  = "/"
     JWT_REFRESH_COOKIE_PATH = "/"
+    # Cookies PERSISTENTES (con Max-Age), no de sesión: así el navegador las
+    # conserva al cerrar la pestaña/ventana y el portal puede renovar el acceso
+    # en silencio con el refresco (90 d) en lugar de pedir login otra vez.
+    # La vigencia exacta la fija auth/routes.py::_fijar_cookies_sesion.
+    JWT_SESSION_COOKIE      = False
     # CSRF de las cookies de JWT desactivado por ahora: todas las peticiones
     # mutantes del portal son JSON vía fetch desde el mismo origen (no hay
     # formularios cross-site), y la cookie ya lleva SameSite=Lax, que un

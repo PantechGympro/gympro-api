@@ -44,3 +44,9 @@ yarn-error.log*
 *.db
 storage/
 dump.rdb
+# --- Cobertura / reportes de pruebas ---
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+bandit-report.json

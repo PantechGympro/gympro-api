@@ -370,11 +370,16 @@ def eliminar_pago(id_pago):
     deja "Expirada" y reactiva la que estaba vigente justo antes (si
     existía) -- el mismo efecto que tenía el miembro antes de este cobro.
 
-    Solo se permite si es el pago MÁS RECIÉN REGISTRADO de ese miembro: si
-    ya hay un pago posterior, borrar este dejaría el historial
-    inconsistente con la membresía vigente actual (que ya no depende de
-    este pago), así que se rechaza y se pide eliminar primero los más
-    nuevos.
+    La membresía SOLO se revierte si este es el pago MÁS RECIÉN REGISTRADO
+    de ese miembro: es el único que sostiene la membresía vigente. Si ya
+    hay un pago posterior, la membresía vigente depende de ese otro pago y
+    no se toca -- el pago se elimina igual del historial (mismo criterio
+    que editar_pago() con fecha_pago). Antes se rechazaba con 409 y se
+    obligaba a borrar primero todos los más nuevos, lo que volvía
+    impráctico corregir un cobro antiguo o limpiar datos de prueba.
+
+    La respuesta incluye `membresia_revertida` para que la interfaz diga
+    qué ocurrió realmente.
     """
     try:
         mdb    = get_db()
@@ -389,12 +394,10 @@ def eliminar_pago(id_pago):
             return jsonify({"error": "Pago no encontrado"}), 404
 
         mas_reciente = _pago_mas_reciente_del_miembro(mdb, doc["id_miembro"])
-        if mas_reciente and mas_reciente["_id"] != doc["_id"]:
-            return jsonify({
-                "error": "Hay pagos más recientes de este miembro. Elimina primero los más nuevos antes de borrar este.",
-            }), 409
+        es_el_ultimo = not mas_reciente or mas_reciente["_id"] == doc["_id"]
+        membresia_revertida = False
 
-        if doc.get("tipo_pago") in ("renovacion", "inscripcion"):
+        if es_el_ultimo and doc.get("tipo_pago") in ("renovacion", "inscripcion"):
             mm_activa = mdb.miembro_membresia.find_one(
                 {"id_miembro": doc["id_miembro"], "estado": "Activa"}
             )
@@ -402,6 +405,7 @@ def eliminar_pago(id_pago):
                 mdb.miembro_membresia.update_one(
                     {"_id": mm_activa["_id"]}, {"$set": {"estado": "Expirada"}}
                 )
+                membresia_revertida = True
                 # Reactivar la que estaba vigente justo antes de este cobro
                 # -- la más recién marcada "Expirada" distinta de la que
                 # acabamos de expirar (es la que registrar_pago() expiró en
@@ -428,10 +432,11 @@ def eliminar_pago(id_pago):
             detalle={
                 "id_pago": str(oid), "id_miembro": str(doc["id_miembro"]),
                 "monto": doc.get("monto"), "tipo_pago": doc.get("tipo_pago"),
+                "era_el_ultimo": es_el_ultimo, "membresia_revertida": membresia_revertida,
             },
         )
 
-        return jsonify({"msg": "Pago eliminado"}), 200
+        return jsonify({"msg": "Pago eliminado", "membresia_revertida": membresia_revertida}), 200
 
     except Exception as e:
         print(f"Error en eliminar_pago: {e}")

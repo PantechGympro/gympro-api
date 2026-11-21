@@ -155,6 +155,13 @@ def sincronizar_plan_organizacion(id_gimnasio, nombre_plan):
     gym = Gimnasio.query.get(id_gimnasio)
     if gym is not None and gym.organizacion is not None and nombre_plan:
         gym.organizacion.plan = nombre_plan
+        # Se mantiene también la columna heredada gimnasios.plan de TODAS las
+        # sucursales de la organización: ya no decide nada, pero reportes y
+        # consultas directas a la base la siguen leyendo y no deben
+        # contradecir a la suscripción.
+        Gimnasio.query.filter_by(id_organizacion=gym.id_organizacion).update(
+            {Gimnasio.plan: nombre_plan}, synchronize_session=False
+        )
         if has_request_context():
             g.pop("_cache_plan_org", None)   # que el resto de la petición vea el plan nuevo
 
