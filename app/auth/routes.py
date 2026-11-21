@@ -27,6 +27,8 @@ from app.utils.alcance     import crear_asignacion, sucursales_de_administrador,
 from app.utils.email_remitentes import remitente
 from app.constants.roles  import ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 from app.utils.capacidad  import permite_funcion
+from app.utils.alcance    import registrar_evento
+from app.constants.legal  import VERSION_AVISO
 
 # ── Modelos Mongo (fallback legacy — se eliminarán en Sprint 3) ───────────────
 from app.mongo import get_db
@@ -492,7 +494,78 @@ def me():
         "organizacion_multi_sucursal": multi_sucursal,
         "funciones_plan":  funciones_plan,
         "debe_cambiar_password": claims.get("debe_cambiar_password", False),  # SCRUM-224
+        # Aceptación del aviso de privacidad (migración 036). Se consulta a la
+        # base y no al token: en cuanto la persona acepta, la siguiente
+        # navegación ya no se la vuelve a pedir, sin esperar a que el token se
+        # renueve. Es una búsqueda por clave primaria.
+        "aviso_privacidad": _estado_aviso(get_jwt_identity()),
     }), 200
+
+# ──────────────────────────────
+# AVISO DE PRIVACIDAD (migración 036)
+# ──────────────────────────────
+#
+# La LFPDPPP exige poder acreditar qué versión del aviso aceptó cada persona y
+# cuándo. Antes el portal solo enlazaba el documento: no quedaba constancia de
+# nada, aunque el marco normativo del proyecto afirmara lo contrario.
+
+def _estado_aviso(user_id) -> dict:
+    """Si la persona debe aceptar el aviso y qué versión está vigente."""
+    usuario = UsuarioPG.query.get(int(user_id)) if str(user_id).isdigit() else None
+    return {
+        "version_vigente":  VERSION_AVISO,
+        "version_aceptada": usuario.aviso_version if usuario else None,
+        # Un usuario legacy de Mongo (sin fila en PG) no puede registrar nada:
+        # no se le bloquea el paso por algo que el sistema no puede guardar.
+        "pendiente":        bool(usuario and usuario.aviso_pendiente),
+        "aceptado_en":      (usuario.aviso_aceptado_en.isoformat()
+                             if usuario and usuario.aviso_aceptado_en else None),
+    }
+
+
+@auth_bp.route("/aviso-privacidad", methods=["GET"])
+@jwt_required()
+def consultar_aviso():
+    """Estado de la aceptación del aviso para la sesión actual."""
+    return jsonify(_estado_aviso(get_jwt_identity())), 200
+
+
+@auth_bp.route("/aviso-privacidad", methods=["POST"])
+@jwt_required()
+def aceptar_aviso_privacidad():
+    """
+    Registra que la persona conoce el aviso de privacidad vigente, con la
+    versión y la fecha. Es lo que permite acreditar el consentimiento informado
+    de las finalidades necesarias; las voluntarias (datos de salud) tienen su
+    propio consentimiento, por socio, en el módulo de progreso físico.
+
+    Se exige que la versión que manda el cliente sea la vigente: si el portal
+    quedó cacheado con un aviso anterior, no se guarda la aceptación de un
+    texto que ya no es el que se muestra.
+    """
+    data    = request.get_json(silent=True) or {}
+    version = (data.get("version") or "").strip()
+    if version != VERSION_AVISO:
+        return jsonify({
+            "msg": "La versión del aviso no es la vigente. Recarga la página e inténtalo de nuevo.",
+            "version_vigente": VERSION_AVISO,
+        }), 409
+
+    identidad = get_jwt_identity()
+    usuario   = UsuarioPG.query.get(int(identidad)) if str(identidad).isdigit() else None
+    if usuario is None:
+        return jsonify({"msg": "Sesión no válida."}), 401
+
+    usuario.aceptar_aviso(version)
+    registrar_evento(
+        usuario.id, "aviso_privacidad_aceptado",
+        id_gimnasio=usuario.id_gimnasio,
+        detalle={"version": version},
+        ip_origen=request.remote_addr,
+    )
+    db.session.commit()
+    return jsonify({"msg": "Gracias. Queda registrado.", **_estado_aviso(usuario.id)}), 200
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
