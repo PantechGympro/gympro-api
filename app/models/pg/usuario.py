@@ -68,6 +68,23 @@ class Usuario(db.Model):
     chat_suspendido_en     = db.Column(db.DateTime(timezone=True), nullable=True)
     chat_suspendido_por    = db.Column(db.Integer, db.ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True)
 
+    # ── Aceptación del aviso de privacidad (migración 036) ────────────────────
+    # La LFPDPPP exige poder acreditar qué texto aceptó cada persona y cuándo.
+    # NULL = nunca lo aceptó; si la versión guardada no es la vigente
+    # (constants/legal.py), el portal vuelve a pedirla.
+    aviso_version          = db.Column(db.String(10), nullable=True)
+    aviso_aceptado_en      = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    @property
+    def aviso_pendiente(self) -> bool:
+        from app.constants.legal import VERSION_AVISO
+        return self.aviso_version != VERSION_AVISO
+
+    def aceptar_aviso(self, version: str) -> None:
+        """Deja constancia de la aceptación. No hace commit."""
+        self.aviso_version     = version
+        self.aviso_aceptado_en = datetime.now(timezone.utc)
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def set_password(self, password: str) -> None:
@@ -98,6 +115,8 @@ class Usuario(db.Model):
             # Para que el frontend pueda ofrecer "reenviar credenciales" solo
             # mientras la cuenta sigue en su contraseña temporal inicial.
             "debe_cambiar_password": bool(self.debe_cambiar_password),
+            "aviso_version":         self.aviso_version,
+            "aviso_aceptado_en":     self.aviso_aceptado_en.isoformat() if self.aviso_aceptado_en else None,
             # HU-12: estado de moderación del chat -- el panel de staff y la
             # bandeja de reportes lo muestran para saber si ya está cortado.
             "chat_suspendido":        bool(self.chat_suspendido),

@@ -195,7 +195,9 @@ def impersonate(user_id: int):
     # inconsistente que no debería existir: cualquier código que alguna
     # vez verifique el JWT solo por cookie (o un proxy/caché que la
     # reenvíe) seguiría viendo al superadmin, no al usuario impersonado.
-    set_access_cookies(respuesta, token)
+    # max_age = vida del token de impersonación: con cookies persistentes la
+    # librería usaría 1 año y la cookie del usuario impersonado sobreviviría.
+    set_access_cookies(respuesta, token, max_age=int(_IMPERSONATE_TTL.total_seconds()))
     return respuesta, 200
 
 

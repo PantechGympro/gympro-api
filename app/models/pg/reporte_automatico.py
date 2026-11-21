@@ -12,10 +12,11 @@ corre una vez al dia y decide, por fila, si hoy toca generarla segun su
 frecuencia y `ultima_ejecucion` -- ese campo es lo que evita reenviar dos
 veces el mismo periodo si el job se dispara más de una vez el mismo día.
 
-El destinatario del correo NUNCA se guarda aqui: siempre es el Propietario
-de la organizacion del gimnasio (usuario_propietario_de(), en utils/alcance.py),
-sin importar si quien configuro la automatizacion fue el Propietario o un
-Administrador -- asi lo pidio el usuario.
+Destinatarios (migracion 035): se eligen por receta -- el Propietario de la
+organizacion (usuario_propietario_de(), utils/alcance.py), los Administradores
+activos de la sucursal (administradores_de()), y/o hasta MAX_CORREOS_EXTRA
+correos libres. Antes de la 035 era siempre el Propietario; las filas viejas
+conservan ese comportamiento (enviar_propietario=true por omision).
 """
 from datetime import datetime, timezone
 
@@ -45,6 +46,11 @@ MOMENTO_LABEL = {
     "dia_siguiente": "Dia siguiente",
 }
 
+# Tope de correos libres por receta: suficiente para contador/socios y
+# evita usar el reporte como lista de difusion. Mismo valor en el frontend
+# (components/owner_gym/SelectorDestinatarios.jsx).
+MAX_CORREOS_EXTRA = 5
+
 
 class ConfiguracionReporteAutomatico(db.Model):
     """Receta de un reporte ejecutivo que se genera y envia solo, por correo."""
@@ -73,6 +79,13 @@ class ConfiguracionReporteAutomatico(db.Model):
                               default="dia_siguiente", server_default="dia_siguiente")
     hora_envio    = db.Column(db.Integer, nullable=False, default=6, server_default="6")
 
+    # A quien le llega -- ver nota del modulo. Al menos uno es obligatorio
+    # (CHECK ck_reporte_auto_destinatario + validacion en la API).
+    enviar_propietario   = db.Column(db.Boolean, nullable=False, default=True, server_default="true")
+    enviar_administrador = db.Column(db.Boolean, nullable=False, default=False, server_default="false")
+    # CSV en minusculas; None si no hay.
+    correos_extra        = db.Column(db.String(500), nullable=True)
+
     ultima_ejecucion = db.Column(db.DateTime(timezone=True), nullable=True)
     ultimo_error     = db.Column(db.String(300), nullable=True)
 
@@ -84,6 +97,19 @@ class ConfiguracionReporteAutomatico(db.Model):
 
     def lista_secciones(self) -> list[str]:
         return [s.strip() for s in (self.secciones or "").split(",") if s.strip()]
+
+    def lista_correos_extra(self) -> list[str]:
+        return [c.strip() for c in (self.correos_extra or "").split(",") if c.strip()]
+
+    def destinatarios_label(self) -> str:
+        """Texto para la tarjeta: 'Propietario, Administrador, a@b.com'."""
+        partes = []
+        if self.enviar_propietario:
+            partes.append("Propietario")
+        if self.enviar_administrador:
+            partes.append("Administrador")
+        partes.extend(self.lista_correos_extra())
+        return ", ".join(partes)
 
     def to_dict(self):
         return {
@@ -99,6 +125,10 @@ class ConfiguracionReporteAutomatico(db.Model):
             "momento_envio":       self.momento_envio,
             "momento_envio_label": MOMENTO_LABEL.get(self.momento_envio, self.momento_envio),
             "hora_envio":          self.hora_envio,
+            "enviar_propietario":   self.enviar_propietario,
+            "enviar_administrador": self.enviar_administrador,
+            "correos_extra":        self.lista_correos_extra(),
+            "destinatarios_label":  self.destinatarios_label(),
             "ultima_ejecucion": self.ultima_ejecucion.isoformat() if self.ultima_ejecucion else None,
             "ultimo_error":     self.ultimo_error,
             "creado_en":        self.creado_en.isoformat() if self.creado_en else None,

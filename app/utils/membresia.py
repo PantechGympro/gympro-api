@@ -110,6 +110,37 @@ def evaluar_membresias_lote(db, ids_miembros, ahora=None):
     return {i: _evaluar_docs(docs, ahora) for i, docs in por_miembro.items()}
 
 
+def resumen_vencimientos(db, id_gimnasio, dias=DIAS_POR_VENCER, ahora=None):
+    """
+    Cuántos miembros activos de un gimnasio tienen la membresía por vencer o
+    recién vencida. Es la MISMA regla que el listado "Por vencer"
+    (`/api/membresias/por-vencer`), así el contador del panel, las alertas y la
+    lista nunca discrepan.
+
+    Devuelve {"por_vencer": int, "vencidas_recientes": int, "dias": int}:
+      * por_vencer         -- vigente y vence dentro de `dias` días.
+      * vencidas_recientes -- ya no vigente y venció en los últimos `dias` días
+                              (a quien aún se puede recuperar). Quien venció
+                              hace meses no cuenta: no es una alerta accionable.
+    Una sola consulta de membresías para todo el padrón (sin N+1).
+    """
+    ahora = ahora or datetime.now(timezone.utc)
+    ids = [m["_id"] for m in db.miembros.find(
+        {"id_gimnasio_pg": id_gimnasio, "estado": "Activo"}, {"_id": 1})]
+    por_vencer = vencidas = 0
+    for ev in evaluar_membresias_lote(db, ids, ahora).values():
+        fin = ev.get("fecha_fin")
+        if fin is None:                       # nunca tuvo membresía
+            continue
+        segundos = (_fin_efectivo(fin) - ahora).total_seconds()
+        if ev.get("vigente"):
+            if segundos <= dias * 86400:
+                por_vencer += 1
+        elif segundos >= -dias * 86400:
+            vencidas += 1
+    return {"por_vencer": por_vencer, "vencidas_recientes": vencidas, "dias": dias}
+
+
 def _evaluar_docs(docs, ahora):
     """Regla de vigencia sobre los documentos de membresía de UN miembro."""
     if not docs:

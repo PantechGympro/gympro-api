@@ -203,7 +203,15 @@ def crear_miembro():
         # alguien tendrá que resetearle la contraseña a mano.
         enviar_credenciales_acceso(email, nombre, password_generada, "Miembro")
 
-        return jsonify(nuevo_miembro.to_dict_full()), 201
+        # numero_socio = id del usuario en PostgreSQL: es el "ID #n" que la
+        # UI muestra en la ficha y el que se busca en recepción / Verificar
+        # Visitante. Se devuelve aquí para que quien da el alta pueda
+        # dárselo al miembro en el momento (modal de "Miembro registrado").
+        return jsonify({
+            **nuevo_miembro.to_dict_full(),
+            "id_usuario_pg": pg_usuario.id,
+            "numero_socio":  pg_usuario.id,
+        }), 201
 
     except Exception as e:
         pg_db.session.rollback()
