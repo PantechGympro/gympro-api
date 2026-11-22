@@ -22,6 +22,7 @@ from flask_mail import Message
 
 from app.extensions import db, mail, limiter
 from app.constants.planes import DIAS_PRUEBA
+from app.utils.antiabuso import evaluar_alta, registrar_intento
 from app.models.pg.rol                 import Rol
 from app.models.pg.gimnasio            import Gimnasio
 from app.models.pg.usuario             import Usuario
@@ -186,7 +187,21 @@ def register_gym():
     if errores:
         return jsonify({"msg": "Datos incompletos", "errores": errores}), 400
 
-    # Verificar duplicados
+    # Altas repetidas para no pagar (ver utils/antiabuso.py). Va DESPUES de
+    # validar los datos -- para no ensuciar la bitacora con formularios a
+    # medio llenar -- y ANTES de cualquier otra verificacion de duplicados:
+    # su diagnostico es mas preciso que "ese correo ya existe" (sabe si la
+    # cuenta se dio de baja, si vienen varias altas del mismo equipo) y es el
+    # unico que deja constancia revisable. La IP no bloquea: solo se registra.
+    permitido, motivo, mensaje, ctx = evaluar_alta(adm_email, gym_data.get("telefono"))
+    if not permitido:
+        registrar_intento(ctx, resultado="bloqueado", motivo=motivo)
+        db.session.commit()          # el registro del bloqueo se guarda igual
+        return jsonify({"msg": mensaje, "codigo": motivo}), 409
+
+    # Respaldo: un correo que ya pertenece a CUALQUIER usuario (staff de otro
+    # gimnasio, por ejemplo) no puede abrir una cuenta nueva aunque la
+    # bitacora antiabuso no tenga nada suyo.
     if Usuario.query.filter_by(email=adm_email).first():
         return jsonify({"msg": "El correo del administrador ya esta registrado"}), 409
 
@@ -304,6 +319,11 @@ def register_gym():
         # 4. Factura inicial pendiente -- solo si hay algo que cobrar. Emitir
         # una factura de $0 al plan gratuito ensuciaba el historial de pagos
         # del propietario con un cobro que no existe.
+        # Deja el rastro del alta en la bitacora antiabuso, en la MISMA
+        # transaccion: si el alta se revierte, el rastro tambien, y no queda
+        # una identidad "quemada" por un gimnasio que nunca existio.
+        registrar_intento(ctx, resultado="creado", id_organizacion=nuevo_gym.id_organizacion)
+
         if es_de_pago:
             db.session.add(FacturaSuscripcion(
                 id_suscripcion    = suscripcion.id,
