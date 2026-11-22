@@ -239,15 +239,18 @@ ROLES_REQUERIDOS = ["Propietario", "Entrenador", "Recepcionista", "Miembro"]
 
 PLANES_BASE = [
     {
-        "nombre": "starter", "precio_mensual_mxn": 0, "precio_anual_mxn": 0, "max_miembros": 30,
+        # Ver el comentario del Starter en seed_pg.py: 20 miembros y sin app movil.
+        "nombre": "starter", "precio_mensual_mxn": 0, "precio_anual_mxn": 0, "max_miembros": 20,
         "descripcion": "Plan gratuito para probar GymPro con un grupo pequeño de miembros.",
         "titulo_comercial": "Para arrancar sin costo", "orden": 0, "destacado": False,
         "caracteristicas": [
-            "Hasta 30 miembros activos", "App movil para tus miembros con check-in por QR",
-            "Registro de asistencias y pagos", "1 usuario administrador", "Soporte por correo electronico",
+            "Hasta 20 miembros activos", "Registro de asistencias y pagos desde la web",
+            "Control de entrada manual en recepcion", "1 usuario administrador",
+            "Soporte por correo electronico",
+            "La app movil para tus miembros se incluye desde el plan Basico",
         ],
         "limites": {"pos": False, "pasarelas_pago": False, "analiticas_ia": False,
-                    "rutinas_ia": False, "reportes_pdf": False, "app_movil": True,
+                    "rutinas_ia": False, "reportes_pdf": False, "app_movil": False,
                     "max_staff": 1, "max_sucursales": 1},
     },
     {

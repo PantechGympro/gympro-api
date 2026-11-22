@@ -27,6 +27,7 @@ from app.utils.alcance     import crear_asignacion, sucursales_de_administrador,
 from app.utils.email_remitentes import remitente
 from app.constants.roles  import ROL_ADMINISTRADOR, ROL_SUPERADMIN, normalizar_rol
 from app.utils.capacidad  import permite_funcion
+from app.utils.security   import bloqueo_app_movil
 from app.utils.alcance    import registrar_evento
 from app.constants.legal  import VERSION_AVISO
 
@@ -268,6 +269,17 @@ def login():
             return jsonify({"msg": "Usuario inactivo"}), 403
         if usuario_pg.gimnasio and not usuario_pg.gimnasio.activo:
             return jsonify({"msg": "El gimnasio no está activo. Contacta al administrador."}), 403
+
+        # La app móvil es una función de plan: si el gimnasio no la tiene
+        # incluida, se corta aquí, en la puerta. Dejar entrar y que la app
+        # fuera fallando pantalla por pantalla se lee como un sistema roto,
+        # no como un plan que no la incluye. Solo aplica a peticiones que se
+        # identifican como la app (ver utils/security.es_cliente_movil): la
+        # web y cualquier versión vieja de la app pasan igual que antes.
+        rol_login = usuario_pg.rol.nombre if usuario_pg.rol else ""
+        bloqueo = bloqueo_app_movil(usuario_pg.id_gimnasio, rol_login)
+        if bloqueo is not None:
+            return bloqueo
 
         payload = _build_token_pg(usuario_pg)
         token   = create_access_token(
