@@ -96,17 +96,13 @@ def _build_token_pg(usuario: UsuarioPG) -> dict:
             },
         }
 
-    # SCRUM-223: el plan que se muestra/gatea en el frontend es el de la
-    # ORGANIZACIÓN (ver utils/capacidad.py), no el de Gimnasio.plan --
-    # desde que el billing se sincroniza a Organizacion.plan, Gimnasio.plan
-    # ya no se actualiza y quedaría mostrando un valor viejo tras cualquier
-    # cambio de plan.
-    # plan es str con PGEnum(create_type=False); con db.Enum(PlanEnum) sería .value
-    if usuario.gimnasio and usuario.gimnasio.organizacion:
-        _plan = usuario.gimnasio.organizacion.plan
-    else:
-        _plan = "basico"
-    plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
+    # El plan que viaja en el token sale del resolutor único
+    # (utils/capacidad.nombre_plan_vigente): manda la SUSCRIPCIÓN vigente, no
+    # la copia en Organizacion.plan, que es la que se quedaba vieja y producía
+    # el "Enterprise bloqueado". Si no se puede resolver cae al plan gratuito,
+    # no a "basico": ante la duda, lo mínimo.
+    from app.utils.capacidad import nombre_plan_vigente
+    plan = nombre_plan_vigente(usuario.id_gimnasio)
 
     primer_login = getattr(usuario, "primer_login", False)
     debe_cambiar_password = getattr(usuario, "debe_cambiar_password", False)  # SCRUM-224

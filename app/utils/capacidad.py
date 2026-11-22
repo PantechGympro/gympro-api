@@ -88,8 +88,8 @@ def _nombre_plan(valor):
 
 def _plan_de_suscripcion(id_organizacion):
     """
-    Plan de la suscripción vigente (trialing/active) de la sede principal de
-    la organización, o None si no hay.
+    Plan de la suscripción vigente (trialing/active) de la organización, o
+    None si no hay ninguna.
 
     Bug real (demo con Enterprise "bloqueado"): Organizacion.plan es una
     COPIA del plan contratado y varios caminos de alta (seed_pg, el webhook
@@ -97,18 +97,38 @@ def _plan_de_suscripcion(id_organizacion):
     apuntaba a Enterprise -- la UI de facturación mostraba Enterprise pero
     los candados leían "basico". La suscripción vigente es lo que se cobra,
     así que manda; Organizacion.plan queda como respaldo cuando no hay una.
+
+    Segunda vuelta del mismo bug (nov/2026): la versión anterior solo miraba
+    la suscripción de la sucursal PRINCIPAL. Una organización cuya suscripción
+    quedó colgada de otra sucursal -- pasa si la principal se creó después,
+    si se marcó es_sucursal_principal a mano, o si la sede original se dio de
+    baja -- volvía a caer en la copia vieja y reaparecían los candados con el
+    plan de pago al día. Ahora se busca en TODAS las sucursales de la
+    organización: primero la principal (es la que contrata), y si no tiene,
+    la suscripción vigente más reciente de cualquier sucursal.
+
+    Si hubiera varias vigentes se toma la más reciente y no "la mejor": una
+    organización con dos suscripciones activas es un estado roto de
+    facturación que hay que arreglar en los datos, no una elección que este
+    resolutor deba disimular eligiendo la más generosa.
     """
-    sede = (Gimnasio.query
-            .filter_by(id_organizacion=id_organizacion, es_sucursal_principal=True)
-            .order_by(Gimnasio.id).first()
-            or Gimnasio.query.filter_by(id_organizacion=id_organizacion)
-            .order_by(Gimnasio.id).first())
-    if sede is None:
+    sedes = (Gimnasio.query
+             .filter_by(id_organizacion=id_organizacion)
+             .order_by(Gimnasio.es_sucursal_principal.desc(), Gimnasio.id)
+             .all())
+    if not sedes:
         return None
-    sub = (Suscripcion.query
-           .filter(Suscripcion.id_gimnasio == sede.id,
-                   Suscripcion.estado.in_(_ESTADOS_SUSCRIPCION_VIGENTE))
-           .order_by(Suscripcion.created_at.desc()).first())
+
+    def _vigente(ids):
+        return (Suscripcion.query
+                .filter(Suscripcion.id_gimnasio.in_(ids),
+                        Suscripcion.estado.in_(_ESTADOS_SUSCRIPCION_VIGENTE))
+                .order_by(Suscripcion.created_at.desc()).first())
+
+    principales = [s.id for s in sedes if s.es_sucursal_principal]
+    sub = _vigente(principales) if principales else None
+    if sub is None:
+        sub = _vigente([s.id for s in sedes])
     return sub.plan if sub is not None else None
 
 
@@ -144,6 +164,52 @@ def _plan_de(id_gimnasio):
     if gym is None or gym.organizacion is None:
         return None
     return _plan_de_organizacion(gym.organizacion.id)
+
+
+# ── Resolutor público del plan vigente ───────────────────────────────────────
+# Punto ÚNICO para "¿qué plan rige a este gimnasio/organización?". Existe
+# porque la pregunta se respondía copiada en media docena de archivos leyendo
+# `Organizacion.plan` a mano (login, impersonación, onboarding, alta de
+# sucursal, reporte ejecutivo, Gimnasio.plan_vigente) -- y esa columna es una
+# COPIA que se queda vieja. El resultado era el bug recurrente del "Enterprise
+# bloqueado": los candados decían una cosa y la factura otra.
+#
+# Regla: manda la SUSCRIPCIÓN vigente; `Organizacion.plan` solo se usa como
+# respaldo cuando no hay ninguna. Nadie debería volver a leer esa columna
+# para decidir permisos -- si hace falta el nombre del plan, se pide aquí.
+
+PLAN_POR_DEFECTO = "starter"
+
+
+def plan_vigente_de(id_gimnasio):
+    """PlanSuscripcion que rige a `id_gimnasio`, o None si no se puede resolver."""
+    return _plan_de(id_gimnasio)
+
+
+def plan_vigente_de_organizacion(id_organizacion):
+    """PlanSuscripcion que rige a `id_organizacion`, o None."""
+    return _plan_de_organizacion(id_organizacion)
+
+
+def nombre_plan_vigente(id_gimnasio, *, default=PLAN_POR_DEFECTO):
+    """
+    Nombre del plan vigente de `id_gimnasio`, listo para un claim de JWT o
+    para mostrarse. Si no se puede resolver devuelve `default`.
+
+    El default es el plan GRATUITO, no "basico": cuando no se sabe qué se
+    contrató, lo correcto es asumir lo mínimo y no regalar funciones de un
+    plan de pago. (El gateo real no depende de esto -- lo hace
+    permite_funcion() contra el plan resuelto -- pero el claim viaja al
+    frontend y a los reportes, y no debe prometer de más.)
+    """
+    plan = _plan_de(id_gimnasio)
+    return plan.nombre if plan is not None else default
+
+
+def nombre_plan_vigente_de_organizacion(id_organizacion, *, default=PLAN_POR_DEFECTO):
+    """Igual que nombre_plan_vigente() pero partiendo de la organización."""
+    plan = _plan_de_organizacion(id_organizacion)
+    return plan.nombre if plan is not None else default
 
 
 def sincronizar_plan_organizacion(id_gimnasio, nombre_plan):

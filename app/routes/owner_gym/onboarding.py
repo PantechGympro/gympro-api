@@ -292,10 +292,10 @@ def register_gym():
                             nombre_plan=plan.titulo_comercial or plan.nombre.capitalize())
 
         # 6. Generar JWT para login inmediato (primer_login=True → fuerza onboarding)
-        # SCRUM-223: el claim "plan" refleja el de la organización recién
-        # creada (ya fijado arriba con plan.nombre), no Gimnasio.plan.
-        _org_plan = nuevo_gym.organizacion.plan if nuevo_gym.organizacion else plan.nombre
-        _plan_val = _org_plan if isinstance(_org_plan, str) else _org_plan.value
+        # El claim "plan" sale del resolutor único (utils/capacidad.py), que
+        # ya ve la suscripción recién creada en esta misma transacción.
+        from app.utils.capacidad import nombre_plan_vigente
+        _plan_val = nombre_plan_vigente(nuevo_gym.id, default=plan.nombre)
         token = create_access_token(
             identity = str(nuevo_admin.id),
             additional_claims = {
@@ -436,12 +436,9 @@ def complete_setup():
         db.session.commit()
 
         # 3. Emitir nuevo JWT con primer_login=False
-        # SCRUM-223: el plan vigente es el de la organización, no Gimnasio.plan.
-        if gym and gym.organizacion:
-            _plan = gym.organizacion.plan
-        else:
-            _plan = "basico"
-        plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
+        # El plan sale del resolutor único (ver utils/capacidad.py).
+        from app.utils.capacidad import nombre_plan_vigente
+        plan = nombre_plan_vigente(id_gimnasio)
         nuevo_token = create_access_token(
             identity = str(usuario.id),
             additional_claims = {
