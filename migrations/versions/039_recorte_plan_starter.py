@@ -86,7 +86,7 @@ def _avisar_afectados(con):
         SELECT o.id, o.nombre,
                (SELECT COUNT(*) FROM gimnasios g WHERE g.id_organizacion = o.id) AS sucursales
           FROM organizaciones o
-         WHERE o.plan = 'starter'
+         WHERE o.plan::text = 'starter'
          ORDER BY o.id
     """)).fetchall()
     if not filas:
