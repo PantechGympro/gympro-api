@@ -19,7 +19,7 @@ jobs:
     runs-on: [self-hosted, gympro-vps]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Asegurar rsync en el runner
         run: command -v rsync >/dev/null || (apt-get update && apt-get install -y rsync)

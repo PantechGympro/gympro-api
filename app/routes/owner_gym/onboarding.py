@@ -21,6 +21,8 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt, get_j
 from flask_mail import Message
 
 from app.extensions import db, mail, limiter
+from app.constants.planes import DIAS_PRUEBA
+from app.utils.antiabuso import evaluar_alta, registrar_intento
 from app.models.pg.rol                 import Rol
 from app.models.pg.gimnasio            import Gimnasio
 from app.models.pg.usuario             import Usuario
@@ -42,8 +44,18 @@ onboarding_bp = Blueprint("onboarding", __name__, url_prefix="/api/onboarding")
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str, nombre_plan: str = "Starter") -> None:
+def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str, nombre_plan: str = "Starter",
+                       dias_prueba: int | None = None) -> None:
     """Envia email de bienvenida. Falla silenciosamente si Mail no esta configurado."""
+    # El texto se arma segun lo que REALMENTE se contrato. Antes esta
+    # plantilla prometia "periodo de prueba de 14 dias" a todo el mundo,
+    # incluido quien se registraba en el plan gratuito -- y ademas nada
+    # terminaba esa prueba, asi que la promesa era doblemente falsa.
+    if dias_prueba:
+        texto_prueba = (f"Tu cuenta incluye <strong>{dias_prueba} dias de prueba gratis</strong> "
+                        f"con el plan {nombre_plan}.")
+    else:
+        texto_prueba = f"Tu cuenta quedo activa con el plan <strong>{nombre_plan}</strong>."
     try:
         msg = Message(
             subject  = f"Bienvenido a GymPro SaaS — {nombre_gym}",
@@ -58,8 +70,7 @@ def _enviar_bienvenida(email: str, nombre_gym: str, nombre_admin: str, nombre_pl
   <div style="background:#f9f9f9;padding:32px;border-radius:0 0 12px 12px">
     <h2>Bienvenido, {nombre_admin}!</h2>
     <p>Tu gimnasio <strong>{nombre_gym}</strong> ha sido registrado exitosamente en GymPro SaaS.</p>
-    <p>Tu cuenta esta en <strong>periodo de prueba de 14 dias</strong> con el plan {nombre_plan}.
-       Durante este tiempo podras explorar todas las funciones sin costo alguno.</p>
+    <p>{texto_prueba}</p>
     <div style="background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:20px;margin:24px 0">
       <h3 style="margin-top:0">Proximos pasos</h3>
       <ol style="line-height:2">
@@ -176,7 +187,21 @@ def register_gym():
     if errores:
         return jsonify({"msg": "Datos incompletos", "errores": errores}), 400
 
-    # Verificar duplicados
+    # Altas repetidas para no pagar (ver utils/antiabuso.py). Va DESPUES de
+    # validar los datos -- para no ensuciar la bitacora con formularios a
+    # medio llenar -- y ANTES de cualquier otra verificacion de duplicados:
+    # su diagnostico es mas preciso que "ese correo ya existe" (sabe si la
+    # cuenta se dio de baja, si vienen varias altas del mismo equipo) y es el
+    # unico que deja constancia revisable. La IP no bloquea: solo se registra.
+    permitido, motivo, mensaje, ctx = evaluar_alta(adm_email, gym_data.get("telefono"))
+    if not permitido:
+        registrar_intento(ctx, resultado="bloqueado", motivo=motivo)
+        db.session.commit()          # el registro del bloqueo se guarda igual
+        return jsonify({"msg": mensaje, "codigo": motivo}), 409
+
+    # Respaldo: un correo que ya pertenece a CUALQUIER usuario (staff de otro
+    # gimnasio, por ejemplo) no puede abrir una cuenta nueva aunque la
+    # bitacora antiabuso no tenga nada suyo.
     if Usuario.query.filter_by(email=adm_email).first():
         return jsonify({"msg": "El correo del administrador ya esta registrado"}), 409
 
@@ -255,19 +280,35 @@ def register_gym():
         # 2b. Asignación de alcance del administrador (HU-41 / SCRUM-212).
         crear_asignacion(nuevo_admin, gimnasio=nuevo_gym)
 
-        # 3. Crear Suscripcion trialing. SCRUM-224: el periodo de prueba no
-        # cobra nada, así que el ciclo (mensual/anual) todavía no se decide
-        # aquí -- se elige hasta la primera renovación real, en
-        # OwnerSubscription.jsx. ciclo_facturacion queda explícito en
-        # "mensual" para que quede claro que es la condición de partida, no
-        # un olvido.
+        # 3. Suscripción inicial. El periodo de prueba no cobra nada, así que
+        # el ciclo (mensual/anual) todavía no se decide aquí -- se elige hasta
+        # la primera renovación real, en OwnerSubscription.jsx.
+        # ciclo_facturacion queda explícito en "mensual" para que se vea que
+        # es la condición de partida, no un olvido.
+        #
+        # La prueba gratuita solo tiene sentido en un plan de PAGO: el
+        # gratuito no tiene nada que probar. Y se concede una sola vez por
+        # organización (organizaciones.prueba_usada_en), que es lo que impide
+        # encadenar pruebas dando de baja la cuenta y volviéndola a crear.
+        # Aquí la organización acaba de nacer, así que siempre es la primera;
+        # la comprobación queda igual porque este mismo criterio lo reusa
+        # billing.crear_suscripcion.
+        es_de_pago = (plan.precio_mensual_mxn or 0) > 0
+        con_prueba = es_de_pago and nuevo_gym.organizacion.prueba_usada_en is None
+        prueba_fin = (ahora + timedelta(days=DIAS_PRUEBA)) if con_prueba else None
+        if con_prueba:
+            nuevo_gym.organizacion.prueba_usada_en = ahora
+
         suscripcion = Suscripcion(
             id_gimnasio         = nuevo_gym.id,
             id_plan             = plan.id,
-            estado              = "trialing",
+            estado              = "trialing" if con_prueba else "active",
             ciclo_facturacion   = "mensual",
             fecha_inicio        = ahora,
-            fecha_proximo_cobro = ahora + timedelta(days=14),
+            prueba_fin          = prueba_fin,
+            # El cobro se intenta justo cuando termina lo gratis. En el plan
+            # gratuito no hay próximo cobro que agendar.
+            fecha_proximo_cobro = prueba_fin,
         )
         db.session.add(suscripcion)
         db.session.flush()
@@ -275,27 +316,35 @@ def register_gym():
         # 3b. Sembrar TipoMembresia por defecto según tipo de gimnasio
         seed_default_memberships(db.session, nuevo_gym.id, gym_tipo)
 
-        # 4. Factura inicial pendiente
-        factura = FacturaSuscripcion(
-            id_suscripcion    = suscripcion.id,
-            monto             = plan.precio_mensual_mxn,
-            moneda            = "MXN",
-            estado            = "pendiente",
-            fecha_emision     = ahora,
-            fecha_vencimiento = ahora + timedelta(days=14),
-        )
-        db.session.add(factura)
+        # 4. Factura inicial pendiente -- solo si hay algo que cobrar. Emitir
+        # una factura de $0 al plan gratuito ensuciaba el historial de pagos
+        # del propietario con un cobro que no existe.
+        # Deja el rastro del alta en la bitacora antiabuso, en la MISMA
+        # transaccion: si el alta se revierte, el rastro tambien, y no queda
+        # una identidad "quemada" por un gimnasio que nunca existio.
+        registrar_intento(ctx, resultado="creado", id_organizacion=nuevo_gym.id_organizacion)
+
+        if es_de_pago:
+            db.session.add(FacturaSuscripcion(
+                id_suscripcion    = suscripcion.id,
+                monto             = plan.precio_mensual_mxn,
+                moneda            = "MXN",
+                estado            = "pendiente",
+                fecha_emision     = ahora,
+                fecha_vencimiento = prueba_fin or ahora,
+            ))
         db.session.commit()
 
         # 5. Email de bienvenida (no bloquea si falla)
         _enviar_bienvenida(adm_email, gym_nombre, adm_nombre,
-                            nombre_plan=plan.titulo_comercial or plan.nombre.capitalize())
+                            nombre_plan=plan.titulo_comercial or plan.nombre.capitalize(),
+                            dias_prueba=DIAS_PRUEBA if con_prueba else None)
 
         # 6. Generar JWT para login inmediato (primer_login=True → fuerza onboarding)
-        # SCRUM-223: el claim "plan" refleja el de la organización recién
-        # creada (ya fijado arriba con plan.nombre), no Gimnasio.plan.
-        _org_plan = nuevo_gym.organizacion.plan if nuevo_gym.organizacion else plan.nombre
-        _plan_val = _org_plan if isinstance(_org_plan, str) else _org_plan.value
+        # El claim "plan" sale del resolutor único (utils/capacidad.py), que
+        # ya ve la suscripción recién creada en esta misma transacción.
+        from app.utils.capacidad import nombre_plan_vigente
+        _plan_val = nombre_plan_vigente(nuevo_gym.id, default=plan.nombre)
         token = create_access_token(
             identity = str(nuevo_admin.id),
             additional_claims = {
@@ -436,12 +485,9 @@ def complete_setup():
         db.session.commit()
 
         # 3. Emitir nuevo JWT con primer_login=False
-        # SCRUM-223: el plan vigente es el de la organización, no Gimnasio.plan.
-        if gym and gym.organizacion:
-            _plan = gym.organizacion.plan
-        else:
-            _plan = "basico"
-        plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
+        # El plan sale del resolutor único (ver utils/capacidad.py).
+        from app.utils.capacidad import nombre_plan_vigente
+        plan = nombre_plan_vigente(id_gimnasio)
         nuevo_token = create_access_token(
             identity = str(usuario.id),
             additional_claims = {

@@ -72,6 +72,7 @@ from app.routes.superadmin.planes             import planes_admin_bp
 from app.routes.superadmin.usuarios           import usuarios_admin_bp
 from app.routes.superadmin.backups_admin      import backups_admin_bp
 from app.routes.superadmin.spark_platform     import spark_platform_bp
+from app.routes.superadmin.antiabuso         import antiabuso_admin_bp
 from app.routes.owner_gym.perfil_publico      import perfil_publico_bp
 from app.routes.publico.landing               import landing_bp
 
@@ -183,6 +184,7 @@ def create_app():
     app.register_blueprint(suscripciones_admin_bp, url_prefix="/api/superadmin")
     app.register_blueprint(planes_admin_bp,        url_prefix="/api/superadmin")
     app.register_blueprint(usuarios_admin_bp,      url_prefix="/api/superadmin")
+    app.register_blueprint(antiabuso_admin_bp,     url_prefix="/api/superadmin")
     app.register_blueprint(backups_admin_bp,       url_prefix="/api/superadmin")
     app.register_blueprint(spark_platform_bp,      url_prefix="/api/superadmin")
     app.register_blueprint(landing_bp,             url_prefix="/api/publico")

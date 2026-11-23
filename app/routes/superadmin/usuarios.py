@@ -147,13 +147,12 @@ def impersonate(user_id: int):
     superadmin_id = get_jwt_identity()
     rol_nombre    = target.rol.nombre if target.rol else "Desconocido"
 
-    # SCRUM-223: mismo criterio que el login real (auth/routes.py) --
-    # el plan vigente es el de la organización, no Gimnasio.plan.
-    if target.gimnasio and target.gimnasio.organizacion:
-        _plan = target.gimnasio.organizacion.plan
-    else:
-        _plan = "basico"
-    plan  = _plan.value if hasattr(_plan, "value") else str(_plan)
+    # Mismo resolutor que el login real: el plan lo manda la suscripción
+    # vigente. Antes se leía Organizacion.plan y el superadmin impersonando
+    # veía los candados de un plan que el gimnasio ya no tiene -- justo el
+    # caso que se usa para diagnosticar, mintiendo sobre lo que diagnostica.
+    from app.utils.capacidad import nombre_plan_vigente
+    plan = nombre_plan_vigente(target.id_gimnasio)
 
     claims = {
         "email":           target.email,

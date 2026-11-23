@@ -32,7 +32,7 @@ from app.models.pg.organizacion import Organizacion
 from app.models.pg.suscripcion import Suscripcion
 from app.models.pg.pasarela_pago import ConfiguracionPasarela
 from app.utils.capacidad import (
-    LimiteDePlanExcedido, _plan_de_suscripcion, verificar_capacidad_sucursal,
+    LimiteDePlanExcedido, plan_de_suscripcion_vigente, verificar_capacidad_sucursal,
 )
 
 ORGANIZACION = "Vitazone"
@@ -82,7 +82,7 @@ def main():
             sede.es_sucursal_principal = True
 
         # El plan de la organización debe ser el de su suscripción vigente.
-        plan_sub = _plan_de_suscripcion(org.id)
+        plan_sub = plan_de_suscripcion_vigente(org.id)
         plan_org = org.plan.value if hasattr(org.plan, "value") else org.plan
         if plan_sub is not None and plan_sub.nombre != plan_org:
             cambios.append(f"plan de la organización '{plan_org}' -> '{plan_sub.nombre}' (según su suscripción)")

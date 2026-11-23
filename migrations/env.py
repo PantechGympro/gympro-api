@@ -55,6 +55,15 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        # Cada revision confirma por separado (no todas en una sola
+        # transaccion). Si no, al levantar un Postgres vacio y correr toda
+        # la cadena de un jalon, una migracion que agrega un valor de ENUM
+        # (ej. 016) y otra que lo usa en SQL (ej. 039) caen en la misma
+        # transaccion sin commit entre medio, y Postgres lo rechaza
+        # (UnsafeNewEnumValueUsage). Asi coincide con lo que de verdad pasa
+        # en produccion: cada deploy aplica las migraciones nuevas sobre una
+        # base donde las anteriores ya estan confirmadas.
+        transaction_per_migration=True,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -71,6 +80,9 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            # Ver el comentario en run_migrations_offline(): cada revision
+            # debe confirmar por separado.
+            transaction_per_migration=True,
         )
         with context.begin_transaction():
             context.run_migrations()

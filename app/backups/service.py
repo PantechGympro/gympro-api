@@ -230,7 +230,10 @@ def _leer_tablas_pg() -> dict:
         if tabla not in existentes:
             continue
         try:
-            filas = sa_db.session.execute(text(f'SELECT * FROM "{tabla}"')).mappings().all()
+            # nosec B608 - `tabla` no viene de entrada del usuario: itera la lista
+            # fija PG_TABLAS_REPORTE y ya se filtro contra get_table_names().
+            # El nombre de una tabla no se puede pasar como parametro ligado.
+            filas = sa_db.session.execute(text(f'SELECT * FROM "{tabla}"')).mappings().all()  # nosec B608
             if not filas:
                 continue
             limpias = []

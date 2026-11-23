@@ -31,6 +31,8 @@ hace explícita esa sincronización en vez de dejarla implícita.
 """
 import logging
 from datetime import datetime, timezone, timedelta
+
+import sqlalchemy as sa
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt
 
@@ -41,6 +43,7 @@ from app.models.pg.suscripcion        import Suscripcion
 from app.models.pg.factura_suscripcion import FacturaSuscripcion
 from app.utils.tenant import require_tenant
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, normalizar_rol
+from app.constants.planes import DIAS_PRUEBA, PLAN_GRATUITO
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +140,16 @@ def crear_suscripcion():
     Solo Administrador o SuperAdmin pueden invocar este endpoint.
 
     Body JSON:
-        { "id_plan": 1, "dias_prueba": 14, "ciclo": "mensual" }
-        (dias_prueba opcional, default 14; ciclo opcional, "mensual" | "anual", default "mensual")
+        { "id_plan": 1, "ciclo": "mensual" }
+        (ciclo opcional, "mensual" | "anual", default "mensual")
+
+    La duración de la prueba la decide el SERVIDOR (constants/planes.py). Antes
+    se leía `dias_prueba` del cuerpo de la petición: cualquiera con sesión de
+    propietario podía pedirse una prueba de años y quedarse con un plan de pago
+    gratis. Ahora el cuerpo no puede influir en eso.
+
+    La prueba se concede una sola vez por organización y solo en planes de
+    pago (ver organizaciones.prueba_usada_en).
     """
     claims = get_jwt()
     if not _es_admin(claims):
@@ -159,19 +170,31 @@ def crear_suscripcion():
     if not plan:
         return jsonify({"msg": "Plan no encontrado o inactivo"}), 404
 
-    dias_prueba = int(data.get("dias_prueba", 14))
-    ciclo       = data.get("ciclo", "mensual")
+    ciclo = data.get("ciclo", "mensual")
     if ciclo not in ("mensual", "anual"):
         return jsonify({"msg": "ciclo debe ser 'mensual' o 'anual'"}), 400
-    ahora       = datetime.now(timezone.utc)
+    ahora = datetime.now(timezone.utc)
+
+    gym = Gimnasio.query.get(gym_id)
+    org = gym.organizacion if gym is not None else None
+    es_de_pago = (plan.precio_mensual_mxn or 0) > 0
+    con_prueba = bool(es_de_pago and org is not None and org.prueba_usada_en is None)
+    prueba_fin = (ahora + timedelta(days=DIAS_PRUEBA)) if con_prueba else None
+    if con_prueba:
+        org.prueba_usada_en = ahora
 
     nueva_sub = Suscripcion(
         id_gimnasio          = gym_id,
         id_plan              = plan.id,
-        estado               = "trialing",
+        estado               = "trialing" if con_prueba else "active",
         ciclo_facturacion    = ciclo,
         fecha_inicio         = ahora,
-        fecha_proximo_cobro  = ahora + timedelta(days=dias_prueba),
+        prueba_fin           = prueba_fin,
+        # Con prueba, el primer cobro se intenta el dia que termina lo gratis.
+        # Sin prueba (plan de pago contratado directo, o prueba ya usada), el
+        # cobro toca al cerrar el primer ciclo.
+        fecha_proximo_cobro  = prueba_fin if con_prueba else (
+            _avanzar_ciclo(ahora, ahora) if es_de_pago else None),
     )
     db.session.add(nueva_sub)
     db.session.flush()  # obtener nueva_sub.id antes del commit
@@ -185,13 +208,14 @@ def crear_suscripcion():
         moneda            = "MXN",
         estado            = "pendiente",
         fecha_emision     = ahora,
-        fecha_vencimiento = ahora + timedelta(days=dias_prueba),
+        fecha_vencimiento = prueba_fin or ahora,
     )
     db.session.add(factura)
     db.session.commit()
 
     return jsonify({
-        "msg":         "Suscripción creada en período de prueba",
+        "msg":         ("Suscripción creada en período de prueba" if con_prueba
+                        else "Suscripción creada"),
         "suscripcion": nueva_sub.to_dict(),
         "factura":     factura.to_dict(),
     }), 201
@@ -431,18 +455,68 @@ def procesar_auto_renovaciones(app=None) -> dict:
     with contexto:
         ahora = datetime.now(timezone.utc)
         resumen = {"al_corriente": 0, "vencidas": 0, "sin_respuesta": 0,
-                   "errores": 0, "revisadas": 0}
+                   "errores": 0, "revisadas": 0, "pruebas_terminadas": 0}
 
+        # Se traen tambien las pruebas con fecha de fin, aunque no tengan
+        # proximo cobro agendado: una prueba sin esa fecha (datos migrados,
+        # un alta antigua) tambien tiene que cerrarse. El filtro fino de
+        # "¿ya vencio?" se hace en Python con Suscripcion.prueba_vencida,
+        # que resuelve la diferencia de zonas horarias entre motores.
         pendientes = (
             Suscripcion.query
             .filter(
                 Suscripcion.estado.in_(["trialing", "active"]),
-                Suscripcion.fecha_proximo_cobro.isnot(None),
-                Suscripcion.fecha_proximo_cobro <= ahora,
+                sa.or_(
+                    sa.and_(Suscripcion.fecha_proximo_cobro.isnot(None),
+                            Suscripcion.fecha_proximo_cobro <= ahora),
+                    sa.and_(Suscripcion.estado == "trialing",
+                            Suscripcion.prueba_fin.isnot(None)),
+                ),
             )
             .all()
         )
+        # Una prueba todavia vigente no es "pendiente" de nada.
+        pendientes = [sub for sub in pendientes if not sub.en_prueba]
         resumen["revisadas"] = len(pendientes)
+
+        def _terminar_prueba(sub):
+            """
+            Cierra una prueba gratuita que ya venció y deja al gimnasio en el
+            plan gratuito.
+
+            NO se marca 'past_due': ese estado significa "debe dinero", y
+            quien termina una prueba sin contratar no debe nada -- ponerlo ahí
+            le mostraría una deuda inventada en su pantalla de facturación.
+
+            Esto es contabilidad, no control de acceso: las funciones del plan
+            de pago ya se cortaron solas al vencer la fecha (ver
+            Suscripcion.prueba_vencida y utils/capacidad.py). Si este trabajo
+            no corre un día, nadie sigue disfrutando gratis lo que no pagó; lo
+            único que se retrasa es el ordenamiento de los registros.
+            """
+            sub.estado       = "cancelled"
+            sub.auto_renovar = False
+            sub.fecha_fin    = sub.prueba_fin
+            sub.updated_at   = ahora
+
+            plan_gratuito = PlanSuscripcion.query.filter_by(nombre=PLAN_GRATUITO, activo=True).first()
+            if plan_gratuito is not None:
+                # Suscripción nueva al plan gratuito para que la organización
+                # no quede sin ninguna: sin ella, el resolutor tendría que
+                # adivinar y las pantallas de facturación se quedan en blanco.
+                db.session.add(Suscripcion(
+                    id_gimnasio         = sub.id_gimnasio,
+                    id_plan             = plan_gratuito.id,
+                    estado              = "active",
+                    ciclo_facturacion   = "mensual",
+                    fecha_inicio        = ahora,
+                    fecha_proximo_cobro = None,
+                ))
+                _sincronizar_plan_organizacion(sub.id_gimnasio, plan_gratuito.nombre)
+
+            resumen["pruebas_terminadas"] += 1
+            logger.info("Suscripción %s: prueba gratuita terminada, pasa a %s",
+                        sub.id, PLAN_GRATUITO)
 
         def _vencer(sub, motivo: str):
             sub.estado       = "past_due"
@@ -453,6 +527,11 @@ def procesar_auto_renovaciones(app=None) -> dict:
 
         for sub in pendientes:
             try:
+                # Una prueba vencida se cierra como prueba, no como impago.
+                if sub.prueba_vencida:
+                    _terminar_prueba(sub)
+                    continue
+
                 if not (sub.auto_renovar and sub.referencia_recurrente):
                     _vencer(sub, "sin acuerdo de cobro recurrente")
                     continue

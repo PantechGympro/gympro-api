@@ -105,6 +105,18 @@ class Config:
     MAIL_SENDER_NOTIFICACIONES = os.getenv("MAIL_SENDER_NOTIFICACIONES", "notificaciones@gympro.lat")
     MAIL_SENDER_CONTACTO       = os.getenv("MAIL_SENDER_CONTACTO", "contacto@gympro.lat")
 
+    # ── Web Push (notificaciones push en el navegador) ───────────────────────
+    # Par de llaves VAPID: identifican al servidor ante el navegador para que
+    # este acepte la suscripcion (sin esto, cualquiera podria mandar push a
+    # cualquier suscriptor). Se generan UNA sola vez por entorno -- regenerarlas
+    # invalida todas las suscripciones existentes (los usuarios tendrian que
+    # volver a aceptar el permiso). VAPID_PUBLIC_KEY tambien la expone el
+    # endpoint /api/notificaciones/vapid-public-key para que el navegador
+    # pueda suscribirse (ver compartido/notificaciones.py).
+    VAPID_PUBLIC_KEY  = os.getenv("VAPID_PUBLIC_KEY")
+    VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+    VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "soporte@gympro.lat")
+
     # ── Rate Limiting (Flask-Limiter + Redis) ─────────────────────────────────
     # Redis compartido entre todos los workers de Gunicorn para contadores globales.
     # Sin Redis, cada worker tendría su propio contador y los límites serían ineficaces.
