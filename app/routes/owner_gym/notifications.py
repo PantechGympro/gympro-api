@@ -335,10 +335,24 @@ def init_scheduler(app):
             kwargs={"app": app},
         )
 
+        # Recordatorios de "Mis Citas" a 7, 3 y 1 dia(s) antes. 09:00 MX: ya
+        # paso el aviso de vencimiento de membresia (08:00) y es temprano para
+        # que el miembro lo vea antes de organizar su dia.
+        from app.routes.compartido.recordatorios_citas import chequear_recordatorios_citas
+        scheduler.add_job(
+            func=chequear_recordatorios_citas,
+            trigger=CronTrigger(hour=9, minute=0),
+            id="recordatorios_citas",
+            name="Recordatorios de citas (7/3/1 dias antes)",
+            replace_existing=True,
+            kwargs={"app": app},
+        )
+
         scheduler.start()
         _scheduler_status["activo"] = True
         app.logger.info("[Scheduler] Tareas registradas: 'notif_vencimientos' (08:00 MX), "
-                        "'billing_auto_renovacion' (03:00 MX), 'aviso_no_asistio' (21:00 MX) "
+                        "'billing_auto_renovacion' (03:00 MX), 'recordatorios_citas' (09:00 MX), "
+                        "'aviso_no_asistio' (21:00 MX) "
                         "y 'reportes_automaticos' (cada hora, segun hora_envio de cada config)")
 
     except ImportError:

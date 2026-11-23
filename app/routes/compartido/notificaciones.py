@@ -24,12 +24,13 @@ Endpoints (todos requieren JWT):
   PATCH /api/notificaciones/<id>/leer    — marca una como leída
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 
 from app.mongo import get_db
+from app.utils.web_push import enviar_web_push
 
 # Días de la semana en español, indexados por datetime.weekday() (lunes = 0).
 _WEEKDAYS_ES = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
@@ -282,6 +283,77 @@ def registrar_push_token():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Web Push (navegador) -- VAPID
+# ─────────────────────────────────────────────────────────────────────────────
+
+@notificaciones_bp.route("/vapid-public-key", methods=["GET"])
+@jwt_required()
+def vapid_public_key():
+    """Llave publica VAPID que el navegador necesita para suscribirse (pushManager.subscribe)."""
+    public_key = current_app.config.get("VAPID_PUBLIC_KEY")
+    if not public_key:
+        return jsonify({"error": "Push por navegador no configurado en este entorno"}), 503
+    return jsonify({"publicKey": public_key}), 200
+
+
+@notificaciones_bp.route("/web-push/subscribe", methods=["POST"])
+@jwt_required()
+def web_push_subscribe():
+    """
+    Registra (upsert por endpoint) la suscripcion PushSubscription que entrega
+    el navegador tras aceptar el permiso.
+    Body: { subscription: { endpoint, keys: { p256dh, auth } } }
+    Coleccion: push_subscriptions_web (deduplicada por endpoint -- un mismo
+    navegador puede volver a suscribirse, por ejemplo tras limpiar datos del
+    sitio, y el endpoint que entrega el servicio push cambia).
+    """
+    id_usuario = _resolver_usuario(get_jwt())
+    if id_usuario is None:
+        return jsonify({"error": "No se pudo identificar al usuario"}), 401
+
+    data = request.get_json(silent=True) or {}
+    sub  = data.get("subscription") or {}
+    endpoint = (sub.get("endpoint") or "").strip()
+    keys     = sub.get("keys") or {}
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        return jsonify({"error": "Suscripción inválida"}), 400
+
+    id_gimnasio = get_jwt().get("id_gimnasio")
+    db = get_db()
+    db.push_subscriptions_web.update_one(
+        {"endpoint": endpoint},
+        {"$set": {
+            "id_usuario_pg":  id_usuario,
+            "id_gimnasio_pg": int(id_gimnasio) if id_gimnasio else None,
+            "endpoint":       endpoint,
+            "keys":           {"p256dh": keys["p256dh"], "auth": keys["auth"]},
+            "user_agent":     (request.headers.get("User-Agent") or "")[:300],
+            "actualizado_en": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    return jsonify({"ok": True}), 200
+
+
+@notificaciones_bp.route("/web-push/subscribe", methods=["DELETE"])
+@jwt_required()
+def web_push_unsubscribe():
+    """Quita una suscripción (el usuario desactivó las notificaciones en su navegador)."""
+    id_usuario = _resolver_usuario(get_jwt())
+    if id_usuario is None:
+        return jsonify({"error": "No se pudo identificar al usuario"}), 401
+
+    data = request.get_json(silent=True) or {}
+    endpoint = (data.get("endpoint") or "").strip()
+    if not endpoint:
+        return jsonify({"error": "endpoint requerido"}), 400
+
+    db = get_db()
+    db.push_subscriptions_web.delete_one({"endpoint": endpoint, "id_usuario_pg": id_usuario})
+    return jsonify({"ok": True}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: crear notificación (para uso interno desde otros módulos)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -323,9 +395,17 @@ def crear_notificacion(
 
 def _enviar_push(db, id_usuario_pg: int, titulo: str, mensaje: str, data: dict | None = None) -> None:
     """
-    Envía una notificación push a todos los dispositivos del usuario vía Expo.
-    Silencioso ante cualquier fallo: el push es complementario a la notif. in-app.
+    Envía push a TODOS los dispositivos/navegadores del usuario:
+      - Móvil instalado -> Expo Push Service (push_tokens)
+      - Navegador (web) -> Web Push / VAPID (push_subscriptions_web)
+    Silencioso ante cualquier fallo: el push es complementario a la notif. in-app,
+    nunca debe tumbar al llamador (crear_notificacion ya se encargó de guardarla).
     """
+    _enviar_push_expo(db, id_usuario_pg, titulo, mensaje, data)
+    _enviar_push_web(db, id_usuario_pg, titulo, mensaje, data)
+
+
+def _enviar_push_expo(db, id_usuario_pg: int, titulo: str, mensaje: str, data: dict | None = None) -> None:
     try:
         tokens = [
             t["token"]
@@ -359,6 +439,31 @@ def _enviar_push(db, id_usuario_pg: int, titulo: str, mensaje: str, data: dict |
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            _urlreq.urlopen(req, timeout=5)
+            # nosec B310 - URL fija (_EXPO_PUSH_URL, https); no la define el cliente.
+            _urlreq.urlopen(req, timeout=5)  # nosec B310
     except Exception as ex:
-        print(f"[push] No-bloqueante: {ex}")
+        print(f"[push] No-bloqueante (Expo): {ex}")
+
+
+def _enviar_push_web(db, id_usuario_pg: int, titulo: str, mensaje: str, data: dict | None = None) -> None:
+    try:
+        suscripciones = list(db.push_subscriptions_web.find({"id_usuario_pg": int(id_usuario_pg)}))
+        if not suscripciones:
+            return
+
+        app = current_app._get_current_object()
+        payload = {"title": titulo, "body": mensaje, "data": data or {}}
+
+        for sub in suscripciones:
+            subscription_info = {
+                "endpoint": sub["endpoint"],
+                "keys":     sub["keys"],
+            }
+            resultado = enviar_web_push(app, subscription_info, payload)
+            if resultado == "vencida":
+                # El navegador revocó la suscripción (datos del sitio
+                # borrados, PWA desinstalada, etc.) -- limpiarla evita
+                # seguir intentando y acumular basura indefinidamente.
+                db.push_subscriptions_web.delete_one({"_id": sub["_id"]})
+    except Exception as ex:
+        print(f"[push] No-bloqueante (web): {ex}")

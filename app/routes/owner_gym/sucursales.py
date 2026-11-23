@@ -57,6 +57,7 @@ from app.utils.alcance import crear_asignacion, sucursales_de_administrador, reg
 from app.utils.capacidad import (
     verificar_capacidad_staff, verificar_capacidad_sucursal,
     estado_capacidad, estado_capacidad_organizacion, LimiteDePlanExcedido,
+    nombre_plan_vigente_de_organizacion,
 )
 from app.constants.roles import ROL_PROPIETARIO, ROL_ADMINISTRADOR
 from app.utils.credenciales_acceso import generar_password_temporal, enviar_credenciales_acceso  # SCRUM-224
@@ -196,10 +197,10 @@ def crear_sucursal():
                                   or (sede_principal.tipo_gimnasio if sede_principal else None),
         id_organizacion        = org,
         es_sucursal_principal  = False,
-        # Columna heredada: se alinea con el plan de la organización para que
-        # no nazca como "basico" (default) en una organización Pro/Enterprise.
-        plan                   = (sede_principal.organizacion.plan
-                                  if sede_principal and sede_principal.organizacion else "basico"),
+        # Columna heredada: se alinea con el plan VIGENTE de la organización
+        # (resolutor único, ver utils/capacidad.py) para que no nazca como
+        # "basico" en una organización Pro/Enterprise.
+        plan                   = nombre_plan_vigente_de_organizacion(org),
     )
     db.session.add(nueva)
     db.session.flush()  # necesita nueva.id

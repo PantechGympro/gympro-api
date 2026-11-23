@@ -5,3 +5,4 @@ from .organizacion import Organizacion
 from .gimnasio import Gimnasio
 from .usuario import Usuario
 from .asignacion_usuario import AsignacionUsuario
+from .intento_alta_gimnasio import IntentoAltaGimnasio

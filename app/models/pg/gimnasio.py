@@ -113,12 +113,20 @@ class Gimnasio(db.Model):
         contratar/cambiar de plan, así que todo lo que la serializaba (listado
         y detalle del superadmin, perfil del propietario, app móvil) mostraba
         "Básico" mientras la suscripción y los permisos eran "Enterprise".
-        Se cae a la columna solo si el gimnasio aún no tiene organización
-        cargada.
+        Se resuelve con utils/capacidad.nombre_plan_vigente(), el punto único
+        que lee la SUSCRIPCIÓN vigente -- `Organizacion.plan` también es una
+        copia que se queda vieja, así que leerla aquí reproducía el mismo bug
+        un nivel más abajo. Si no hay suscripción, ese resolutor ya cae a
+        Organizacion.plan y, en última instancia, al plan gratuito.
+
+        Import local a propósito: utils/capacidad importa este modelo, y al
+        nivel del módulo el ciclo rompe el arranque.
         """
-        org = self.organizacion
-        plan = org.plan if org is not None else self.plan
-        return plan.value if hasattr(plan, "value") else plan
+        from app.utils.capacidad import nombre_plan_vigente
+        if self.id is None:                      # instancia aún sin persistir
+            plan = (self.organizacion.plan if self.organizacion is not None else self.plan)
+            return plan.value if hasattr(plan, "value") else plan
+        return nombre_plan_vigente(self.id)
 
     @property
     def baja(self) -> dict | None:

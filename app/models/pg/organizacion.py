@@ -55,6 +55,13 @@ class Organizacion(db.Model):
     # los topes de miembros/staff/sucursales de todas sus sucursales.
     plan = db.Column(_plan_enum_type, default="basico", nullable=False, server_default="basico")
 
+    # Cuándo esta organización estrenó su periodo de prueba gratuito.
+    # None = nunca lo ha usado. NO se limpia nunca: es lo que impide que
+    # alguien encadene pruebas dando de baja la cuenta y volviéndola a crear.
+    # Vive en la Organizacion y no en la Suscripcion a propósito -- una
+    # suscripción se cancela y se vuelve a crear, la organización permanece.
+    prueba_usada_en = db.Column(db.DateTime(timezone=True), nullable=True)
+
     # Relación inversa: organizacion.gimnasios → sucursales de esta organización
     gimnasios = db.relationship("Gimnasio", back_populates="organizacion", lazy="dynamic")
 
@@ -67,5 +74,6 @@ class Organizacion(db.Model):
             "nombre":     self.nombre,
             "plan":       self.plan.value if hasattr(self.plan, "value") else self.plan,
             "activo":     self.activo,
+            "prueba_usada_en": self.prueba_usada_en.isoformat() if self.prueba_usada_en else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
