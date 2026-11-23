@@ -50,6 +50,7 @@ cryptography>=42.0.0
 # ── Sprint 4 ──────────────────────────────────────────────────────────────────
 reportlab>=4.2.0          # Generacion de PDFs (US18)
 apscheduler>=3.10.0       # Scheduler de notificaciones (US21)
+pywebpush>=2.0.0          # Push al navegador (Web Push / VAPID)
 
 # ── Módulo Nutrición + AI ETL (Ollama — LLM local, sin API externa) ─────────
 pdfplumber>=0.11.0        # Extracción de texto desde PDFs para AI ETL
