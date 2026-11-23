@@ -53,6 +53,17 @@ class Suscripcion(db.Model):
     fecha_fin               = db.Column(db.DateTime(timezone=True), nullable=True)     # None = sin vencimiento fijo
     fecha_proximo_cobro     = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Fin del periodo de prueba gratuito. None = esta suscripción no es una
+    # prueba (o es anterior a la migración 040).
+    #
+    # Es una columna propia y no `fecha_proximo_cobro` reutilizada porque las
+    # dos responden preguntas distintas: "hasta cuándo es gratis" no es lo
+    # mismo que "cuándo toca el siguiente cargo", y confundirlas es lo que
+    # dejaba pruebas abiertas para siempre. Además sobrevive a la conversión
+    # a plan de pago, así que queda el registro de que esta suscripción nació
+    # de una prueba.
+    prueba_fin              = db.Column(db.DateTime(timezone=True), nullable=True, index=True)
+
     # Stripe (nullable mientras se trabaja en local)
     stripe_subscription_id  = db.Column(db.String(100), nullable=True, unique=True)
 
@@ -92,7 +103,45 @@ class Suscripcion(db.Model):
 
     @property
     def activa(self) -> bool:
-        return self.estado in ("trialing", "active")
+        """
+        Vigente para efectos de servicio. Una prueba VENCIDA no lo está,
+        aunque el estado siga diciendo "trialing": que el trabajo nocturno
+        todavía no la haya marcado no significa que siga siendo gratis.
+        Ésa era la puerta abierta -- `trialing` contaba como vigente sin que
+        nada mirara la fecha, así que quien se registraba eligiendo Enterprise
+        se quedaba con Enterprise gratis indefinidamente.
+        """
+        if self.estado not in ("trialing", "active"):
+            return False
+        return not self.prueba_vencida
+
+    @property
+    def en_prueba(self) -> bool:
+        """True si hoy está dentro de un periodo de prueba gratuito."""
+        return (self.estado == "trialing"
+                and self.prueba_fin is not None
+                and not self.prueba_vencida)
+
+    @property
+    def prueba_vencida(self) -> bool:
+        """True solo si ES una prueba y su fecha ya pasó."""
+        if self.estado != "trialing" or self.prueba_fin is None:
+            return False
+        fin = self.prueba_fin
+        if fin.tzinfo is None:          # SQLite devuelve datetimes sin zona
+            fin = fin.replace(tzinfo=timezone.utc)
+        return fin <= datetime.now(timezone.utc)
+
+    @property
+    def dias_restantes_prueba(self) -> int | None:
+        """Días completos que le quedan a la prueba, o None si no está en una."""
+        if not self.en_prueba:
+            return None
+        fin = self.prueba_fin
+        if fin.tzinfo is None:
+            fin = fin.replace(tzinfo=timezone.utc)
+        restantes = (fin - datetime.now(timezone.utc)).total_seconds() / 86400
+        return max(0, int(-(-restantes // 1)))   # redondeo hacia arriba
 
     @property
     def cobro_automatico(self) -> bool:
@@ -113,6 +162,10 @@ class Suscripcion(db.Model):
             "plan":                   self.plan.to_dict() if self.plan else None,
             "ciclo_facturacion":      self.ciclo_facturacion,
             "estado":                 self.estado if isinstance(self.estado, str) else self.estado.value,
+            "prueba_fin":             self.prueba_fin.isoformat() if self.prueba_fin else None,
+            "en_prueba":              self.en_prueba,
+            "prueba_vencida":         self.prueba_vencida,
+            "dias_restantes_prueba":  self.dias_restantes_prueba,
             "activa":                 self.activa,
             "fecha_inicio":           self.fecha_inicio.isoformat() if self.fecha_inicio else None,
             "fecha_fin":              self.fecha_fin.isoformat() if self.fecha_fin else None,

@@ -64,6 +64,7 @@ from app.models.pg.complemento_capacidad import ComplementoCapacidad
 from app.models.pg.usuario import Usuario
 from app.models.pg.rol import Rol
 from app.constants.roles import ROL_ENTRENADOR, ROL_RECEPCIONISTA, ROL_ADMINISTRADOR
+from app.constants.planes import PLAN_GRATUITO
 
 
 class LimiteDePlanExcedido(Exception):
@@ -86,30 +87,65 @@ def _nombre_plan(valor):
     return valor.value if hasattr(valor, "value") else valor
 
 
+def _suscripciones_candidatas(id_organizacion):
+    """
+    Suscripciones de la organización en estado trialing/active, ordenadas por
+    prioridad: primero la de la sucursal PRINCIPAL (es la que contrata), luego
+    la más reciente de cualquier otra.
+
+    Se devuelven todas y se filtra en Python en vez de poner la condición de
+    "prueba no vencida" en el SQL: SQLite guarda los datetime sin zona horaria
+    y la comparación contra un `now` con zona da resultados equivocados según
+    el motor. La propiedad Suscripcion.prueba_vencida ya resuelve esa
+    diferencia en un solo lugar, y aquí hablamos de unas pocas filas por
+    organización (una por sucursal), no de un recorrido costoso.
+    """
+    sedes = (Gimnasio.query
+             .filter_by(id_organizacion=id_organizacion)
+             .order_by(Gimnasio.es_sucursal_principal.desc(), Gimnasio.id)
+             .all())
+    if not sedes:
+        return []
+    orden = {s.id: i for i, s in enumerate(sedes)}
+    subs = (Suscripcion.query
+            .filter(Suscripcion.id_gimnasio.in_([s.id for s in sedes]),
+                    Suscripcion.estado.in_(_ESTADOS_SUSCRIPCION_VIGENTE))
+            .all())
+    return sorted(subs, key=lambda sub: (orden.get(sub.id_gimnasio, 99),
+                                         -(sub.created_at.timestamp() if sub.created_at else 0)))
+
+
 def _plan_de_suscripcion(id_organizacion):
     """
-    Plan de la suscripción vigente (trialing/active) de la sede principal de
-    la organización, o None si no hay.
+    (plan_vigente, hubo_prueba_vencida) de la organización.
 
-    Bug real (demo con Enterprise "bloqueado"): Organizacion.plan es una
-    COPIA del plan contratado y varios caminos de alta (seed_pg, el webhook
-    de Stripe) la dejaban en el default "basico" mientras la Suscripcion sí
-    apuntaba a Enterprise -- la UI de facturación mostraba Enterprise pero
-    los candados leían "basico". La suscripción vigente es lo que se cobra,
-    así que manda; Organizacion.plan queda como respaldo cuando no hay una.
+    `plan_vigente` es el plan de la suscripción que hoy da servicio, o None.
+    `hubo_prueba_vencida` dice que SÍ había una suscripción pero era una
+    prueba gratuita que ya terminó -- quien llama lo necesita para no caer en
+    la copia `Organizacion.plan`, que seguiría diciendo "pro" y regalaría el
+    plan de pago despues de que la prueba acabó.
+
+    Bug original (demo con Enterprise "bloqueado"): Organizacion.plan es una
+    COPIA del plan contratado y varios caminos de alta la dejaban en "basico"
+    mientras la Suscripcion apuntaba a Enterprise. La suscripción vigente es
+    lo que se cobra, así que manda.
+
+    Segunda vuelta: antes solo se miraba la suscripción de la sucursal
+    PRINCIPAL, así que una organización con la suscripción colgada de otra
+    sucursal volvía a caer en la copia vieja. Ahora se buscan todas.
+
+    Si hubiera varias vigentes se toma la de mayor prioridad y no "la mejor":
+    una organización con dos suscripciones activas es un estado roto de
+    facturación que hay que arreglar en los datos, no una elección que este
+    resolutor deba disimular eligiendo la más generosa.
     """
-    sede = (Gimnasio.query
-            .filter_by(id_organizacion=id_organizacion, es_sucursal_principal=True)
-            .order_by(Gimnasio.id).first()
-            or Gimnasio.query.filter_by(id_organizacion=id_organizacion)
-            .order_by(Gimnasio.id).first())
-    if sede is None:
-        return None
-    sub = (Suscripcion.query
-           .filter(Suscripcion.id_gimnasio == sede.id,
-                   Suscripcion.estado.in_(_ESTADOS_SUSCRIPCION_VIGENTE))
-           .order_by(Suscripcion.created_at.desc()).first())
-    return sub.plan if sub is not None else None
+    hubo_prueba_vencida = False
+    for sub in _suscripciones_candidatas(id_organizacion):
+        if sub.prueba_vencida:
+            hubo_prueba_vencida = True
+            continue
+        return sub.plan, hubo_prueba_vencida
+    return None, hubo_prueba_vencida
 
 
 def _plan_de_organizacion(id_organizacion):
@@ -126,8 +162,15 @@ def _plan_de_organizacion(id_organizacion):
     org = Organizacion.query.get(id_organizacion)
     plan = None
     if org is not None:
-        plan = (_plan_de_suscripcion(id_organizacion)
-                or PlanSuscripcion.query.filter_by(nombre=_nombre_plan(org.plan)).first())
+        plan, hubo_prueba_vencida = _plan_de_suscripcion(id_organizacion)
+        if plan is None:
+            # Una prueba que terminó NO deja al gimnasio con el plan de pago
+            # que estaba probando: cae al gratuito. Leer Organizacion.plan
+            # aquí regalaría Pro o Enterprise para siempre, porque esa copia
+            # se quedó con el plan de la prueba. Esto hace que la prueba
+            # termine sola, sin depender de que corra el trabajo nocturno.
+            nombre = PLAN_GRATUITO if hubo_prueba_vencida else _nombre_plan(org.plan)
+            plan = PlanSuscripcion.query.filter_by(nombre=nombre).first()
     if cache is not None:
         cache[id_organizacion] = plan
     return plan
@@ -144,6 +187,64 @@ def _plan_de(id_gimnasio):
     if gym is None or gym.organizacion is None:
         return None
     return _plan_de_organizacion(gym.organizacion.id)
+
+
+# ── Resolutor público del plan vigente ───────────────────────────────────────
+# Punto ÚNICO para "¿qué plan rige a este gimnasio/organización?". Existe
+# porque la pregunta se respondía copiada en media docena de archivos leyendo
+# `Organizacion.plan` a mano (login, impersonación, onboarding, alta de
+# sucursal, reporte ejecutivo, Gimnasio.plan_vigente) -- y esa columna es una
+# COPIA que se queda vieja. El resultado era el bug recurrente del "Enterprise
+# bloqueado": los candados decían una cosa y la factura otra.
+#
+# Regla: manda la SUSCRIPCIÓN vigente; `Organizacion.plan` solo se usa como
+# respaldo cuando no hay ninguna. Nadie debería volver a leer esa columna
+# para decidir permisos -- si hace falta el nombre del plan, se pide aquí.
+
+PLAN_POR_DEFECTO = PLAN_GRATUITO
+
+
+def plan_vigente_de(id_gimnasio):
+    """PlanSuscripcion que rige a `id_gimnasio`, o None si no se puede resolver."""
+    return _plan_de(id_gimnasio)
+
+
+def plan_de_suscripcion_vigente(id_organizacion):
+    """
+    Plan de la suscripción vigente de la organización, SIN respaldo: None si
+    no hay ninguna (o si la única que había era una prueba que ya terminó).
+    Lo usa quien necesita distinguir "no tiene nada contratado" de "tiene el
+    plan que diga la copia" -- por ejemplo los scripts de configuración, que
+    deben avisar en vez de dar por buena una copia.
+    """
+    plan, _ = _plan_de_suscripcion(id_organizacion)
+    return plan
+
+
+def plan_vigente_de_organizacion(id_organizacion):
+    """PlanSuscripcion que rige a `id_organizacion`, o None."""
+    return _plan_de_organizacion(id_organizacion)
+
+
+def nombre_plan_vigente(id_gimnasio, *, default=PLAN_POR_DEFECTO):
+    """
+    Nombre del plan vigente de `id_gimnasio`, listo para un claim de JWT o
+    para mostrarse. Si no se puede resolver devuelve `default`.
+
+    El default es el plan GRATUITO, no "basico": cuando no se sabe qué se
+    contrató, lo correcto es asumir lo mínimo y no regalar funciones de un
+    plan de pago. (El gateo real no depende de esto -- lo hace
+    permite_funcion() contra el plan resuelto -- pero el claim viaja al
+    frontend y a los reportes, y no debe prometer de más.)
+    """
+    plan = _plan_de(id_gimnasio)
+    return plan.nombre if plan is not None else default
+
+
+def nombre_plan_vigente_de_organizacion(id_organizacion, *, default=PLAN_POR_DEFECTO):
+    """Igual que nombre_plan_vigente() pero partiendo de la organización."""
+    plan = _plan_de_organizacion(id_organizacion)
+    return plan.nombre if plan is not None else default
 
 
 def sincronizar_plan_organizacion(id_gimnasio, nombre_plan):

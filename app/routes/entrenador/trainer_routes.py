@@ -15,6 +15,7 @@ from app.utils.busqueda import normalizar_columna, patron_insensible
 from app.utils.object_storage import subir_base64
 from app.utils.chat_moderacion import verificar_acceso_chat
 from app.routes.compartido.notificaciones import crear_notificacion
+from app.utils.avisos_citas import notificar_cita
 
 trainer_bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
 
@@ -799,11 +800,12 @@ def create_session():
                 return jsonify({"error": f"Campo requerido: {field}"}), 400
 
         fecha_dt = datetime.strptime(data['fecha'], '%Y-%m-%d')
+        id_miembro = ObjectId(data['id_miembro']) if data.get('id_miembro') else None
 
         nueva = {
             "id_entrenador_pg": trainer_id,
             "id_gimnasio_pg":   gym_id,
-            "id_miembro":       ObjectId(data['id_miembro']) if data.get('id_miembro') else None,
+            "id_miembro":       id_miembro,
             "fecha":            fecha_dt,
             "hora_inicio":      data['hora_inicio'],
             "duracion_minutos": int(data.get('duracion_minutos', 60)),
@@ -817,12 +819,73 @@ def create_session():
             "fecha_creacion":   datetime.now()
         }
 
-        result = mdb.sesiones.insert_one(nueva)
-        return jsonify({"message": "Sesión creada", "id_sesion": str(result.inserted_id)}), 201
+        result     = mdb.sesiones.insert_one(nueva)
+        session_id = result.inserted_id
+
+        # ── Reflejar la sesión como "cita" visible para el miembro ──────────
+        # Antes de esto, una sesión que el ENTRENADOR agendaba directamente
+        # con su cliente solo existía en `sesiones` (su propia agenda interna,
+        # con notas/ejercicios/asistencia). El miembro nunca se enteraba: no
+        # aparecía en "Mis Citas" (que solo lee `citas`, la colección que
+        # llena recepción) y no disparaba ninguna notificación ni push.
+        # Se agrega aquí, sin tocar `sesiones`, para que ambas vistas (la
+        # agenda interna del entrenador y "Mis Citas" del miembro) queden
+        # sincronizadas desde el origen.
+        miembro_doc = mdb.miembros.find_one(
+            {"_id": id_miembro}, {"nombre": 1, "email": 1, "id_usuario_pg": 1},
+        ) if id_miembro else None
+        trainer_pg = Usuario.query.get(trainer_id)
+
+        if miembro_doc and miembro_doc.get("id_usuario_pg"):
+            tipo       = data.get('tipo', 'Personal')
+            client_name  = miembro_doc.get("nombre", "Cliente")
+            trainer_name = trainer_pg.nombre if trainer_pg else "Tu entrenador"
+            fecha_fmt    = fecha_dt.strftime("%d/%m/%Y")
+            hora_fmt     = data['hora_inicio']
+
+            cita_doc = {
+                "id_gimnasio_pg": gym_id,
+                "date":           data['fecha'],
+                "time":           hora_fmt,
+                "client":         client_name,
+                "client_id_pg":   miembro_doc["id_usuario_pg"],
+                "type":           tipo,
+                "trainer":        trainer_name,
+                "trainer_id_pg":  trainer_id,
+                "notes":          (data.get('notas') or "").strip()[:500],
+                "status":         "pendiente",
+                "id_sesion":      session_id,
+                "creado_en":      datetime.now(timezone.utc),
+            }
+            cita_result = mdb.citas.insert_one(cita_doc)
+            mdb.sesiones.update_one(
+                {"_id": session_id}, {"$set": {"id_cita": cita_result.inserted_id}},
+            )
+
+            notificar_cita(
+                mdb, gym_id=gym_id, cita_id=str(cita_result.inserted_id),
+                fecha_fmt=fecha_fmt, hora_fmt=hora_fmt, tipo=tipo,
+                notas=cita_doc["notes"], client_name=client_name,
+                trainer_name=trainer_name, miembro_doc=miembro_doc,
+                trainer_pg=trainer_pg,
+                avisar_entrenador=False,  # el entrenador acaba de crearla él mismo
+            )
+
+        return jsonify({"message": "Sesión creada", "id_sesion": str(session_id)}), 201
 
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+# Mapa de estados: `sesiones` (agenda interna del entrenador, en inglés,
+# viene de antes) -> `citas` (vista compartida con el miembro, en español).
+_ESTADO_SESION_A_CITA = {
+    'scheduled':   'pendiente',
+    'in-progress': 'pendiente',
+    'completed':   'completada',
+    'cancelled':   'cancelada',
+}
 
 
 @trainer_bp.route('/sessions/<session_id>/status', methods=['PATCH'])
@@ -843,13 +906,34 @@ def update_session_status(session_id):
         if new_status == 'completed':
             update_data["asistencia"] = True
 
-        result = mdb.sesiones.update_one(
-            {"_id": ObjectId(session_id), "id_entrenador_pg": trainer_id},
-            {"$set": update_data}
-        )
-
-        if result.matched_count == 0:
+        sesion = mdb.sesiones.find_one({"_id": ObjectId(session_id), "id_entrenador_pg": trainer_id})
+        if sesion is None:
             return jsonify({"error": "Sesión no encontrada"}), 404
+
+        mdb.sesiones.update_one({"_id": sesion["_id"]}, {"$set": update_data})
+
+        # Mantener sincronizada la cita que ve el miembro (si esta sesión
+        # generó una, ver create_session). Sin esto, cancelar o completar la
+        # sesión desde la agenda del entrenador dejaría "Mis Citas" del
+        # miembro mostrando "Pendiente" para siempre.
+        if sesion.get("id_cita"):
+            mdb.citas.update_one(
+                {"_id": sesion["id_cita"]},
+                {"$set": {"status": _ESTADO_SESION_A_CITA[new_status],
+                          "actualizado_en": datetime.now(timezone.utc)}},
+            )
+            if new_status == 'cancelled' and sesion.get("id_miembro"):
+                miembro_doc = mdb.miembros.find_one(
+                    {"_id": sesion["id_miembro"]}, {"id_usuario_pg": 1},
+                )
+                if miembro_doc and miembro_doc.get("id_usuario_pg"):
+                    crear_notificacion(
+                        db=mdb, id_usuario_pg=miembro_doc["id_usuario_pg"],
+                        id_gimnasio_pg=g.tenant_id, tipo="cita_cancelada",
+                        titulo="Cita cancelada",
+                        mensaje="Tu entrenador canceló una cita agendada contigo.",
+                        referencia_tipo="cita", referencia_id=str(sesion["id_cita"]),
+                    )
 
         return jsonify({"message": f"Estado actualizado a {new_status}"}), 200
 

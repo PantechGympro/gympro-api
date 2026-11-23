@@ -26,6 +26,7 @@ from bson import ObjectId
 
 from app.mongo import get_db
 from app.routes.compartido.notificaciones import crear_notificacion
+from app.utils.avisos_citas import notificar_cita
 from app.utils.tenant import require_tenant
 from app.utils.checkin_qr import emitir_token
 from app.constants.roles import ROL_PROPIETARIO, ROL_SUPERADMIN, ROL_RECEPCIONISTA, normalizar_rol
@@ -734,38 +735,14 @@ def create_cita():
         fecha_fmt = data["date"]
     hora_fmt = data["time"]
 
-    # ── Notificaciones in-app ────────────────────────────────────────────────
-    if miembro_doc and miembro_doc.get("id_usuario_pg"):
-        crear_notificacion(
-            db=db,
-            id_usuario_pg=miembro_doc["id_usuario_pg"],
-            id_gimnasio_pg=gym_id,
-            tipo="cita_nueva",
-            titulo="Nueva cita agendada",
-            mensaje=(
-                f"Se agendó una cita para el {fecha_fmt} a las {hora_fmt}. "
-                f"Tipo: {data['type']}."
-                + (f" Responsable: {trainer_name}." if trainer_pg else "")
-            ),
-            referencia_tipo="cita",
-            referencia_id=cita_id_str,
-        )
-
-    if trainer_pg:
-        crear_notificacion(
-            db=db,
-            id_usuario_pg=trainer_pg.id,
-            id_gimnasio_pg=gym_id,
-            tipo="cita_nueva",
-            titulo="Nueva cita asignada",
-            mensaje=(
-                f"Se te asignó una cita con {client_name} "
-                f"el {fecha_fmt} a las {hora_fmt}. "
-                f"Tipo: {data['type']}."
-            ),
-            referencia_tipo="cita",
-            referencia_id=cita_id_str,
-        )
+    # ── Avisos al miembro y al entrenador (in-app + push + email) ───────────
+    notificar_cita(
+        db, gym_id=gym_id, cita_id=cita_id_str,
+        fecha_fmt=fecha_fmt, hora_fmt=hora_fmt, tipo=data["type"],
+        notas=data.get("notes") or "",
+        client_name=client_name, trainer_name=trainer_name,
+        miembro_doc=miembro_doc, trainer_pg=trainer_pg,
+    )
 
     # ── Notificación de confirmación para el recepcionista ─────────────────
     rec_id = get_jwt().get("id")
@@ -784,76 +761,6 @@ def create_cita():
             referencia_tipo="cita",
             referencia_id=cita_id_str,
         )
-
-    # ── Emails ───────────────────────────────────────────────────────────────
-    try:
-        from flask_mail import Message
-        from app.extensions import mail
-        from app.utils.email_remitentes import remitente
-
-        notas_html = f"<p style='color:#9AA4B8;font-size:13px;'><em>{data.get('notes','')}</em></p>" if data.get("notes") else ""
-
-        def _base_email(titulo, saludo, cuerpo_html):
-            return f"""
-            <div style="font-family:sans-serif;max-width:580px;margin:0 auto;
-                        background:#0f1117;color:#F3F5F9;padding:32px;border-radius:14px;
-                        border:1px solid rgba(255,255,255,.08);">
-              <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
-                <div style="width:36px;height:36px;border-radius:8px;background:#3377FF;
-                            display:flex;align-items:center;justify-content:center;
-                            font-weight:800;font-size:16px;color:#fff;">G</div>
-                <span style="font-weight:800;font-size:18px;letter-spacing:.5px;">GYM PRO</span>
-              </div>
-              <h2 style="color:#3377FF;margin:0 0 8px;">{titulo}</h2>
-              <p style="margin:0 0 20px;color:#9AA4B8;">Hola <strong style="color:#F3F5F9;">{saludo}</strong>,</p>
-              {cuerpo_html}
-              <div style="margin-top:28px;padding:16px;background:#121520;border-radius:10px;
-                          border:1px solid rgba(255,255,255,.07);">
-                <p style="margin:0 0 6px;font-size:13px;color:#9AA4B8;">📅 Fecha</p>
-                <p style="margin:0 0 12px;font-weight:700;font-size:15px;">{fecha_fmt}</p>
-                <p style="margin:0 0 6px;font-size:13px;color:#9AA4B8;">🕐 Hora</p>
-                <p style="margin:0 0 12px;font-weight:700;font-size:15px;">{hora_fmt}</p>
-                <p style="margin:0 0 6px;font-size:13px;color:#9AA4B8;">📋 Tipo</p>
-                <p style="margin:0;font-weight:700;font-size:15px;">{data['type']}</p>
-              </div>
-              {notas_html}
-              <p style="margin-top:28px;font-size:11px;color:#555;">
-                GymPro — Este mensaje es automático, por favor no respondas.
-              </p>
-            </div>"""
-
-        # Email al miembro
-        if miembro_doc and miembro_doc.get("email") and "@" in miembro_doc["email"]:
-            cuerpo_miembro = f"""
-            <p>Tu cita ha sido agendada exitosamente.</p>
-            {'<p style="color:#9AA4B8;">Tu cita será atendida por <strong style="color:#F3F5F9;">' + trainer_name + '</strong>.</p>' if trainer_pg else ''}
-            """
-            msg_miembro = Message(
-                subject=f"GymPro — Cita agendada para el {fecha_fmt}",
-                sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
-                recipients=[miembro_doc["email"]],
-                html=_base_email("Cita confirmada", miembro_doc.get("nombre", client_name), cuerpo_miembro),
-            )
-            mail.send(msg_miembro)
-
-        # Email al entrenador
-        if trainer_pg and trainer_pg.email:
-            cuerpo_trainer = f"""
-            <p>Se te ha asignado una nueva cita.</p>
-            <p style="color:#9AA4B8;">Cliente: <strong style="color:#F3F5F9;">{client_name}</strong></p>
-            """
-            msg_trainer = Message(
-                subject=f"GymPro — Nueva cita asignada: {client_name} el {fecha_fmt}",
-                sender=remitente("MAIL_SENDER_NOTIFICACIONES"),
-                recipients=[trainer_pg.email],
-                html=_base_email("Nueva cita asignada", trainer_pg.nombre, cuerpo_trainer),
-            )
-            mail.send(msg_trainer)
-
-    except Exception as mail_err:
-        # Los emails son best-effort — no fallan la creación de la cita
-        import logging
-        logging.getLogger(__name__).warning("Email de cita no enviado: %s", mail_err)
 
     return jsonify({"message": "Cita creada", "cita": _serialize(doc)}), 201
 

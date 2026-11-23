@@ -9,6 +9,7 @@ Relación: PlanSuscripcion 1─N Suscripcion
 """
 from datetime import datetime, timezone
 from app.constants.catalogo_funciones import funciones_por_rol
+from app.constants.planes import DIAS_PRUEBA
 from app.extensions import db
 
 
@@ -86,6 +87,11 @@ class PlanSuscripcion(db.Model):
             "orden":                self.orden,
             "destacado":            self.destacado,
             "precio_mxn":           round((self.precio_mensual_mxn or 0) / 100, 2),
+            # Días de prueba que ofrece este plan. 0 en el gratuito: no hay
+            # nada que probar. Viaja desde aquí para que la web y la app no
+            # repitan el número -- cuando cambie, cambia en un solo lugar
+            # (constants/planes.py) y todas las pantallas lo siguen.
+            "dias_prueba":          DIAS_PRUEBA if (self.precio_mensual_mxn or 0) > 0 else 0,
             # Todo lo que incluye / no incluye el plan, rol por rol (ver constants/catalogo_funciones.py)
             "funciones_por_rol":    funciones_por_rol(self),
         }

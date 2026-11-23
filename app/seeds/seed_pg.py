@@ -477,15 +477,23 @@ def seed_pg_base():
     # anual en NULL hasta que corra esa migracion sobre una fila ya existente.
     PLANES_SAAS = [
         {
-            "nombre": "starter", "precio_mensual_mxn": 0, "precio_anual_mxn": 0, "max_miembros": 30,
+            # El Starter es una VITRINA, no un sistema gratuito permanente: su
+            # trabajo es que un gimnasio pruebe GymPro de verdad y vea por que
+            # conviene pagar, no que un gimnasio chico se quede ahi para siempre.
+            # Por eso (nov/2026) baja de 30 a 20 miembros y deja de incluir la app
+            # movil, que es el gancho principal de la oferta y pasa a empezar en
+            # Basico. El check-in manual desde la web NO esta gateado, asi que un
+            # gimnasio en Starter sigue pudiendo operar la puerta.
+            "nombre": "starter", "precio_mensual_mxn": 0, "precio_anual_mxn": 0, "max_miembros": 20,
             "descripcion": "Plan gratuito para probar GymPro con un grupo pequeño de miembros.",
             "titulo_comercial": "Para arrancar sin costo", "orden": 0, "destacado": False,
             "caracteristicas": [
-                "Hasta 30 miembros activos",
-                "App movil para tus miembros con check-in por QR",
-                "Registro de asistencias y pagos",
+                "Hasta 20 miembros activos",
+                "Registro de asistencias y pagos desde la web",
+                "Control de entrada manual en recepcion",
                 "1 usuario administrador",
                 "Soporte por correo electronico",
+                "La app movil para tus miembros se incluye desde el plan Basico",
             ],
             # SCRUM-224: "rutinas_ia" (importación de rutinas con IA desde PDF)
             # faltaba en este seed de desarrollo -- ya existía en la migración
@@ -493,7 +501,7 @@ def seed_pg_base():
             # re-INSERT de planes_suscripcion, así que lo que no esté aquí
             # desaparece en cualquier entorno local sembrado con este script.
             "limites": {"pos": False, "pasarelas_pago": False, "analiticas_ia": False,
-                        "rutinas_ia": False, "reportes_pdf": False, "app_movil": True,
+                        "rutinas_ia": False, "reportes_pdf": False, "app_movil": False,
                         "max_staff": 1, "max_sucursales": 1},
         },
         {

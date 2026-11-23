@@ -389,10 +389,11 @@ def _construir_reporte_pdf(gym, desde, hasta, etiqueta, secciones, comparar, con
         tipo_txt = GYM_TYPES.get(gym.tipo_gimnasio or "", {}).get("label", "")
     except Exception:
         tipo_txt = ""
-    # SCRUM-223: el plan que se imprime en el reporte es el de la
-    # organización (lo que realmente contrató y paga), no Gimnasio.plan.
-    _org_plan = gym.organizacion.plan if gym.organizacion else gym.plan
-    plan_txt = _org_plan.value if hasattr(_org_plan, "value") else str(_org_plan or "")
+    # El plan que se imprime en el reporte es el VIGENTE (lo que realmente
+    # se cobra hoy), resuelto por utils/capacidad.py -- no la copia en
+    # Organizacion.plan ni la columna heredada Gimnasio.plan.
+    from app.utils.capacidad import nombre_plan_vigente
+    plan_txt = nombre_plan_vigente(gym.id)
 
     story += ep.portada(
         titulo=gym.nombre or "Gimnasio",

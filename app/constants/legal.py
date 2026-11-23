@@ -11,7 +11,7 @@ el portal pediria aceptar una version que el servidor no reconoce (o al
 contrario, no la pediria nunca).
 """
 
-VERSION_AVISO = "2.0"
+VERSION_AVISO = "2.1"
 VERSION_TERMINOS = "1.0"
 
 # Dias que median entre que el propietario confirma la eliminacion de su cuenta

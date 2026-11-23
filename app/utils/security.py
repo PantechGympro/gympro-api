@@ -137,6 +137,59 @@ def require_funcion_plan(nombre_funcion: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# App móvil: identificar al cliente y hacer valer la bandera de plan
+# ─────────────────────────────────────────────────────────────────────────────
+from flask import request as _request   # el módulo lo reimporta más abajo; aquí explícito
+
+CABECERA_CLIENTE = "X-GymPro-Client"
+CLIENTE_MOVIL = "movil"
+
+
+def es_cliente_movil() -> bool:
+    """
+    True si la petición viene de la app móvil, que se identifica con la
+    cabecera `X-GymPro-Client: movil` (ver gympro-mobile/services/api.ts).
+
+    Por qué una cabecera propia y no el User-Agent: el UA de una app Expo no
+    es estable entre versiones ni entre Android/iOS, y cualquier cambio de
+    runtime lo altera. Una cabecera que ponemos nosotros es explícita y no se
+    rompe sola.
+
+    Esto NO es un control de seguridad -- quien quiera puede omitir la
+    cabecera desde un cliente propio. Es el interruptor de una función
+    comercial ("tu plan incluye app móvil"), y se comporta de forma segura
+    para el usuario: si la cabecera falta, NO se bloquea. Una app instalada
+    de una versión anterior sigue funcionando hasta que se actualice, en vez
+    de dejar a alguien fuera por algo que no eligió.
+    """
+    return (_request.headers.get(CABECERA_CLIENTE) or "").strip().lower() == CLIENTE_MOVIL
+
+
+def bloqueo_app_movil(id_gimnasio, rol: str | None = None):
+    """
+    Respuesta 402 si la petición viene de la app móvil y el plan del gimnasio
+    no incluye `app_movil`; None si puede continuar.
+
+    Se aplica en el login, que es la puerta: bloquear endpoint por endpoint
+    dejaría entrar a una app que después falla a pedazos, y eso se lee como
+    que el sistema está roto, no como que el plan no lo incluye.
+    """
+    if normalizar_rol(rol or "") == ROL_SUPERADMIN:
+        return None
+    if not es_cliente_movil():
+        return None
+    if permite_funcion(id_gimnasio, "app_movil"):
+        return None
+    return jsonify({
+        "msg": ("La app móvil no está incluida en el plan de tu gimnasio. "
+                "Puedes entrar desde la versión web con esta misma cuenta, o "
+                "pedirle al propietario que mejore el plan."),
+        "funcion_requerida": "app_movil",
+        "upgrade_requerido": True,
+    }), 402
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SCRUM-213 (HU-42) — @requiere(): alcance real sobre AsignacionUsuario
 # ─────────────────────────────────────────────────────────────────────────────
 from flask import request, g, current_app
