@@ -439,7 +439,8 @@ def _enviar_push_expo(db, id_usuario_pg: int, titulo: str, mensaje: str, data: d
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            _urlreq.urlopen(req, timeout=5)
+            # nosec B310 - URL fija (_EXPO_PUSH_URL, https); no la define el cliente.
+            _urlreq.urlopen(req, timeout=5)  # nosec B310
     except Exception as ex:
         print(f"[push] No-bloqueante (Expo): {ex}")
 
