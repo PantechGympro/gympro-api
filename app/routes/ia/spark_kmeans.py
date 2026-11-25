@@ -211,7 +211,7 @@ def _build_payload(k, max_iter, resumen, asignaciones, centroides, silhouette) -
     ]
     return {
         "algoritmo":        "K-Means",
-        "descripcion":      f"Clustering de miembros en {k} grupos por composición corporal",
+        "descripcion":      f"Agrupación de miembros en {k} grupos por composición corporal",
         "parametros":       {"k": k, "max_iter": max_iter},
         "silhouette":       silhouette,
         "centroides":       centroides,
